@@ -176,9 +176,11 @@ impl BatchIterator for ParquetScanPartition {
 }
 
 macro_rules! read_binary_column {
-    ($SELF:ident, $R:ident, $INDEX:expr) => {{
-        let mut read_buffer: Vec<ByteArray> =
-            vec![ByteArray::default(); $SELF.batch_size];
+    ($SELF:ident, $R:ident, $INDEX:expr, $IS_NULLABLE: ident) => {{
+    let mut read_buffer: Vec<ByteArray> =
+        vec![ByteArray::default(); $SELF.batch_size];
+
+    if $IS_NULLABLE {
         let mut def_levels: Vec<i16> = vec![0; $SELF.batch_size];
         let (_, levels_read) = $R.read_batch(
             $SELF.batch_size,
@@ -186,6 +188,7 @@ macro_rules! read_binary_column {
             None,
             &mut read_buffer,
         )?;
+
         let mut builder = StringBuilder::new(levels_read);
         let mut value_index = 0;
         for i in 0..levels_read {
@@ -199,6 +202,23 @@ macro_rules! read_binary_column {
             }
         }
         Arc::new(builder.finish())
+    } else {
+        let (values_read, levels_read) =
+            $R.read_batch($SELF.batch_size, None, None, &mut read_buffer)?;
+
+        let mut builder = StringBuilder::new(values_read);
+
+        let mut value_index = 0;
+        for i in 0..values_read {
+            builder.append_value(
+                &String::from_utf8(read_buffer[value_index].data().to_vec()).unwrap(),
+            )?;
+            value_index += 1;
+        }
+
+        Arc::new(builder.finish())
+    }
+
     }};
 }
 
@@ -281,23 +301,23 @@ impl ParquetFile {
         let schema =
             parquet_to_arrow_schema(metadata.file_metadata().schema_descr_ptr())?;
 
-        // even if we aren't referencing structs or lists in our projection, column reader
-        // indexes will be off until we have support for nested schemas
-        for i in 0..schema.fields().len() {
-            match schema.field(i).data_type() {
-                DataType::List(_) => {
-                    return Err(ExecutionError::NotImplemented(
-                        "Parquet datasource does not support LIST".to_string(),
-                    ));
-                }
-                DataType::Struct(_) => {
-                    return Err(ExecutionError::NotImplemented(
-                        "Parquet datasource does not support STRUCT".to_string(),
-                    ));
-                }
-                _ => {}
-            }
-        }
+//        // even if we aren't referencing structs or lists in our projection, column reader
+//        // indexes will be off until we have support for nested schemas
+//        for i in 0..schema.fields().len() {
+//            match schema.field(i).data_type() {
+//                DataType::List(_) => {
+//                    return Err(ExecutionError::NotImplemented(
+//                        "Parquet datasource does not support LIST".to_string(),
+//                    ));
+//                }
+//                DataType::Struct(_) => {
+//                    return Err(ExecutionError::NotImplemented(
+//                        "Parquet datasource does not support STRUCT".to_string(),
+//                    ));
+//                }
+//                _ => {}
+//            }
+//        }
 
         let projection = match projection {
             Some(p) => p,
@@ -467,10 +487,10 @@ impl ParquetFile {
                             )?
                         }
                         ColumnReader::FixedLenByteArrayColumnReader(ref mut r) => {
-                            read_binary_column!(self, r, i)
+                            read_binary_column!(self, r, i, is_nullable)
                         }
                         ColumnReader::ByteArrayColumnReader(ref mut r) => {
-                            read_binary_column!(self, r, i)
+                            read_binary_column!(self, r, i, is_nullable)
                         }
                     };
 
