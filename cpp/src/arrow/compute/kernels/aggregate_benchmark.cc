@@ -20,13 +20,11 @@
 #include <vector>
 
 #include "arrow/builder.h"
-#include "arrow/compute/benchmark_util.h"
-#include "arrow/compute/context.h"
-#include "arrow/compute/kernel.h"
-#include "arrow/compute/kernels/sum.h"
+#include "arrow/compute/api.h"
 #include "arrow/memory_pool.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/random.h"
+#include "arrow/util/benchmark_util.h"
 #include "arrow/util/bit_util.h"
 
 namespace arrow {
@@ -278,11 +276,11 @@ template <typename Functor>
 void ReferenceSum(benchmark::State& state) {
   using T = typename Functor::ValueType;
 
-  const int64_t array_size = state.range(0) / sizeof(int64_t);
-  const double null_percent = static_cast<double>(state.range(1)) / 100.0;
+  RegressionArgs args(state);
+  const int64_t array_size = args.size / sizeof(int64_t);
   auto rand = random::RandomArrayGenerator(1923);
   auto array = std::static_pointer_cast<NumericArray<Int64Type>>(
-      rand.Int64(array_size, -100, 100, null_percent));
+      rand.Int64(array_size, -100, 100, args.null_proportion));
 
   Traits<T>::FixSentinel(array);
 
@@ -291,10 +289,6 @@ void ReferenceSum(benchmark::State& state) {
     Functor::Sum(*array, &sum_state);
     benchmark::DoNotOptimize(sum_state);
   }
-
-  state.counters["size"] = static_cast<double>(state.range(0));
-  state.counters["null_percent"] = static_cast<double>(state.range(1));
-  state.SetBytesProcessed(state.iterations() * array_size * sizeof(T));
 }
 
 BENCHMARK_TEMPLATE(ReferenceSum, SumNoNulls<int64_t>)->Apply(BenchmarkSetArgs);
@@ -307,26 +301,162 @@ BENCHMARK_TEMPLATE(ReferenceSum, SumBitmapVectorizeUnroll<int64_t>)
     ->Apply(BenchmarkSetArgs);
 #endif  // ARROW_WITH_BENCHMARKS_REFERENCE
 
+//
+// Sum
+//
+
+template <typename ArrowType>
 static void SumKernel(benchmark::State& state) {
-  const int64_t array_size = state.range(0) / sizeof(int64_t);
-  const double null_percent = static_cast<double>(state.range(1)) / 100.0;
+  using CType = typename TypeTraits<ArrowType>::CType;
+
+  RegressionArgs args(state);
+  const int64_t array_size = args.size / sizeof(CType);
   auto rand = random::RandomArrayGenerator(1923);
-  auto array = std::static_pointer_cast<NumericArray<Int64Type>>(
-      rand.Int64(array_size, -100, 100, null_percent));
+  auto array = rand.Numeric<ArrowType>(array_size, -100, 100, args.null_proportion);
 
-  FunctionContext ctx;
   for (auto _ : state) {
-    Datum out;
-    ABORT_NOT_OK(Sum(&ctx, Datum(array), &out));
-    benchmark::DoNotOptimize(out);
+    ABORT_NOT_OK(Sum(array).status());
   }
-
-  state.counters["size"] = static_cast<double>(state.range(0));
-  state.counters["null_percent"] = static_cast<double>(state.range(1));
-  state.SetBytesProcessed(state.iterations() * array_size * sizeof(int64_t));
 }
 
-BENCHMARK(SumKernel)->Apply(RegressionSetArgs);
+static void SumKernelArgs(benchmark::internal::Benchmark* bench) {
+  BenchmarkSetArgsWithSizes(bench, {1 * 1024 * 1024});  // 1M
+}
+
+#define SUM_KERNEL_BENCHMARK(FuncName, Type)                                \
+  static void FuncName(benchmark::State& state) { SumKernel<Type>(state); } \
+  BENCHMARK(FuncName)->Apply(SumKernelArgs)
+
+SUM_KERNEL_BENCHMARK(SumKernelFloat, FloatType);
+SUM_KERNEL_BENCHMARK(SumKernelDouble, DoubleType);
+SUM_KERNEL_BENCHMARK(SumKernelInt8, Int8Type);
+SUM_KERNEL_BENCHMARK(SumKernelInt16, Int16Type);
+SUM_KERNEL_BENCHMARK(SumKernelInt32, Int32Type);
+SUM_KERNEL_BENCHMARK(SumKernelInt64, Int64Type);
+
+//
+// Mode
+//
+
+template <typename ArrowType>
+void ModeKernelBench(benchmark::State& state) {
+  using CType = typename TypeTraits<ArrowType>::CType;
+
+  RegressionArgs args(state);
+  const int64_t array_size = args.size / sizeof(CType);
+  auto rand = random::RandomArrayGenerator(1924);
+  auto array = rand.Numeric<ArrowType>(array_size, -100, 100, args.null_proportion);
+
+  for (auto _ : state) {
+    ABORT_NOT_OK(Mode(array).status());
+  }
+}
+
+template <>
+void ModeKernelBench<BooleanType>(benchmark::State& state) {
+  RegressionArgs args(state);
+  auto rand = random::RandomArrayGenerator(1924);
+  auto array = rand.Boolean(args.size * 8, 0.5, args.null_proportion);
+
+  for (auto _ : state) {
+    ABORT_NOT_OK(Mode(array).status());
+  }
+}
+
+static void ModeKernelBenchArgs(benchmark::internal::Benchmark* bench) {
+  BenchmarkSetArgsWithSizes(bench, {1 * 1024 * 1024});  // 1M
+}
+
+#define MODE_KERNEL_BENCHMARK(FuncName, Type)                                     \
+  static void FuncName(benchmark::State& state) { ModeKernelBench<Type>(state); } \
+  BENCHMARK(FuncName)->Apply(ModeKernelBenchArgs)
+
+MODE_KERNEL_BENCHMARK(ModeKernelBoolean, BooleanType);
+MODE_KERNEL_BENCHMARK(ModeKernelInt8, Int8Type);
+MODE_KERNEL_BENCHMARK(ModeKernelInt16, Int16Type);
+MODE_KERNEL_BENCHMARK(ModeKernelInt32, Int32Type);
+MODE_KERNEL_BENCHMARK(ModeKernelInt64, Int64Type);
+
+//
+// MinMax
+//
+
+template <typename ArrowType>
+static void MinMaxKernelBench(benchmark::State& state) {
+  using CType = typename TypeTraits<ArrowType>::CType;
+
+  RegressionArgs args(state);
+  const int64_t array_size = args.size / sizeof(CType);
+  auto rand = random::RandomArrayGenerator(1923);
+  auto array = rand.Numeric<ArrowType>(array_size, -100, 100, args.null_proportion);
+
+  for (auto _ : state) {
+    ABORT_NOT_OK(MinMax(array).status());
+  }
+}
+
+static void MinMaxKernelBenchArgs(benchmark::internal::Benchmark* bench) {
+  BenchmarkSetArgsWithSizes(bench, {1 * 1024 * 1024});  // 1M
+}
+
+#define MINMAX_KERNEL_BENCHMARK(FuncName, Type)                                     \
+  static void FuncName(benchmark::State& state) { MinMaxKernelBench<Type>(state); } \
+  BENCHMARK(FuncName)->Apply(MinMaxKernelBenchArgs)
+
+MINMAX_KERNEL_BENCHMARK(MinMaxKernelFloat, FloatType);
+MINMAX_KERNEL_BENCHMARK(MinMaxKernelDouble, DoubleType);
+MINMAX_KERNEL_BENCHMARK(MinMaxKernelInt8, Int8Type);
+MINMAX_KERNEL_BENCHMARK(MinMaxKernelInt16, Int16Type);
+MINMAX_KERNEL_BENCHMARK(MinMaxKernelInt32, Int32Type);
+MINMAX_KERNEL_BENCHMARK(MinMaxKernelInt64, Int64Type);
+
+//
+// Count
+//
+
+static void CountKernelBenchInt64(benchmark::State& state) {
+  RegressionArgs args(state);
+  const int64_t array_size = args.size / sizeof(int64_t);
+  auto rand = random::RandomArrayGenerator(1923);
+  auto array = rand.Numeric<Int64Type>(array_size, -100, 100, args.null_proportion);
+
+  for (auto _ : state) {
+    ABORT_NOT_OK(Count(array->Slice(1, array_size)).status());
+  }
+}
+BENCHMARK(CountKernelBenchInt64)->Args({1 * 1024 * 1024, 2});  // 1M with 50% null.
+
+//
+// Variance
+//
+
+template <typename ArrowType>
+void VarianceKernelBench(benchmark::State& state) {
+  using CType = typename TypeTraits<ArrowType>::CType;
+
+  VarianceOptions options;
+  RegressionArgs args(state);
+  const int64_t array_size = args.size / sizeof(CType);
+  auto rand = random::RandomArrayGenerator(1925);
+  auto array = rand.Numeric<ArrowType>(array_size, -100000, 100000, args.null_proportion);
+
+  for (auto _ : state) {
+    ABORT_NOT_OK(Variance(array, options).status());
+  }
+}
+
+static void VarianceKernelBenchArgs(benchmark::internal::Benchmark* bench) {
+  BenchmarkSetArgsWithSizes(bench, {1 * 1024 * 1024});
+}
+
+#define VARIANCE_KERNEL_BENCHMARK(FuncName, Type)                                     \
+  static void FuncName(benchmark::State& state) { VarianceKernelBench<Type>(state); } \
+  BENCHMARK(FuncName)->Apply(VarianceKernelBenchArgs)
+
+VARIANCE_KERNEL_BENCHMARK(VarianceKernelInt32, Int32Type);
+VARIANCE_KERNEL_BENCHMARK(VarianceKernelInt64, Int64Type);
+VARIANCE_KERNEL_BENCHMARK(VarianceKernelFloat, FloatType);
+VARIANCE_KERNEL_BENCHMARK(VarianceKernelDouble, DoubleType);
 
 }  // namespace compute
 }  // namespace arrow

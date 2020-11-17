@@ -44,6 +44,7 @@ use parquet_format::Statistics as TStatistics;
 
 use crate::basic::Type;
 use crate::data_type::*;
+use crate::util::bit_util::from_ne_slice;
 
 // Macro to generate methods create Statistics.
 macro_rules! statistics_new_func {
@@ -148,19 +149,11 @@ pub fn from_thrift(
                     // min/max statistics for INT96 columns.
                     let min = min.map(|data| {
                         assert_eq!(data.len(), 12);
-                        unsafe {
-                            let raw =
-                                std::slice::from_raw_parts(data.as_ptr() as *mut u32, 3);
-                            Int96::from(Vec::from(raw))
-                        }
+                        from_ne_slice::<Int96>(&data)
                     });
                     let max = max.map(|data| {
                         assert_eq!(data.len(), 12);
-                        unsafe {
-                            let raw =
-                                std::slice::from_raw_parts(data.as_ptr() as *mut u32, 3);
-                            Int96::from(Vec::from(raw))
-                        }
+                        from_ne_slice::<Int96>(&data)
                     });
                     Statistics::int96(min, max, distinct_count, null_count, old_format)
                 }
@@ -179,15 +172,15 @@ pub fn from_thrift(
                     old_format,
                 ),
                 Type::BYTE_ARRAY => Statistics::byte_array(
-                    min.map(|data| ByteArray::from(data)),
-                    max.map(|data| ByteArray::from(data)),
+                    min.map(ByteArray::from),
+                    max.map(ByteArray::from),
                     distinct_count,
                     null_count,
                     old_format,
                 ),
                 Type::FIXED_LEN_BYTE_ARRAY => Statistics::fixed_len_byte_array(
-                    min.map(|data| ByteArray::from(data)),
-                    max.map(|data| ByteArray::from(data)),
+                    min.map(ByteArray::from),
+                    max.map(ByteArray::from),
                     distinct_count,
                     null_count,
                     old_format,
@@ -202,11 +195,7 @@ pub fn from_thrift(
 
 // Convert Statistics into Thrift definition.
 pub fn to_thrift(stats: Option<&Statistics>) -> Option<TStatistics> {
-    if stats.is_none() {
-        return None;
-    }
-
-    let stats = stats.unwrap();
+    let stats = stats?;
 
     let mut thrift_stats = TStatistics {
         max: None,

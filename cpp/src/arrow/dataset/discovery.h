@@ -19,6 +19,8 @@
 /// dataset with possible partitioning according to available
 /// partitioning
 
+// This API is EXPERIMENTAL.
+
 #pragma once
 
 #include <memory>
@@ -165,16 +167,18 @@ struct FileSystemFactoryOptions {
   // (resulting in an error at scan time).
   bool exclude_invalid_files = false;
 
-  // Files matching one of the following prefix will be ignored by the
-  // discovery process. This is matched to the basename of a path.
+  // When discovering from a Selector (and not from an explicit file list), ignore
+  // files and directories matching any of these prefixes.
   //
-  // Example:
-  // ignore_prefixes = {"_", ".DS_STORE" };
+  // Example (with selector = "/dataset/**"):
+  // selector_ignore_prefixes = {"_", ".DS_STORE" };
   //
   // - "/dataset/data.csv" -> not ignored
   // - "/dataset/_metadata" -> ignored
   // - "/dataset/.DS_STORE" -> ignored
-  std::vector<std::string> ignore_prefixes = {
+  // - "/dataset/_hidden/dat" -> ignored
+  // - "/dataset/nested/.DS_STORE" -> ignored
+  std::vector<std::string> selector_ignore_prefixes = {
       ".",
       "_",
   };
@@ -218,19 +222,19 @@ class ARROW_DS_EXPORT FileSystemDatasetFactory : public DatasetFactory {
   Result<std::shared_ptr<Dataset>> Finish(FinishOptions options) override;
 
  protected:
-  FileSystemDatasetFactory(std::shared_ptr<fs::FileSystem> filesystem,
-                           fs::PathForest forest, std::shared_ptr<FileFormat> format,
-                           FileSystemFactoryOptions options);
+  static Result<std::shared_ptr<DatasetFactory>> Make(
+      std::shared_ptr<fs::FileSystem> filesystem, const std::vector<fs::FileInfo>& files,
+      std::shared_ptr<FileFormat> format, FileSystemFactoryOptions options);
 
-  static Result<fs::PathForest> Filter(const std::shared_ptr<fs::FileSystem>& filesystem,
-                                       const std::shared_ptr<FileFormat>& format,
-                                       const FileSystemFactoryOptions& options,
-                                       fs::PathForest forest);
+  FileSystemDatasetFactory(std::vector<fs::FileInfo> files,
+                           std::shared_ptr<fs::FileSystem> filesystem,
+                           std::shared_ptr<FileFormat> format,
+                           FileSystemFactoryOptions options);
 
   Result<std::shared_ptr<Schema>> PartitionSchema();
 
+  std::vector<fs::FileInfo> files_;
   std::shared_ptr<fs::FileSystem> fs_;
-  fs::PathForest forest_;
   std::shared_ptr<FileFormat> format_;
   FileSystemFactoryOptions options_;
 };

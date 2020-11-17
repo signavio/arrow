@@ -60,6 +60,9 @@ class UTF8Test : public ::testing::Test {
   static std::vector<std::string> invalid_sequences_4;
 
   static std::vector<std::string> all_invalid_sequences;
+
+  static std::vector<std::string> valid_sequences_ascii;
+  static std::vector<std::string> invalid_sequences_ascii;
 };
 
 std::vector<std::string> UTF8Test::valid_sequences_1 = {"a", "\x7f"};
@@ -87,7 +90,13 @@ std::vector<std::string> UTF8Test::invalid_sequences_4 = {
 
 std::vector<std::string> UTF8Test::all_invalid_sequences;
 
+std::vector<std::string> UTF8Test::valid_sequences_ascii = {"a", "\x7f", "B", "&"};
+std::vector<std::string> UTF8Test::invalid_sequences_ascii = {
+    "\x80", "\xa0\x1e", "\xbf\xef\x6a", "\xc1\x9f\xc3\xd9"};
+
 class UTF8ValidationTest : public UTF8Test {};
+
+class ASCIIValidationTest : public UTF8Test {};
 
 ::testing::AssertionResult IsValidUTF8(const std::string& s) {
   if (ValidateUTF8(reinterpret_cast<const uint8_t*>(s.data()), s.size())) {
@@ -110,9 +119,46 @@ class UTF8ValidationTest : public UTF8Test {};
   }
 }
 
+::testing::AssertionResult IsValidASCII(const std::string& s) {
+  if (ValidateAscii(reinterpret_cast<const uint8_t*>(s.data()), s.size())) {
+    return ::testing::AssertionSuccess();
+  } else {
+    std::string h = HexEncode(reinterpret_cast<const uint8_t*>(s.data()),
+                              static_cast<int32_t>(s.size()));
+    return ::testing::AssertionFailure()
+           << "string '" << h << "' didn't validate as ASCII";
+  }
+}
+
+::testing::AssertionResult IsInvalidASCII(const std::string& s) {
+  if (!ValidateAscii(reinterpret_cast<const uint8_t*>(s.data()), s.size())) {
+    return ::testing::AssertionSuccess();
+  } else {
+    std::string h = HexEncode(reinterpret_cast<const uint8_t*>(s.data()),
+                              static_cast<int32_t>(s.size()));
+    return ::testing::AssertionFailure() << "string '" << h << "' validated as ASCII";
+  }
+}
+
 void AssertValidUTF8(const std::string& s) { ASSERT_TRUE(IsValidUTF8(s)); }
 
 void AssertInvalidUTF8(const std::string& s) { ASSERT_TRUE(IsInvalidUTF8(s)); }
+
+void AssertValidASCII(const std::string& s) { ASSERT_TRUE(IsValidASCII(s)); }
+
+void AssertInvalidASCII(const std::string& s) { ASSERT_TRUE(IsInvalidASCII(s)); }
+
+TEST_F(ASCIIValidationTest, AsciiValid) {
+  for (const auto& s : valid_sequences_ascii) {
+    AssertValidASCII(s);
+  }
+}
+
+TEST_F(ASCIIValidationTest, AsciiInvalid) {
+  for (const auto& s : invalid_sequences_ascii) {
+    AssertInvalidASCII(s);
+  }
+}
 
 TEST_F(UTF8ValidationTest, EmptyString) { AssertValidUTF8(""); }
 
@@ -326,6 +372,44 @@ TEST(WideStringToUTF8, Basics) {
 #if WCHAR_MAX > 0xFFFF
   CheckInvalid({0x110000});
 #endif
+}
+
+TEST(UTF8DecodeReverse, Basics) {
+  auto CheckOk = [](const std::string& s) -> void {
+    const uint8_t* begin = reinterpret_cast<const uint8_t*>(s.c_str());
+    const uint8_t* end = begin + s.length();
+    const uint8_t* i = end - 1;
+    uint32_t codepoint;
+    EXPECT_TRUE(UTF8DecodeReverse(&i, &codepoint));
+    EXPECT_EQ(i, begin - 1);
+  };
+
+  // 0x80 == 0b10000000
+  // 0xC0 == 0b11000000
+  // 0xE0 == 0b11100000
+  // 0xF0 == 0b11110000
+  CheckOk("a");
+  CheckOk("\xC0\x80");
+  CheckOk("\xE0\x80\x80");
+  CheckOk("\xF0\x80\x80\x80");
+
+  auto CheckInvalid = [](const std::string& s) -> void {
+    const uint8_t* begin = reinterpret_cast<const uint8_t*>(s.c_str());
+    const uint8_t* end = begin + s.length();
+    const uint8_t* i = end - 1;
+    uint32_t codepoint;
+    EXPECT_FALSE(UTF8DecodeReverse(&i, &codepoint));
+  };
+
+  // too many continuation code units
+  CheckInvalid("a\x80");
+  CheckInvalid("\xC0\x80\x80");
+  CheckInvalid("\xE0\x80\x80\x80");
+  CheckInvalid("\xF0\x80\x80\x80\x80");
+  // not enough continuation code units
+  CheckInvalid("\xC0");
+  CheckInvalid("\xE0\x80");
+  CheckInvalid("\xF0\x80\x80");
 }
 
 }  // namespace util

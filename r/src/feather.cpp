@@ -18,6 +18,8 @@
 #include "./arrow_types.h"
 
 #if defined(ARROW_R_WITH_ARROW)
+#include <arrow/ipc/feather.h>
+#include <arrow/type.h>
 
 // ---------- WriteFeather
 
@@ -33,7 +35,7 @@ void ipc___WriteFeather__Table(const std::shared_ptr<arrow::io::OutputStream>& s
   if (compression_level != -1) {
     properties.compression_level = compression_level;
   }
-  STOP_IF_NOT_OK(arrow::ipc::feather::WriteTable(*table, stream.get(), properties));
+  StopIfNotOk(arrow::ipc::feather::WriteTable(*table, stream.get(), properties));
 }
 
 // ----------- Reader
@@ -56,14 +58,14 @@ std::shared_ptr<arrow::Table> ipc___feather___Reader__Read(
       for (R_xlen_t i = 0; i < n; i++) {
         names[i] = CHAR(STRING_ELT(columns, i));
       }
-      STOP_IF_NOT_OK(reader->Read(names, &table));
+      StopIfNotOk(reader->Read(names, &table));
       break;
     }
     case NILSXP:
-      STOP_IF_NOT_OK(reader->Read(&table));
+      StopIfNotOk(reader->Read(&table));
       break;
     default:
-      Rcpp::stop("incompatible column specification");
+      cpp11::stop("incompatible column specification");
       break;
   }
 
@@ -73,19 +75,15 @@ std::shared_ptr<arrow::Table> ipc___feather___Reader__Read(
 // [[arrow::export]]
 std::shared_ptr<arrow::ipc::feather::Reader> ipc___feather___Reader__Open(
     const std::shared_ptr<arrow::io::RandomAccessFile>& stream) {
-  return VALUE_OR_STOP(arrow::ipc::feather::Reader::Open(stream));
+  return ValueOrStop(arrow::ipc::feather::Reader::Open(stream));
 }
 
 // [[arrow::export]]
-Rcpp::CharacterVector ipc___feather___Reader__column_names(
+cpp11::writable::strings ipc___feather___Reader__column_names(
     const std::shared_ptr<arrow::ipc::feather::Reader>& reader) {
-  auto sch = reader->schema();
-  int64_t n = sch->num_fields();
-  Rcpp::CharacterVector out(n);
-  for (int i = 0; i < n; i++) {
-    out[i] = sch->field(i)->name();
-  }
-  return out;
+  return arrow::r::to_r_strings(
+      reader->schema()->fields(),
+      [](const std::shared_ptr<arrow::Field>& field) { return field->name(); });
 }
 
 #endif

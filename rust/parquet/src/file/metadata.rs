@@ -42,10 +42,11 @@ use crate::errors::{ParquetError, Result};
 use crate::file::statistics::{self, Statistics};
 use crate::schema::types::{
     ColumnDescPtr, ColumnDescriptor, ColumnPath, SchemaDescPtr, SchemaDescriptor,
-    Type as SchemaType, TypePtr,
+    Type as SchemaType,
 };
 
 /// Global Parquet metadata.
+#[derive(Debug)]
 pub struct ParquetMetaData {
     file_metadata: FileMetaData,
     row_groups: Vec<RowGroupMetaData>,
@@ -89,12 +90,12 @@ pub type KeyValue = parquet_format::KeyValue;
 pub type FileMetaDataPtr = Rc<FileMetaData>;
 
 /// Metadata for a Parquet file.
+#[derive(Debug)]
 pub struct FileMetaData {
     version: i32,
     num_rows: i64,
     created_by: Option<String>,
     key_value_metadata: Option<Vec<KeyValue>>,
-    schema: TypePtr,
     schema_descr: SchemaDescPtr,
     column_orders: Option<Vec<ColumnOrder>>,
 }
@@ -106,7 +107,6 @@ impl FileMetaData {
         num_rows: i64,
         created_by: Option<String>,
         key_value_metadata: Option<Vec<KeyValue>>,
-        schema: TypePtr,
         schema_descr: SchemaDescPtr,
         column_orders: Option<Vec<ColumnOrder>>,
     ) -> Self {
@@ -115,7 +115,6 @@ impl FileMetaData {
             num_rows,
             created_by,
             key_value_metadata,
-            schema,
             schema_descr,
             column_orders,
         }
@@ -150,7 +149,7 @@ impl FileMetaData {
 
     /// Returns Parquet ['Type`] that describes schema in this file.
     pub fn schema(&self) -> &SchemaType {
-        self.schema.as_ref()
+        self.schema_descr.root_schema()
     }
 
     /// Returns a reference to schema descriptor.
@@ -188,6 +187,7 @@ impl FileMetaData {
 pub type RowGroupMetaDataPtr = Rc<RowGroupMetaData>;
 
 /// Metadata for a row group.
+#[derive(Debug)]
 pub struct RowGroupMetaData {
     columns: Vec<ColumnChunkMetaData>,
     num_rows: i64,
@@ -260,7 +260,7 @@ impl RowGroupMetaData {
     /// Method to convert to Thrift.
     pub fn to_thrift(&self) -> RowGroup {
         RowGroup {
-            columns: self.columns().into_iter().map(|v| v.to_thrift()).collect(),
+            columns: self.columns().iter().map(|v| v.to_thrift()).collect(),
             total_byte_size: self.total_byte_size,
             num_rows: self.num_rows,
             sorting_columns: None,
@@ -325,6 +325,7 @@ impl RowGroupMetaDataBuilder {
 }
 
 /// Metadata for a column chunk.
+#[derive(Debug)]
 pub struct ColumnChunkMetaData {
     column_type: Type,
     column_path: ColumnPath,
@@ -484,7 +485,7 @@ impl ColumnChunkMetaData {
     pub fn to_thrift(&self) -> ColumnChunk {
         let column_metadata = ColumnMetaData {
             type_: self.column_type.into(),
-            encodings: self.encodings().into_iter().map(|&v| v.into()).collect(),
+            encodings: self.encodings().iter().map(|&v| v.into()).collect(),
             path_in_schema: Vec::from(self.column_path.as_ref()),
             codec: self.compression.into(),
             num_values: self.num_values,
@@ -499,7 +500,7 @@ impl ColumnChunkMetaData {
         };
 
         ColumnChunk {
-            file_path: self.file_path().map(|v| v.clone()),
+            file_path: self.file_path().cloned(),
             file_offset: self.file_offset,
             meta_data: Some(column_metadata),
             offset_index_offset: None,
@@ -654,7 +655,7 @@ mod tests {
 
         let row_group_exp = row_group_meta.to_thrift();
         let row_group_res =
-            RowGroupMetaData::from_thrift(schema_descr.clone(), row_group_exp.clone())
+            RowGroupMetaData::from_thrift(schema_descr, row_group_exp.clone())
                 .unwrap()
                 .to_thrift();
 
@@ -665,7 +666,7 @@ mod tests {
     fn test_row_group_metadata_thrift_conversion_empty() {
         let schema_descr = get_test_schema_descr();
 
-        let row_group_meta = RowGroupMetaData::builder(schema_descr.clone()).build();
+        let row_group_meta = RowGroupMetaData::builder(schema_descr).build();
 
         assert!(row_group_meta.is_err());
         if let Err(e) = row_group_meta {
@@ -696,7 +697,7 @@ mod tests {
         let col_chunk_exp = col_metadata.to_thrift();
 
         let col_chunk_res =
-            ColumnChunkMetaData::from_thrift(column_descr.clone(), col_chunk_exp.clone())
+            ColumnChunkMetaData::from_thrift(column_descr, col_chunk_exp.clone())
                 .unwrap()
                 .to_thrift();
 
@@ -713,7 +714,7 @@ mod tests {
 
         let col_chunk_exp = col_metadata.to_thrift();
         let col_chunk_res =
-            ColumnChunkMetaData::from_thrift(column_descr.clone(), col_chunk_exp.clone())
+            ColumnChunkMetaData::from_thrift(column_descr, col_chunk_exp.clone())
                 .unwrap()
                 .to_thrift();
 

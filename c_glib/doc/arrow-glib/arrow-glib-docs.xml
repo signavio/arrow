@@ -77,6 +77,10 @@
       <title>Table builder</title>
       <xi:include href="xml/table-builder.xml"/>
     </chapter>
+    <chapter id="datum">
+      <title>Datum</title>
+      <xi:include href="xml/datum.xml"/>
+    </chapter>
     <chapter id="buffer">
       <title>Buffer</title>
       <xi:include href="xml/buffer.xml"/>
@@ -132,6 +136,10 @@
       <title>Metadata</title>
       <xi:include href="xml/metadata-version.xml"/>
     </chapter>
+    <chapter id="ipc-options">
+      <title>Options</title>
+      <xi:include href="xml/ipc-options.xml"/>
+    </chapter>
     <chapter id="reader">
       <title>Reader</title>
       <xi:include href="xml/reader.xml"/>
@@ -170,6 +178,10 @@
   <index id="deprecated-api-index" role="deprecated">
     <title>Index of deprecated API</title>
     <xi:include href="xml/api-index-deprecated.xml"><xi:fallback /></xi:include>
+  </index>
+  <index id="api-index-2-0-0" role="2.0.0">
+    <title>Index of new symbols in 2.0.0</title>
+    <xi:include href="xml/api-index-2.0.0.xml"><xi:fallback /></xi:include>
   </index>
   <index id="api-index-1-0-0" role="1.0.0">
     <title>Index of new symbols in 1.0.0</title>

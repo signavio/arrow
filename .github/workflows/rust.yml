@@ -38,6 +38,8 @@ on:
 env:
   DOCKER_BUILDKIT: 0
   COMPOSE_DOCKER_CLI_BUILD: 1
+  ARCHERY_DOCKER_USER: ${{ secrets.DOCKERHUB_USER }}
+  ARCHERY_DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
 jobs:
 
@@ -48,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [nightly-2019-11-14]
+        rust: [nightly-2020-04-22]
     env:
       RUST: ${{ matrix.rust }}
     steps:
@@ -59,20 +61,33 @@ jobs:
       - name: Fetch Submodules and Tags
         shell: bash
         run: ci/scripts/util_checkout.sh
-      - name: Docker Pull
-        run: docker-compose pull --ignore-pull-failures debian-rust
-      - name: Docker Build
-        run: docker-compose build debian-rust
-      - name: Docker Run
-        run: docker-compose run debian-rust
+      - name: Free Up Disk Space
+        shell: bash
+        run: ci/scripts/util_cleanup.sh
+      - name: Cache Docker Volumes
+        uses: actions/cache@v1
+        with:
+          path: .docker
+          key: debian-10-rust-${{ hashFiles('rust/**.rs') }}
+          restore-keys: debian-10-rust-
+      - name: Setup Python
+        uses: actions/setup-python@v1
+        with:
+          python-version: 3.8
+      - name: Setup Archery
+        run: pip install -e dev/archery[docker]
+      - name: Execute Docker Build
+        run: |
+          sudo sysctl -w kernel.core_pattern="core.%e.%p"
+          ulimit -c unlimited
+          archery docker run debian-rust
+      - name: Fix Cache Permissions
+        run: sudo chmod -R o+r .docker
       - name: Docker Push
         if: success() && github.event_name == 'push' && github.repository == 'apache/arrow'
         continue-on-error: true
         shell: bash
-        run: |
-          docker login -u ${{ secrets.DOCKERHUB_USER }} \
-                       -p ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-compose push debian-rust
+        run: archery docker push debian-rust
 
   windows:
     name: AMD64 Windows 2019 Rust ${{ matrix.rust }}
@@ -81,13 +96,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [nightly-2019-11-14]
+        rust: [nightly-2020-04-22]
     steps:
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
             toolchain: ${{ matrix.rust }}
             override: true
+            components: rustfmt
       - name: Install Flatbuffers
         shell: bash
         run: choco install flatc
@@ -98,6 +114,12 @@ jobs:
       - name: Fetch Submodules and Tags
         shell: bash
         run: ci/scripts/util_checkout.sh
+      - name: Cache Build Artifacts
+        uses: actions/cache@v1
+        with:
+          path: rust/target
+          key: windows-rust-${{ hashFiles('rust/**.rs') }}
+          restore-keys: windows-rust-
       - name: Build
         shell: bash
         run: ci/scripts/rust_build.sh $(pwd) $(pwd)/build
@@ -112,13 +134,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [nightly-2019-11-14]
+        rust: [nightly-2020-04-22]
     steps:
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
-            toolchain: ${{ matrix.rust }}
-            override: true
+          toolchain: ${{ matrix.rust }}
+          override: true
+          components: rustfmt, clippy
       - name: Install Flatbuffers
         shell: bash
         run: brew install flatbuffers
@@ -129,6 +152,11 @@ jobs:
       - name: Fetch Submodules and Tags
         shell: bash
         run: ci/scripts/util_checkout.sh
+      # Note we don't cache the build artifacts for MacOSX as it was causing intermittent failures
+      # see https://issues.apache.org/jira/browse/ARROW-9628
+      - name: Run Clippy
+        shell: bash
+        run: ci/scripts/rust_lint.sh $(pwd)
       - name: Build
         shell: bash
         run: ci/scripts/rust_build.sh $(pwd) $(pwd)/build

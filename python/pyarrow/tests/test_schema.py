@@ -18,6 +18,7 @@
 from collections import OrderedDict
 import pickle
 import sys
+import weakref
 
 from distutils.version import LooseVersion
 
@@ -48,7 +49,7 @@ def test_type_integers():
 def test_type_to_pandas_dtype():
     M8_ns = np.dtype('datetime64[ns]')
     cases = [
-        (pa.null(), np.float64),
+        (pa.null(), np.object_),
         (pa.bool_(), np.bool_),
         (pa.int8(), np.int8),
         (pa.int16(), np.int16),
@@ -69,6 +70,7 @@ def test_type_to_pandas_dtype():
         (pa.string(), np.object_),
         (pa.list_(pa.int8()), np.object_),
         # (pa.list_(pa.int8(), 2), np.object_),  # TODO needs pandas conversion
+        (pa.map_(pa.int64(), pa.float64()), np.object_),
     ]
     for arrow_type, numpy_type in cases:
         assert arrow_type.to_pandas_dtype() == numpy_type
@@ -242,6 +244,19 @@ baz: list<item: int8>
 
     with pytest.raises(TypeError):
         pa.schema([None])
+
+
+def test_schema_weakref():
+    fields = [
+        pa.field('foo', pa.int32()),
+        pa.field('bar', pa.string()),
+        pa.field('baz', pa.list_(pa.int8()))
+    ]
+    schema = pa.schema(fields)
+    wr = weakref.ref(schema)
+    assert wr() is not None
+    del schema
+    assert wr() is None
 
 
 def test_schema_to_string_with_metadata():
@@ -589,6 +604,7 @@ def test_type_schema_pickling():
         pa.timestamp('ms'),
         pa.timestamp('ns'),
         pa.decimal128(12, 2),
+        pa.decimal256(76, 38),
         pa.field('a', 'string', metadata={b'foo': b'bar'})
     ]
 
@@ -609,15 +625,22 @@ def test_type_schema_pickling():
 
 
 def test_empty_table():
-    schema = pa.schema([
+    schema1 = pa.schema([
         pa.field('f0', pa.int64()),
         pa.field('f1', pa.dictionary(pa.int32(), pa.string())),
         pa.field('f2', pa.list_(pa.list_(pa.int64()))),
     ])
-    table = schema.empty_table()
-    assert isinstance(table, pa.Table)
-    assert table.num_rows == 0
-    assert table.schema == schema
+    # test it preserves field nullability
+    schema2 = pa.schema([
+        pa.field('a', pa.int64(), nullable=False),
+        pa.field('b', pa.int64())
+    ])
+
+    for schema in [schema1, schema2]:
+        table = schema.empty_table()
+        assert isinstance(table, pa.Table)
+        assert table.num_rows == 0
+        assert table.schema == schema
 
 
 @pytest.mark.pandas
@@ -654,3 +677,46 @@ def test_schema_sizeof():
     assert sys.getsizeof(schema2) > sys.getsizeof(schema)
     schema3 = schema.with_metadata({"key": "some more metadata"})
     assert sys.getsizeof(schema3) > sys.getsizeof(schema2)
+
+
+def test_schema_merge():
+    a = pa.schema([
+        pa.field('foo', pa.int32()),
+        pa.field('bar', pa.string()),
+        pa.field('baz', pa.list_(pa.int8()))
+    ])
+    b = pa.schema([
+        pa.field('foo', pa.int32()),
+        pa.field('qux', pa.bool_())
+    ])
+    c = pa.schema([
+        pa.field('quux', pa.dictionary(pa.int32(), pa.string()))
+    ])
+    d = pa.schema([
+        pa.field('foo', pa.int64()),
+        pa.field('qux', pa.bool_())
+    ])
+
+    result = pa.unify_schemas([a, b, c])
+    expected = pa.schema([
+        pa.field('foo', pa.int32()),
+        pa.field('bar', pa.string()),
+        pa.field('baz', pa.list_(pa.int8())),
+        pa.field('qux', pa.bool_()),
+        pa.field('quux', pa.dictionary(pa.int32(), pa.string()))
+    ])
+    assert result.equals(expected)
+
+    with pytest.raises(pa.ArrowInvalid):
+        pa.unify_schemas([b, d])
+
+
+def test_undecodable_metadata():
+    # ARROW-10214: undecodable metadata shouldn't fail repr()
+    data1 = b'abcdef\xff\x00'
+    data2 = b'ghijkl\xff\x00'
+    schema = pa.schema(
+        [pa.field('ints', pa.int16(), metadata={'key': data1})],
+        metadata={'key': data2})
+    assert 'abcdef' in str(schema)
+    assert 'ghijkl' in str(schema)

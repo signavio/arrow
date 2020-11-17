@@ -141,10 +141,22 @@ ARROW_FLIGHT_EXPORT
 std::shared_ptr<Schema> ExampleDictSchema();
 
 ARROW_FLIGHT_EXPORT
+std::shared_ptr<Schema> ExampleLargeSchema();
+
+ARROW_FLIGHT_EXPORT
 Status ExampleIntBatches(BatchVector* out);
 
 ARROW_FLIGHT_EXPORT
+Status ExampleFloatBatches(BatchVector* out);
+
+ARROW_FLIGHT_EXPORT
 Status ExampleDictBatches(BatchVector* out);
+
+ARROW_FLIGHT_EXPORT
+Status ExampleNestedBatches(BatchVector* out);
+
+ARROW_FLIGHT_EXPORT
+Status ExampleLargeBatches(BatchVector* out);
 
 ARROW_FLIGHT_EXPORT
 std::vector<FlightInfo> ExampleFlightInfo();

@@ -18,13 +18,25 @@
 # Check if the target architecture and compiler supports some special
 # instruction sets that would boost performance.
 include(CheckCXXCompilerFlag)
+include(CheckCXXSourceCompiles)
 # Get cpu architecture
-set(ARROW_CPU_FLAG "x86")
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|ARM64")
-  set(ARROW_CPU_FLAG "arm")
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc")
-  set(ARROW_CPU_FLAG "ppc")
+
+message(STATUS "System processor: ${CMAKE_SYSTEM_PROCESSOR}")
+
+if(NOT DEFINED ARROW_CPU_FLAG)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|ARM64")
+    set(ARROW_CPU_FLAG "armv8")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "armv7")
+    set(ARROW_CPU_FLAG "armv7")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc")
+    set(ARROW_CPU_FLAG "ppc")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "s390x")
+    set(ARROW_CPU_FLAG "s390x")
+  else()
+    set(ARROW_CPU_FLAG "x86")
+  endif()
 endif()
+
 # Check architecture specific compiler flags
 if(ARROW_CPU_FLAG STREQUAL "x86")
   # x86/amd64 compiler flags, msvc/gcc/clang
@@ -35,31 +47,77 @@ if(ARROW_CPU_FLAG STREQUAL "x86")
     set(CXX_SUPPORTS_SSE4_2 TRUE)
   else()
     set(ARROW_SSE4_2_FLAG "-msse4.2")
-    set(ARROW_AVX2_FLAG "-mavx2")
+    set(ARROW_AVX2_FLAG "-march=haswell")
     # skylake-avx512 consists of AVX512F,AVX512BW,AVX512VL,AVX512CD,AVX512DQ
-    set(ARROW_AVX512_FLAG "-march=skylake-avx512")
+    set(ARROW_AVX512_FLAG "-march=skylake-avx512 -mbmi2")
+    # Append the avx2/avx512 subset option also, fix issue ARROW-9877 for homebrew-cpp
+    set(ARROW_AVX2_FLAG "${ARROW_AVX2_FLAG} -mavx2")
+    set(ARROW_AVX512_FLAG
+        "${ARROW_AVX512_FLAG} -mavx512f -mavx512cd -mavx512vl -mavx512dq -mavx512bw")
     check_cxx_compiler_flag(${ARROW_SSE4_2_FLAG} CXX_SUPPORTS_SSE4_2)
   endif()
   check_cxx_compiler_flag(${ARROW_AVX2_FLAG} CXX_SUPPORTS_AVX2)
-  check_cxx_compiler_flag(${ARROW_AVX512_FLAG} CXX_SUPPORTS_AVX512)
+  if(MINGW)
+    # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=65782
+    message(STATUS "Disable AVX512 support on MINGW for now")
+  else()
+    # Check for AVX512 support in the compiler.
+    set(OLD_CMAKE_REQURED_FLAGS ${CMAKE_REQUIRED_FLAGS})
+    set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} ${ARROW_AVX512_FLAG}")
+    check_cxx_source_compiles("
+      #ifdef _MSC_VER
+      #include <intrin.h>
+      #else
+      #include <immintrin.h>
+      #endif
+
+      int main() {
+        __m512i mask = _mm512_set1_epi32(0x1);
+        char out[32];
+        _mm512_storeu_si512(out, mask);
+        return 0;
+      }" CXX_SUPPORTS_AVX512)
+    set(CMAKE_REQUIRED_FLAGS ${OLD_CMAKE_REQURED_FLAGS})
+  endif()
+  # Runtime SIMD level it can get from compiler and ARROW_RUNTIME_SIMD_LEVEL
+  if(CXX_SUPPORTS_SSE4_2
+     AND ARROW_RUNTIME_SIMD_LEVEL MATCHES "^(SSE4_2|AVX2|AVX512|MAX)$")
+    set(ARROW_HAVE_RUNTIME_SSE4_2 ON)
+    add_definitions(-DARROW_HAVE_RUNTIME_SSE4_2)
+  endif()
+  if(CXX_SUPPORTS_AVX2 AND ARROW_RUNTIME_SIMD_LEVEL MATCHES "^(AVX2|AVX512|MAX)$")
+    set(ARROW_HAVE_RUNTIME_AVX2 ON)
+    add_definitions(-DARROW_HAVE_RUNTIME_AVX2 -DARROW_HAVE_RUNTIME_BMI2)
+  endif()
+  if(CXX_SUPPORTS_AVX512 AND ARROW_RUNTIME_SIMD_LEVEL MATCHES "^(AVX512|MAX)$")
+    set(ARROW_HAVE_RUNTIME_AVX512 ON)
+    add_definitions(-DARROW_HAVE_RUNTIME_AVX512 -DARROW_HAVE_RUNTIME_BMI2)
+  endif()
 elseif(ARROW_CPU_FLAG STREQUAL "ppc")
   # power compiler flags, gcc/clang only
   set(ARROW_ALTIVEC_FLAG "-maltivec")
   check_cxx_compiler_flag(${ARROW_ALTIVEC_FLAG} CXX_SUPPORTS_ALTIVEC)
-elseif(ARROW_CPU_FLAG STREQUAL "arm")
+elseif(ARROW_CPU_FLAG STREQUAL "armv8")
   # Arm64 compiler flags, gcc/clang only
   set(ARROW_ARMV8_ARCH_FLAG "-march=${ARROW_ARMV8_ARCH}")
   check_cxx_compiler_flag(${ARROW_ARMV8_ARCH_FLAG} CXX_SUPPORTS_ARMV8_ARCH)
 endif()
 
 # Support C11
-set(CMAKE_C_STANDARD 11)
+if(NOT DEFINED CMAKE_C_STANDARD)
+  set(CMAKE_C_STANDARD 11)
+endif()
 
-# This ensures that things like gnu++11 get passed correctly
-set(CMAKE_CXX_STANDARD 11)
+# This ensures that things like c++11 get passed correctly
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 11)
+endif()
 
 # We require a C++11 compliant compiler
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# ARROW-6848: Do not use GNU (or other CXX) extensions
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build with -fPIC so that can static link our libraries into other people's
 # shared libraries
@@ -68,7 +126,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 string(TOUPPER ${CMAKE_BUILD_TYPE} CMAKE_BUILD_TYPE)
 
 set(UNKNOWN_COMPILER_MESSAGE
-    "Unknown compiler: ${CMAKE_CXX_COMPILER_VERSION} ${CMAKE_CXX_COMPILER_VERSION}")
+    "Unknown compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 
 # compiler flags that are common across debug/release builds
 if(WIN32)
@@ -185,6 +243,7 @@ if("${BUILD_WARNING_LEVEL}" STREQUAL "CHECKIN")
   elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wall")
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-conversion")
+    set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-deprecated-declarations")
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-sign-conversion")
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-unused-variable")
   else()
@@ -224,7 +283,8 @@ else()
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} /W3")
   elseif(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"
          OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
-         OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+         OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+         OR CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wall")
   else()
     message(FATAL_ERROR "${UNKNOWN_COMPILER_MESSAGE}")
@@ -243,9 +303,17 @@ if(MSVC)
   # (required for protobuf, see https://github.com/protocolbuffers/protobuf/issues/6885)
   set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} /wd4065")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "6.0")
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL "7.0"
+     OR CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "7.0")
     # Without this, gcc >= 7 warns related to changes in C++17
     set(CXX_ONLY_FLAGS "${CXX_ONLY_FLAGS} -Wno-noexcept-type")
+  endif()
+
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "5.2")
+    # Disabling semantic interposition allows faster calling conventions
+    # when calling global functions internally, and can also help inlining.
+    # See https://stackoverflow.com/questions/35745543/new-option-in-gcc-5-3-fno-semantic-interposition
+    set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -fno-semantic-interposition")
   endif()
 
   if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "4.9")
@@ -299,19 +367,20 @@ if(BUILD_WARNING_FLAGS)
 endif(BUILD_WARNING_FLAGS)
 
 # Only enable additional instruction sets if they are supported
-if(ARROW_CPU_FLAG STREQUAL "x86" AND ARROW_USE_SIMD)
+if(ARROW_CPU_FLAG STREQUAL "x86")
   if(ARROW_SIMD_LEVEL STREQUAL "AVX512")
     if(NOT CXX_SUPPORTS_AVX512)
       message(FATAL_ERROR "AVX512 required but compiler doesn't support it.")
     endif()
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} ${ARROW_AVX512_FLAG}")
-    add_definitions(-DARROW_HAVE_AVX512 -DARROW_HAVE_AVX2 -DARROW_HAVE_SSE4_2)
+    add_definitions(-DARROW_HAVE_AVX512 -DARROW_HAVE_AVX2 -DARROW_HAVE_BMI2
+                    -DARROW_HAVE_SSE4_2)
   elseif(ARROW_SIMD_LEVEL STREQUAL "AVX2")
     if(NOT CXX_SUPPORTS_AVX2)
       message(FATAL_ERROR "AVX2 required but compiler doesn't support it.")
     endif()
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} ${ARROW_AVX2_FLAG}")
-    add_definitions(-DARROW_HAVE_AVX2 -DARROW_HAVE_SSE4_2)
+    add_definitions(-DARROW_HAVE_AVX2 -DARROW_HAVE_BMI2 -DARROW_HAVE_SSE4_2)
   elseif(ARROW_SIMD_LEVEL STREQUAL "SSE4_2")
     if(NOT CXX_SUPPORTS_SSE4_2)
       message(FATAL_ERROR "SSE4.2 required but compiler doesn't support it.")
@@ -321,13 +390,13 @@ if(ARROW_CPU_FLAG STREQUAL "x86" AND ARROW_USE_SIMD)
   endif()
 endif()
 
-if(ARROW_CPU_FLAG STREQUAL "ppc" AND ARROW_USE_SIMD)
+if(ARROW_CPU_FLAG STREQUAL "ppc")
   if(CXX_SUPPORTS_ALTIVEC AND ARROW_ALTIVEC)
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} ${ARROW_ALTIVEC_FLAG}")
   endif()
 endif()
 
-if(ARROW_CPU_FLAG STREQUAL "arm")
+if(ARROW_CPU_FLAG STREQUAL "armv8")
   if(NOT CXX_SUPPORTS_ARMV8_ARCH)
     message(FATAL_ERROR "Unsupported arch flag: ${ARROW_ARMV8_ARCH_FLAG}.")
   endif()
@@ -336,9 +405,7 @@ if(ARROW_CPU_FLAG STREQUAL "arm")
   endif()
   set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} ${ARROW_ARMV8_ARCH_FLAG}")
 
-  if(ARROW_USE_SIMD)
-    add_definitions(-DARROW_HAVE_NEON)
-  endif()
+  add_definitions(-DARROW_HAVE_NEON)
 
   if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
      AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "5.4")
@@ -497,12 +564,6 @@ elseif("${CMAKE_BUILD_TYPE}" STREQUAL "PROFILE_BUILD")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CXX_FLAGS_PROFILE_BUILD}")
 else()
   message(FATAL_ERROR "Unknown build type: ${CMAKE_BUILD_TYPE}")
-endif()
-
-if("${CMAKE_CXX_FLAGS}" MATCHES "-DNDEBUG")
-  set(ARROW_DEFINITION_FLAGS "-DNDEBUG")
-else()
-  set(ARROW_DEFINITION_FLAGS "")
 endif()
 
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")

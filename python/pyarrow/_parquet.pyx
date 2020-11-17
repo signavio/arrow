@@ -28,7 +28,7 @@ import numpy as np
 from cython.operator cimport dereference as deref
 from pyarrow.includes.common cimport *
 from pyarrow.includes.libarrow cimport *
-from pyarrow.lib cimport (Buffer, Array, Schema,
+from pyarrow.lib cimport (_Weakrefable, Buffer, Array, Schema,
                           check_status,
                           MemoryPool, maybe_unbox_memory_pool,
                           Table, NativeFile,
@@ -38,28 +38,16 @@ from pyarrow.lib cimport (Buffer, Array, Schema,
                           pyarrow_wrap_buffer,
                           NativeFile, get_reader, get_writer)
 
-from pyarrow.compat import tobytes, frombytes
-from pyarrow.lib import (ArrowException, NativeFile, _stringify_path,
-                         BufferOutputStream,
-                         _datetime_conversion_functions,
-                         _box_time_milli,
-                         _box_time_micro)
+from pyarrow.lib import (ArrowException, NativeFile, BufferOutputStream,
+                         _stringify_path, _datetime_from_int,
+                         tobytes, frombytes)
 
 cimport cpython as cp
 
 
-cdef class Statistics:
-    cdef:
-        shared_ptr[CStatistics] statistics
-        ColumnChunkMetaData parent
-
+cdef class Statistics(_Weakrefable):
     def __cinit__(self):
         pass
-
-    cdef init(self, const shared_ptr[CStatistics]& statistics,
-              ColumnChunkMetaData parent):
-        self.statistics = statistics
-        self.parent = parent
 
     def __repr__(self):
         return """{}
@@ -101,14 +89,7 @@ cdef class Statistics:
             return NotImplemented
 
     def equals(self, Statistics other):
-        # TODO(kszucs): implement native Equals method for Statistics
-        return (self.has_min_max == other.has_min_max and
-                self.min == other.min and
-                self.max == other.max and
-                self.null_count == other.null_count and
-                self.distinct_count == other.distinct_count and
-                self.num_values == other.num_values and
-                self.physical_type == other.physical_type)
+        return self.statistics.get().Equals(deref(other.statistics.get()))
 
     @property
     def has_min_max(self):
@@ -169,7 +150,7 @@ cdef class Statistics:
         return converted_type_name_from_enum(raw_converted_type)
 
 
-cdef class ParquetLogicalType:
+cdef class ParquetLogicalType(_Weakrefable):
     cdef:
         shared_ptr[const CParquetLogicalType] type
 
@@ -180,7 +161,7 @@ cdef class ParquetLogicalType:
         self.type = type
 
     def __str__(self):
-        return frombytes(self.type.get().ToString())
+        return frombytes(self.type.get().ToString(), safe=True)
 
     def to_json(self):
         return frombytes(self.type.get().ToJSON())
@@ -256,28 +237,28 @@ cdef _box_logical_type_value(object value, const ColumnDescriptor* descr):
     elif ltype.type() == ParquetLogicalType_TIME:
         time_unit = (<const CParquetTimeType*> ltype).time_unit()
         if time_unit == ParquetTimeUnit_MILLIS:
-            return _box_time_milli(value)
+            return _datetime_from_int(value, unit=TimeUnit_MILLI).time()
         else:
-            return _box_time_micro(value)
+            return _datetime_from_int(value, unit=TimeUnit_MICRO).time()
     elif ltype.type() == ParquetLogicalType_TIMESTAMP:
         ts_type = <const CParquetTimestampType*> ltype
         time_unit = ts_type.time_unit()
-        if time_unit == ParquetTimeUnit_MILLIS:
-            converter = _datetime_conversion_functions()[TimeUnit_MILLI]
-        elif time_unit == ParquetTimeUnit_MICROS:
-            converter = _datetime_conversion_functions()[TimeUnit_MICRO]
-        elif time_unit == ParquetTimeUnit_NANOS:
-            converter = _datetime_conversion_functions()[TimeUnit_NANO]
-        else:
-            raise ValueError("Unsupported time unit")
-
         if ts_type.is_adjusted_to_utc():
             import pytz
             tzinfo = pytz.utc
         else:
             tzinfo = None
-
-        return converter(value, tzinfo)
+        if time_unit == ParquetTimeUnit_MILLIS:
+            return _datetime_from_int(value, unit=TimeUnit_MILLI,
+                                      tzinfo=tzinfo)
+        elif time_unit == ParquetTimeUnit_MICROS:
+            return _datetime_from_int(value, unit=TimeUnit_MICRO,
+                                      tzinfo=tzinfo)
+        elif time_unit == ParquetTimeUnit_NANOS:
+            return _datetime_from_int(value, unit=TimeUnit_NANO,
+                                      tzinfo=tzinfo)
+        else:
+            raise ValueError("Unsupported time unit")
     elif ltype.type() == ParquetLogicalType_INT:
         itype = <const CParquetIntType*> ltype
         if not itype.is_signed() and itype.bit_width() == 32:
@@ -299,19 +280,9 @@ cdef _box_flba(ParquetFLBA val, uint32_t len):
     return cp.PyBytes_FromStringAndSize(<char*> val.ptr, <Py_ssize_t> len)
 
 
-cdef class ColumnChunkMetaData:
-    cdef:
-        unique_ptr[CColumnChunkMetaData] up_metadata
-        CColumnChunkMetaData* metadata
-        RowGroupMetaData parent
-
+cdef class ColumnChunkMetaData(_Weakrefable):
     def __cinit__(self):
         pass
-
-    cdef init(self, RowGroupMetaData parent, int i):
-        self.up_metadata = parent.metadata.ColumnChunk(i)
-        self.metadata = self.up_metadata.get()
-        self.parent = parent
 
     def __repr__(self):
         statistics = indent(repr(self.statistics), 4 * ' ')
@@ -372,21 +343,7 @@ cdef class ColumnChunkMetaData:
             return NotImplemented
 
     def equals(self, ColumnChunkMetaData other):
-        # TODO(kszucs): implement native Equals method for CColumnChunkMetaData
-        return (self.file_offset == other.file_offset and
-                self.file_path == other.file_path and
-                self.physical_type == other.physical_type and
-                self.num_values == other.num_values and
-                self.path_in_schema == other.path_in_schema and
-                self.is_stats_set == other.is_stats_set and
-                self.statistics == other.statistics and
-                self.compression == other.compression and
-                self.encodings == other.encodings and
-                self.has_dictionary_page == other.has_dictionary_page and
-                self.dictionary_page_offset == other.dictionary_page_offset and
-                self.data_page_offset == other.data_page_offset and
-                self.total_compressed_size == other.total_compressed_size and
-                self.total_uncompressed_size == other.total_uncompressed_size)
+        return self.metadata.Equals(deref(other.metadata))
 
     @property
     def file_offset(self):
@@ -461,13 +418,7 @@ cdef class ColumnChunkMetaData:
         return self.metadata.total_uncompressed_size()
 
 
-cdef class RowGroupMetaData:
-    cdef:
-        int index  # for pickling support
-        unique_ptr[CRowGroupMetaData] up_metadata
-        CRowGroupMetaData* metadata
-        FileMetaData parent
-
+cdef class RowGroupMetaData(_Weakrefable):
     def __cinit__(self, FileMetaData parent, int index):
         if index < 0 or index >= parent.num_row_groups:
             raise IndexError('{0} out of bounds'.format(index))
@@ -486,16 +437,7 @@ cdef class RowGroupMetaData:
             return NotImplemented
 
     def equals(self, RowGroupMetaData other):
-        if not (self.num_columns == other.num_columns and
-                self.num_rows == other.num_rows and
-                self.total_byte_size == other.total_byte_size):
-            return False
-
-        for i in range(self.num_columns):
-            if self.column(i) != other.column(i):
-                return False
-
-        return True
+        return self.metadata.Equals(deref(other.metadata))
 
     def column(self, int i):
         if i < 0 or i >= self.num_columns:
@@ -549,18 +491,9 @@ def _reconstruct_filemetadata(Buffer serialized):
     return metadata
 
 
-cdef class FileMetaData:
-    cdef:
-        shared_ptr[CFileMetaData] sp_metadata
-        CFileMetaData* _metadata
-        ParquetSchema _schema
-
+cdef class FileMetaData(_Weakrefable):
     def __cinit__(self):
         pass
-
-    cdef init(self, const shared_ptr[CFileMetaData]& metadata):
-        self.sp_metadata = metadata
-        self._metadata = metadata.get()
 
     def __reduce__(self):
         cdef:
@@ -607,13 +540,7 @@ cdef class FileMetaData:
             return NotImplemented
 
     def equals(self, FileMetaData other):
-        # TODO(kszucs): use native method after ARROW-4970 is implemented
-        for prop in ('schema', 'serialized_size', 'num_columns', 'num_rows',
-                     'num_row_groups', 'format_version', 'created_by',
-                     'metadata'):
-            if getattr(self, prop) != getattr(other, prop):
-                return False
-        return True
+        return self._metadata.Equals(deref(other._metadata))
 
     @property
     def schema(self):
@@ -708,18 +635,15 @@ cdef class FileMetaData:
                 WriteMetaDataFile(deref(self._metadata), sink.get()))
 
 
-cdef class ParquetSchema:
-    cdef:
-        FileMetaData parent  # the FileMetaData owning the SchemaDescriptor
-        const SchemaDescriptor* schema
-
+cdef class ParquetSchema(_Weakrefable):
     def __cinit__(self, FileMetaData container):
         self.parent = container
         self.schema = container._metadata.schema()
 
     def __repr__(self):
-        return """{0}
-{1}""".format(object.__repr__(self), frombytes(self.schema.ToString()))
+        return "{0}\n{1}".format(
+            object.__repr__(self),
+            frombytes(self.schema.ToString(), safe=True))
 
     def __reduce__(self):
         return ParquetSchema, (self.parent,)
@@ -771,7 +695,7 @@ cdef class ParquetSchema:
         return ColumnSchema(self, i)
 
 
-cdef class ColumnSchema:
+cdef class ColumnSchema(_Weakrefable):
     cdef:
         int index
         ParquetSchema parent
@@ -979,7 +903,7 @@ cdef ParquetCompression compression_from_name(name):
         return ParquetCompression_UNCOMPRESSED
 
 
-cdef class ParquetReader:
+cdef class ParquetReader(_Weakrefable):
     cdef:
         object source
         CMemoryPool* pool
@@ -1088,8 +1012,7 @@ cdef class ParquetReader:
             vector[int] c_row_groups
             vector[int] c_column_indices
 
-        if use_threads:
-            self.set_use_threads(use_threads)
+        self.set_use_threads(use_threads)
 
         for row_group in row_groups:
             c_row_groups.push_back(row_group)
@@ -1114,8 +1037,7 @@ cdef class ParquetReader:
             shared_ptr[CTable] ctable
             vector[int] c_column_indices
 
-        if use_threads:
-            self.set_use_threads(use_threads)
+        self.set_use_threads(use_threads)
 
         if column_indices is not None:
             for index in column_indices:
@@ -1193,7 +1115,155 @@ cdef class ParquetReader:
         return pyarrow_wrap_chunked_array(out)
 
 
-cdef class ParquetWriter:
+cdef shared_ptr[WriterProperties] _create_writer_properties(
+        use_dictionary=None,
+        compression=None,
+        version=None,
+        write_statistics=None,
+        data_page_size=None,
+        compression_level=None,
+        use_byte_stream_split=False,
+        data_page_version=None) except *:
+    """General writer properties"""
+    cdef:
+        shared_ptr[WriterProperties] properties
+        WriterProperties.Builder props
+
+    # data_page_version
+
+    if data_page_version is not None:
+        if data_page_version == "1.0":
+            props.data_page_version(ParquetDataPageVersion_V1)
+        elif data_page_version == "2.0":
+            props.data_page_version(ParquetDataPageVersion_V2)
+        else:
+            raise ValueError("Unsupported Parquet data page version: {0}"
+                             .format(data_page_version))
+
+    # version
+
+    if version is not None:
+        if version == "1.0":
+            props.version(ParquetVersion_V1)
+        elif version == "2.0":
+            props.version(ParquetVersion_V2)
+        else:
+            raise ValueError("Unsupported Parquet format version: {0}"
+                             .format(version))
+
+    # compression
+
+    if isinstance(compression, basestring):
+        check_compression_name(compression)
+        props.compression(compression_from_name(compression))
+    elif compression is not None:
+        for column, codec in compression.iteritems():
+            check_compression_name(codec)
+            props.compression(tobytes(column), compression_from_name(codec))
+
+    if isinstance(compression_level, int):
+        props.compression_level(compression_level)
+    elif compression_level is not None:
+        for column, level in compression_level.iteritems():
+            props.compression_level(tobytes(column), level)
+
+    # use_dictionary
+
+    if isinstance(use_dictionary, bool):
+        if use_dictionary:
+            props.enable_dictionary()
+        else:
+            props.disable_dictionary()
+    elif use_dictionary is not None:
+        # Deactivate dictionary encoding by default
+        props.disable_dictionary()
+        for column in use_dictionary:
+            props.enable_dictionary(tobytes(column))
+
+    # write_statistics
+
+    if isinstance(write_statistics, bool):
+        if write_statistics:
+            props.enable_statistics()
+        else:
+            props.disable_statistics()
+    elif write_statistics is not None:
+        # Deactivate statistics by default and enable for specified columns
+        props.disable_statistics()
+        for column in write_statistics:
+            props.enable_statistics(tobytes(column))
+
+    # use_byte_stream_split
+
+    if isinstance(use_byte_stream_split, bool):
+        if use_byte_stream_split:
+            props.encoding(ParquetEncoding_BYTE_STREAM_SPLIT)
+    elif use_byte_stream_split is not None:
+        for column in use_byte_stream_split:
+            props.encoding(tobytes(column),
+                           ParquetEncoding_BYTE_STREAM_SPLIT)
+
+    if data_page_size is not None:
+        props.data_pagesize(data_page_size)
+
+    properties = props.build()
+
+    return properties
+
+
+cdef shared_ptr[ArrowWriterProperties] _create_arrow_writer_properties(
+        use_deprecated_int96_timestamps=False,
+        coerce_timestamps=None,
+        allow_truncated_timestamps=False,
+        writer_engine_version=None) except *:
+    """Arrow writer properties"""
+    cdef:
+        shared_ptr[ArrowWriterProperties] arrow_properties
+        ArrowWriterProperties.Builder arrow_props
+
+    # Store the original Arrow schema so things like dictionary types can
+    # be automatically reconstructed
+    arrow_props.store_schema()
+
+    # int96 support
+
+    if use_deprecated_int96_timestamps:
+        arrow_props.enable_deprecated_int96_timestamps()
+    else:
+        arrow_props.disable_deprecated_int96_timestamps()
+
+    # coerce_timestamps
+
+    if coerce_timestamps == 'ms':
+        arrow_props.coerce_timestamps(TimeUnit_MILLI)
+    elif coerce_timestamps == 'us':
+        arrow_props.coerce_timestamps(TimeUnit_MICRO)
+    elif coerce_timestamps is not None:
+        raise ValueError('Invalid value for coerce_timestamps: {0}'
+                         .format(coerce_timestamps))
+
+    # allow_truncated_timestamps
+
+    if allow_truncated_timestamps:
+        arrow_props.allow_truncated_timestamps()
+    else:
+        arrow_props.disallow_truncated_timestamps()
+
+    # writer_engine_version
+
+    if writer_engine_version == "V1":
+        warnings.warn("V1 parquet writer engine is a no-op.  Use V2.")
+        arrow_props.set_engine_version(ArrowWriterEngineVersion.V1)
+    elif writer_engine_version != "V2":
+        raise ValueError("Unsupported Writer Engine Version: {0}"
+                         .format(writer_engine_version))
+
+    arrow_properties = arrow_props.build()
+
+    return arrow_properties
+
+
+cdef class ParquetWriter(_Weakrefable):
     cdef:
         unique_ptr[FileWriter] writer
         shared_ptr[COutputStream] sink
@@ -1207,6 +1277,7 @@ cdef class ParquetWriter:
         object allow_truncated_timestamps
         object compression
         object compression_level
+        object data_page_version
         object version
         object write_statistics
         object writer_engine_version
@@ -1223,9 +1294,11 @@ cdef class ParquetWriter:
                   allow_truncated_timestamps=False,
                   compression_level=None,
                   use_byte_stream_split=False,
-                  writer_engine_version=None):
+                  writer_engine_version=None,
+                  data_page_version=None):
         cdef:
             shared_ptr[WriterProperties] properties
+            shared_ptr[ArrowWriterProperties] arrow_properties
             c_string c_where
             CMemoryPool* pool
 
@@ -1240,41 +1313,22 @@ cdef class ParquetWriter:
                 self.sink = GetResultValue(FileOutputStream.Open(c_where))
             self.own_sink = True
 
-        self.use_dictionary = use_dictionary
-        self.compression = compression
-        self.compression_level = compression_level
-        self.version = version
-        self.write_statistics = write_statistics
-        self.use_deprecated_int96_timestamps = use_deprecated_int96_timestamps
-        self.coerce_timestamps = coerce_timestamps
-        self.allow_truncated_timestamps = allow_truncated_timestamps
-        self.use_byte_stream_split = use_byte_stream_split
-        self.writer_engine_version = writer_engine_version
-
-        cdef WriterProperties.Builder properties_builder
-        self._set_version(&properties_builder)
-        self._set_compression_props(&properties_builder)
-        self._set_dictionary_props(&properties_builder)
-        self._set_statistics_props(&properties_builder)
-        self._set_byte_stream_split_props(&properties_builder)
-
-        if data_page_size is not None:
-            properties_builder.data_pagesize(data_page_size)
-
-        properties = properties_builder.build()
-
-        cdef ArrowWriterProperties.Builder arrow_properties_builder
-
-        # Store the original Arrow schema so things like dictionary types can
-        # be automatically reconstructed
-        arrow_properties_builder.store_schema()
-
-        self._set_int96_support(&arrow_properties_builder)
-        self._set_coerce_timestamps(&arrow_properties_builder)
-        self._set_allow_truncated_timestamps(&arrow_properties_builder)
-        self._set_writer_engine_version(&arrow_properties_builder)
-
-        arrow_properties = arrow_properties_builder.build()
+        properties = _create_writer_properties(
+            use_dictionary=use_dictionary,
+            compression=compression,
+            version=version,
+            write_statistics=write_statistics,
+            data_page_size=data_page_size,
+            compression_level=compression_level,
+            use_byte_stream_split=use_byte_stream_split,
+            data_page_version=data_page_version
+        )
+        arrow_properties = _create_arrow_writer_properties(
+            use_deprecated_int96_timestamps=use_deprecated_int96_timestamps,
+            coerce_timestamps=coerce_timestamps,
+            allow_truncated_timestamps=allow_truncated_timestamps,
+            writer_engine_version=writer_engine_version
+        )
 
         pool = maybe_unbox_memory_pool(memory_pool)
         with nogil:
@@ -1282,99 +1336,6 @@ cdef class ParquetWriter:
                 FileWriter.Open(deref(schema.schema), pool,
                                 self.sink, properties, arrow_properties,
                                 &self.writer))
-
-    cdef void _set_int96_support(self, ArrowWriterProperties.Builder* props):
-        if self.use_deprecated_int96_timestamps:
-            props.enable_deprecated_int96_timestamps()
-        else:
-            props.disable_deprecated_int96_timestamps()
-
-    cdef int _set_coerce_timestamps(
-            self, ArrowWriterProperties.Builder* props) except -1:
-        if self.coerce_timestamps == 'ms':
-            props.coerce_timestamps(TimeUnit_MILLI)
-        elif self.coerce_timestamps == 'us':
-            props.coerce_timestamps(TimeUnit_MICRO)
-        elif self.coerce_timestamps is not None:
-            raise ValueError('Invalid value for coerce_timestamps: {0}'
-                             .format(self.coerce_timestamps))
-
-    cdef void _set_allow_truncated_timestamps(
-            self, ArrowWriterProperties.Builder* props):
-        if self.allow_truncated_timestamps:
-            props.allow_truncated_timestamps()
-        else:
-            props.disallow_truncated_timestamps()
-
-    cdef int _set_writer_engine_version(
-            self, ArrowWriterProperties.Builder* props) except -1:
-        if self.writer_engine_version == "V1":
-            props.set_engine_version(ArrowWriterEngineVersion.V1)
-        elif self.writer_engine_version != "V2":
-            raise ValueError("Unsupported Writer Engine Version: {0}"
-                             .format(self.writer_engine_version))
-
-    cdef int _set_version(self, WriterProperties.Builder* props) except -1:
-        if self.version is not None:
-            if self.version == "1.0":
-                props.version(ParquetVersion_V1)
-            elif self.version == "2.0":
-                props.version(ParquetVersion_V2)
-            else:
-                raise ValueError("Unsupported Parquet format version: {0}"
-                                 .format(self.version))
-
-    cdef void _set_compression_props(self, WriterProperties.Builder* props) \
-            except *:
-        if isinstance(self.compression, basestring):
-            check_compression_name(self.compression)
-            props.compression(compression_from_name(self.compression))
-        elif self.compression is not None:
-            for column, codec in self.compression.iteritems():
-                check_compression_name(codec)
-                props.compression(column, compression_from_name(codec))
-
-        if isinstance(self.compression_level, int):
-            props.compression_level(self.compression_level)
-        elif self.compression_level is not None:
-            for column, level in self.compression_level.iteritems():
-                props.compression_level(tobytes(column), level)
-
-    cdef void _set_dictionary_props(self, WriterProperties.Builder* props) \
-            except *:
-        if isinstance(self.use_dictionary, bool):
-            if self.use_dictionary:
-                props.enable_dictionary()
-            else:
-                props.disable_dictionary()
-        elif self.use_dictionary is not None:
-            # Deactivate dictionary encoding by default
-            props.disable_dictionary()
-            for column in self.use_dictionary:
-                props.enable_dictionary(tobytes(column))
-
-    cdef void _set_byte_stream_split_props(
-            self, WriterProperties.Builder* props) except *:
-        if isinstance(self.use_byte_stream_split, bool):
-            if self.use_byte_stream_split:
-                props.encoding(ParquetEncoding_BYTE_STREAM_SPLIT)
-        elif self.use_byte_stream_split is not None:
-            for column in self.use_byte_stream_split:
-                props.encoding(tobytes(column),
-                               ParquetEncoding_BYTE_STREAM_SPLIT)
-
-    cdef void _set_statistics_props(self, WriterProperties.Builder* props) \
-            except *:
-        if isinstance(self.write_statistics, bool):
-            if self.write_statistics:
-                props.enable_statistics()
-            else:
-                props.disable_statistics()
-        elif self.write_statistics is not None:
-            # Deactivate statistics by default and enable for specified columns
-            props.disable_statistics()
-            for column in self.write_statistics:
-                props.enable_statistics(tobytes(column))
 
     def close(self):
         with nogil:

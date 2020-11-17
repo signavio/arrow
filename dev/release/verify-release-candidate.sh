@@ -73,6 +73,7 @@ if [ -z "${ARROW_CUDA:-}" ] && detect_cuda; then
 fi
 : ${ARROW_CUDA:=OFF}
 : ${ARROW_FLIGHT:=ON}
+: ${ARROW_GANDIVA:=ON}
 
 ARROW_DIST_URL='https://dist.apache.org/repos/dist/dev/arrow'
 
@@ -127,7 +128,9 @@ test_binary() {
   local download_dir=binaries
   mkdir -p ${download_dir}
 
-  python $SOURCE_DIR/download_rc_binaries.py $VERSION $RC_NUMBER --dest=${download_dir}
+  python $SOURCE_DIR/download_rc_binaries.py $VERSION $RC_NUMBER \
+         --dest=${download_dir}
+
   verify_dir_artifact_signatures ${download_dir}
 }
 
@@ -140,15 +143,8 @@ test_apt() {
                 "arm64v8/ubuntu:xenial" \
                 "ubuntu:bionic" \
                 "arm64v8/ubuntu:bionic" \
-                "ubuntu:eoan" \
-                "arm64v8/ubuntu:eoan" \
                 "ubuntu:focal" \
                 "arm64v8/ubuntu:focal"; do \
-    # We can't build some arm64 binaries by Crossbow for now.
-    if [ "${target}" = "arm64v8/debian:stretch" ]; then continue; fi
-    if [ "${target}" = "arm64v8/debian:buster" ]; then continue; fi
-    if [ "${target}" = "arm64v8/ubuntu:eoan" ]; then continue; fi
-    if [ "${target}" = "arm64v8/ubuntu:focal" ]; then continue; fi
     case "${target}" in
       arm64v8/*)
         if [ "$(arch)" = "aarch64" -o -e /usr/bin/qemu-aarch64-static ]; then
@@ -176,8 +172,6 @@ test_yum() {
                 "arm64v8/centos:7" \
                 "centos:8" \
                 "arm64v8/centos:8"; do
-    # We can't build some arm64 binaries by Crossbow for now.
-    if [ "${target}" = "arm64v8/centos:8" ]; then continue; fi
     case "${target}" in
       arm64v8/*)
         if [ "$(arch)" = "aarch64" -o -e /usr/bin/qemu-aarch64-static ]; then
@@ -219,7 +213,6 @@ setup_tempdir() {
   fi
 }
 
-
 setup_miniconda() {
   # Setup short-lived miniconda for Python and integration tests
   if [ "$(uname)" == "Darwin" ]; then
@@ -236,16 +229,18 @@ setup_miniconda() {
     bash miniconda.sh -b -p $MINICONDA
     rm -f miniconda.sh
   fi
+  echo "Installed miniconda at ${MINICONDA}"
 
   . $MINICONDA/etc/profile.d/conda.sh
 
   conda create -n arrow-test -y -q -c conda-forge \
-        python=3.6 \
-        nomkl \
-        numpy \
-        pandas \
-        cython
+    python=3.6 \
+    nomkl \
+    numpy \
+    pandas \
+    cython
   conda activate arrow-test
+  echo "Using conda environment ${CONDA_PREFIX}"
 }
 
 # Build and test Java (Requires newer Maven -- I used 3.3.9)
@@ -273,7 +268,7 @@ ${ARROW_CMAKE_OPTIONS:-}
 -DARROW_PLASMA=ON
 -DARROW_ORC=ON
 -DARROW_PYTHON=ON
--DARROW_GANDIVA=ON
+-DARROW_GANDIVA=${ARROW_GANDIVA}
 -DARROW_PARQUET=ON
 -DARROW_DATASET=ON
 -DPARQUET_REQUIRE_ENCRYPTION=ON
@@ -367,7 +362,6 @@ test_python() {
   pip install -r requirements-build.txt -r requirements-test.txt
 
   export PYARROW_WITH_DATASET=1
-  export PYARROW_WITH_GANDIVA=1
   export PYARROW_WITH_PARQUET=1
   export PYARROW_WITH_PLASMA=1
   if [ "${ARROW_CUDA}" = "ON" ]; then
@@ -376,9 +370,12 @@ test_python() {
   if [ "${ARROW_FLIGHT}" = "ON" ]; then
     export PYARROW_WITH_FLIGHT=1
   fi
+  if [ "${ARROW_GANDIVA}" = "ON" ]; then
+    export PYARROW_WITH_GANDIVA=1
+  fi
 
   python setup.py build_ext --inplace
-  py.test pyarrow -v --pdb
+  pytest pyarrow -v --pdb
 
   popd
 }
@@ -403,7 +400,7 @@ test_glib() {
   export GI_TYPELIB_PATH=$ARROW_HOME/lib/girepository-1.0:$GI_TYPELIB_PATH
 
   if ! bundle --version; then
-    gem install bundler
+    gem install --no-document bundler
   fi
 
   bundle install --path vendor/bundle
@@ -415,26 +412,19 @@ test_glib() {
 test_js() {
   pushd js
 
-  # export NVM_DIR="`pwd`/.nvm"
-  # mkdir -p $NVM_DIR
-  # curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.34.0/install.sh | bash
-  # [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-  #
-  # nvm install node
+  if [ "${INSTALL_NODE}" -gt 0 ]; then
+    export NVM_DIR="`pwd`/.nvm"
+    mkdir -p $NVM_DIR
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.35.3/install.sh | bash
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+    nvm install node
+  fi
 
   npm install
   # clean, lint, and build JS source
   npx run-s clean:all lint build
   npm run test
-
-  # create initial integration test data
-  # npm run create:testdata
-
-  # run once to write the snapshots
-  # npm test -- -t ts -u --integration
-
-  # run again to test all builds against the snapshots
-  # npm test -- --integration
   popd
 }
 
@@ -621,18 +611,26 @@ test_binary_distribution() {
 }
 
 check_python_imports() {
-  local py_arch=$1
+   python << IMPORT_TESTS
+import platform
 
-  python -c "import pyarrow.parquet"
-  python -c "import pyarrow.plasma"
-  python -c "import pyarrow.fs"
+import pyarrow
+import pyarrow.parquet
+import pyarrow.plasma
+import pyarrow.fs
+import pyarrow._hdfs
+import pyarrow.dataset
+import pyarrow.flight
 
-  if [[ "$py_arch" =~ ^3 ]]; then
-    # Flight, Gandiva and Dataset are only available for py3
-    python -c "import pyarrow.dataset"
-    python -c "import pyarrow.flight"
-    python -c "import pyarrow.gandiva"
-  fi
+if platform.system() == "Darwin":
+    macos_version = tuple(map(int, platform.mac_ver()[0].split('.')))
+    check_s3fs = macos_version >= (10, 13)
+else:
+    check_s3fs = True
+
+if check_s3fs:
+    import pyarrow._s3fs
+IMPORT_TESTS
 }
 
 test_linux_wheels() {
@@ -643,14 +641,16 @@ test_linux_wheels() {
     local env=_verify_wheel-${py_arch}
     conda create -yq -n ${env} python=${py_arch//[mu]/}
     conda activate ${env}
+    pip install -U pip
 
     for ml_spec in ${manylinuxes}; do
       # check the mandatory and optional imports
       pip install python-rc/${VERSION}-rc${RC_NUMBER}/pyarrow-${VERSION}-cp${py_arch//[mu.]/}-cp${py_arch//./}-manylinux${ml_spec}_x86_64.whl
-      check_python_imports py_arch
+      check_python_imports
 
       # install test requirements and execute the tests
       pip install -r ${ARROW_DIR}/python/requirements-test.txt
+      python -c 'import pyarrow; pyarrow.create_library_symlinks()'
       pytest --pyargs pyarrow
     done
 
@@ -665,23 +665,15 @@ test_macos_wheels() {
     local env=_verify_wheel-${py_arch}
     conda create -yq -n ${env} python=${py_arch//m/}
     conda activate ${env}
-
-    macos_suffix=macosx
-    case "${py_arch}" in
-    *m)
-      macos_suffix="${macos_suffix}_10_9_intel"
-      ;;
-    *)
-      macos_suffix="${macos_suffix}_10_9_x86_64"
-      ;;
-    esac
+    pip install -U pip
 
     # check the mandatory and optional imports
-    pip install python-rc/${VERSION}-rc${RC_NUMBER}/pyarrow-${VERSION}-cp${py_arch//[m.]/}-cp${py_arch//./}-${macos_suffix}.whl
-    check_python_imports py_arch
+    pip install --find-links python-rc/${VERSION}-rc${RC_NUMBER} pyarrow==${VERSION}
+    check_python_imports
 
     # install test requirements and execute the tests
     pip install -r ${ARROW_DIR}/python/requirements-test.txt
+    python -c 'import pyarrow; pyarrow.create_library_symlinks()'
     pytest --pyargs pyarrow
 
     conda deactivate
@@ -699,9 +691,6 @@ test_wheels() {
   else
     local filter_regex=.*manylinux.*
   fi
-
-  conda create -yq -n py3-base python=3.7
-  conda activate py3-base
 
   python $SOURCE_DIR/download_rc_binaries.py $VERSION $RC_NUMBER \
          --regex=${filter_regex} \
@@ -723,9 +712,21 @@ test_wheels() {
 # By default test all functionalities.
 # To deactivate one test, deactivate the test and all of its dependents
 # To explicitly select one test, set TEST_DEFAULT=0 TEST_X=1
+
+# Install NodeJS locally for running the JavaScript tests rather than using the
+# system Node installation, which may be too old.
+: ${INSTALL_NODE:=1}
+
 if [ "${ARTIFACT}" == "source" ]; then
-  TEST_SOURCE=1
+  : ${TEST_SOURCE:=1}
+elif [ "${ARTIFACT}" == "wheels" ]; then
+  TEST_WHEELS=1
+else
+  TEST_BINARY_DISTRIBUTIONS=1
 fi
+: ${TEST_SOURCE:=0}
+: ${TEST_WHEELS:=0}
+: ${TEST_BINARY_DISTRIBUTIONS:=0}
 
 : ${TEST_DEFAULT:=1}
 : ${TEST_JAVA:=${TEST_DEFAULT}}
@@ -738,9 +739,14 @@ fi
 : ${TEST_GO:=${TEST_DEFAULT}}
 : ${TEST_RUST:=${TEST_DEFAULT}}
 : ${TEST_INTEGRATION:=${TEST_DEFAULT}}
-: ${TEST_BINARY:=${TEST_DEFAULT}}
-: ${TEST_APT:=${TEST_DEFAULT}}
-: ${TEST_YUM:=${TEST_DEFAULT}}
+if [ ${TEST_BINARY_DISTRIBUTIONS} -gt 0 ]; then
+  TEST_BINARY_DISTRIBUTIONS_DEFAULT=${TEST_DEFAULT}
+else
+  TEST_BINARY_DISTRIBUTIONS_DEFAULT=0
+fi
+: ${TEST_BINARY:=${TEST_BINARY_DISTRIBUTIONS_DEFAULT}}
+: ${TEST_APT:=${TEST_BINARY_DISTRIBUTIONS_DEFAULT}}
+: ${TEST_YUM:=${TEST_BINARY_DISTRIBUTIONS_DEFAULT}}
 
 # For selective Integration testing, set TEST_DEFAULT=0 TEST_INTEGRATION_X=1 TEST_INTEGRATION_Y=1
 : ${TEST_INTEGRATION_CPP:=${TEST_INTEGRATION}}
@@ -756,13 +762,7 @@ TEST_JS=$((${TEST_JS} + ${TEST_INTEGRATION_JS}))
 TEST_GO=$((${TEST_GO} + ${TEST_INTEGRATION_GO}))
 TEST_INTEGRATION=$((${TEST_INTEGRATION} + ${TEST_INTEGRATION_CPP} + ${TEST_INTEGRATION_JAVA} + ${TEST_INTEGRATION_JS} + ${TEST_INTEGRATION_GO}))
 
-if [ "${ARTIFACT}" == "wheels" ]; then
-  TEST_WHEELS=1
-else
-  TEST_WHEELS=0
-fi
-
-NEED_MINICONDA=$((${TEST_CPP} + ${TEST_WHEELS} + ${TEST_INTEGRATION}))
+NEED_MINICONDA=$((${TEST_CPP} + ${TEST_WHEELS} + ${TEST_BINARY} + ${TEST_INTEGRATION}))
 
 : ${TEST_ARCHIVE:=apache-arrow-${VERSION}.tar.gz}
 case "${TEST_ARCHIVE}" in
@@ -781,15 +781,16 @@ cd ${ARROW_TMPDIR}
 
 if [ ${NEED_MINICONDA} -gt 0 ]; then
   setup_miniconda
-  echo "Using miniconda environment ${MINICONDA}"
 fi
 
 if [ "${ARTIFACT}" == "source" ]; then
   dist_name="apache-arrow-${VERSION}"
   if [ ${TEST_SOURCE} -gt 0 ]; then
     import_gpg_keys
-    fetch_archive ${dist_name}
-    tar xf ${dist_name}.tar.gz
+    if [ ! -d "${dist_name}" ]; then
+      fetch_archive ${dist_name}
+      tar xf ${dist_name}.tar.gz
+    fi
   else
     mkdir -p ${dist_name}
     if [ ! -f ${TEST_ARCHIVE} ]; then

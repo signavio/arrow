@@ -79,7 +79,7 @@ cdef class ChunkedArray(_PandasConvertible):
                 )
             )
 
-        return frombytes(result)
+        return frombytes(result, safe=True)
 
     def format(self, **kwargs):
         import warnings
@@ -116,7 +116,7 @@ cdef class ChunkedArray(_PandasConvertible):
     @property
     def null_count(self):
         """
-        Number of null entires
+        Number of null entries
 
         Returns
         -------
@@ -143,28 +143,56 @@ cdef class ChunkedArray(_PandasConvertible):
                 yield item
 
     def __getitem__(self, key):
+        """
+        Slice or return value at given index
+
+        Parameters
+        ----------
+        key : integer or slice
+            Slices with step not equal to 1 (or None) will produce a copy
+            rather than a zero-copy view
+
+        Returns
+        -------
+        value : Scalar (index) or ChunkedArray (slice)
+        """
         if isinstance(key, slice):
             return _normalize_slice(self, key)
-        elif isinstance(key, int):
-            return self.getitem(key)
-        else:
-            raise TypeError("key must either be a slice or integer")
 
-    cdef getitem(self, int64_t i):
+        return self.getitem(_normalize_index(key, self.chunked_array.length()))
+
+    cdef getitem(self, int64_t index):
         cdef int j
 
-        index = _normalize_index(i, self.chunked_array.length())
         for j in range(self.num_chunks):
             if index < self.chunked_array.chunk(j).get().length():
                 return self.chunk(j)[index]
             else:
                 index -= self.chunked_array.chunk(j).get().length()
 
+    def is_null(self):
+        """
+        Return BooleanArray indicating the null values.
+        """
+        return _pc().is_null(self)
+
+    def is_valid(self):
+        """
+        Return BooleanArray indicating the non-null values.
+        """
+        return _pc().is_valid(self)
+
     def __eq__(self, other):
         try:
             return self.equals(other)
         except TypeError:
             return NotImplemented
+
+    def fill_null(self, fill_value):
+        """
+        See pyarrow.compute.fill_null docstring for usage.
+        """
+        return _pc().fill_null(self, fill_value)
 
     def equals(self, ChunkedArray other):
         """
@@ -195,24 +223,35 @@ cdef class ChunkedArray(_PandasConvertible):
     def _to_pandas(self, options, **kwargs):
         return _array_like_to_pandas(self, options)
 
-    def __array__(self, dtype=None):
+    def to_numpy(self):
+        """
+        Return a NumPy copy of this array (experimental).
+
+        Returns
+        -------
+        array : numpy.ndarray
+        """
         cdef:
             PyObject* out
             PandasOptions c_options
             object values
 
         if self.type.id == _Type_EXTENSION:
-            return (
-                chunked_array(
-                    [self.chunk(i).storage for i in range(self.num_chunks)]
-                ).__array__(dtype)
+            storage_array = chunked_array(
+                [chunk.storage for chunk in self.iterchunks()],
+                type=self.type.storage_type
             )
+            return storage_array.to_numpy()
 
         with nogil:
-            check_status(libarrow.ConvertChunkedArrayToPandas(
-                c_options,
-                self.sp_chunked_array,
-                self, &out))
+            check_status(
+                ConvertChunkedArrayToPandas(
+                    c_options,
+                    self.sp_chunked_array,
+                    self,
+                    &out
+                )
+            )
 
         # wrap_array_output uses pandas to convert to Categorical, here
         # always convert to numpy array
@@ -221,36 +260,21 @@ cdef class ChunkedArray(_PandasConvertible):
         if isinstance(values, dict):
             values = np.take(values['dictionary'], values['indices'])
 
+        return values
+
+    def __array__(self, dtype=None):
+        values = self.to_numpy()
         if dtype is None:
             return values
         return values.astype(dtype)
 
-    def cast(self, object target_type, bint safe=True):
+    def cast(self, object target_type, safe=True):
         """
-        Cast values to another data type
+        Cast array values to another data type
 
-        Parameters
-        ----------
-        target_type : DataType
-            Type to cast to
-        safe : bool, default True
-            Check for overflows or other unsafe conversions
-
-        Returns
-        -------
-        casted : ChunkedArray
+        See pyarrow.compute.cast for usage
         """
-        cdef:
-            CCastOptions options = CCastOptions(safe)
-            DataType type = ensure_type(target_type)
-            shared_ptr[CArray] result
-            CDatum out
-
-        with nogil:
-            check_status(Cast(_context(), CDatum(self.sp_chunked_array),
-                              type.sp_type, options, &out))
-
-        return pyarrow_wrap_chunked_array(out.chunked_array())
+        return _pc().cast(self, target_type, safe=safe)
 
     def dictionary_encode(self):
         """
@@ -261,14 +285,7 @@ cdef class ChunkedArray(_PandasConvertible):
         pyarrow.ChunkedArray
             Same chunking as the input, all chunks share a common dictionary.
         """
-        cdef CDatum out
-
-        with nogil:
-            check_status(
-                DictionaryEncode(_context(), CDatum(self.sp_chunked_array),
-                                 &out))
-
-        return wrap_datum(out)
+        return _pc().call_function('dictionary_encode', [self])
 
     def flatten(self, MemoryPool memory_pool=None):
         """
@@ -301,13 +318,7 @@ cdef class ChunkedArray(_PandasConvertible):
         -------
         pyarrow.Array
         """
-        cdef shared_ptr[CArray] result
-
-        with nogil:
-            check_status(
-                Unique(_context(), CDatum(self.sp_chunked_array), &result))
-
-        return pyarrow_wrap_array(result)
+        return _pc().call_function('unique', [self])
 
     def value_counts(self):
         """
@@ -317,12 +328,7 @@ cdef class ChunkedArray(_PandasConvertible):
         -------
         An array of  <input type "Values", int64_t "Counts"> structs
         """
-        cdef shared_ptr[CArray] result
-
-        with nogil:
-            check_status(ValueCounts(_context(), CDatum(self.sp_chunked_array),
-                                     &result))
-        return pyarrow_wrap_array(result)
+        return _pc().call_function('value_counts', [self])
 
     def slice(self, offset=0, length=None):
         """
@@ -345,6 +351,7 @@ cdef class ChunkedArray(_PandasConvertible):
         if offset < 0:
             raise IndexError('Offset must be non-negative')
 
+        offset = min(len(self), offset)
         if length is None:
             result = self.chunked_array.Slice(offset)
         else:
@@ -354,59 +361,17 @@ cdef class ChunkedArray(_PandasConvertible):
 
     def filter(self, mask, object null_selection_behavior="drop"):
         """
-        Filter the chunked array with a boolean mask.
-
-        Parameters
-        ----------
-        mask : Array or ChunkedArray
-            The boolean mask indicating which values to extract.
-        null_selection_behavior : str, default 'drop'
-            Configure the behavior on encountering a null slot in the mask.
-            Allowed values are 'drop' and 'emit_null'.
-
-            - 'drop': nulls will be treated as equivalent to False.
-            - 'emit_null': nulls will result in a null in the output.
-
-        Returns
-        -------
-        ChunkedArray
-
-        Examples
-        --------
-        >>> import pyarrow as pa
-        >>> arr = pa.chunked_array([["a", "b"], ["c", None, "e"]])
-        >>> mask = pa.chunked_array([[True, False], [None, False, True]])
-
-        >>> arr.filter(mask)
-        <pyarrow.lib.ChunkedArray object at 0x7f8070081ea8>
-        [
-          [
-            "a"
-          ],
-          [
-            "e"
-          ]
-        ]
+        Select values from a chunked array. See pyarrow.compute.filter for full
+        usage.
         """
-        cdef:
-            CDatum filter
-            CDatum out
-            CFilterOptions options
+        return _pc().filter(self, mask, null_selection_behavior)
 
-        options = _convert_filter_option(null_selection_behavior)
-
-        mask = asarray(mask)
-        if isinstance(mask, Array):
-            filter = CDatum((<Array> mask).sp_array)
-        else:
-            filter = CDatum((<ChunkedArray> mask).sp_chunked_array)
-
-        with nogil:
-            check_status(
-                FilterKernel(_context(), CDatum(self.sp_chunked_array),
-                             filter, options, &out))
-
-        return wrap_datum(out)
+    def take(self, object indices):
+        """
+        Select values from a chunked array. See pyarrow.compute.take for full
+        usage.
+        """
+        return _pc().take(self, indices)
 
     @property
     def num_chunks(self):
@@ -464,7 +429,6 @@ def chunked_array(arrays, type=None):
         Must all be the same data type. Can be empty only if type also passed.
     type : DataType or string coercible to DataType
 
-
     Returns
     -------
     ChunkedArray
@@ -473,31 +437,35 @@ def chunked_array(arrays, type=None):
         Array arr
         vector[shared_ptr[CArray]] c_arrays
         shared_ptr[CChunkedArray] sp_chunked_array
-        shared_ptr[CDataType] sp_data_type
+
+    type = ensure_type(type, allow_none=True)
 
     if isinstance(arrays, Array):
         arrays = [arrays]
 
     for x in arrays:
-        if isinstance(x, Array):
-            arr = x
-            if type is not None:
-                assert x.type == type
+        arr = x if isinstance(x, Array) else array(x, type=type)
+
+        if type is None:
+            # it allows more flexible chunked array construction from to coerce
+            # subsequent arrays to the firstly inferred array type
+            # it also spares the inference overhead after the first chunk
+            type = arr.type
         else:
-            arr = array(x, type=type)
+            if arr.type != type:
+                raise TypeError(
+                    "All array chunks must have type {}".format(type)
+                )
 
         c_arrays.push_back(arr.sp_array)
 
-    if type:
-        type = ensure_type(type)
-        sp_data_type = pyarrow_unwrap_data_type(type)
-        sp_chunked_array.reset(new CChunkedArray(c_arrays, sp_data_type))
-    else:
-        if c_arrays.size() == 0:
-            raise ValueError("When passing an empty collection of arrays "
-                             "you must also pass the data type")
-        sp_chunked_array.reset(new CChunkedArray(c_arrays))
+    if c_arrays.size() == 0 and type is None:
+        raise ValueError("When passing an empty collection of arrays "
+                         "you must also pass the data type")
 
+    sp_chunked_array.reset(
+        new CChunkedArray(c_arrays, pyarrow_unwrap_data_type(type))
+    )
     with nogil:
         check_status(sp_chunked_array.get().Validate())
 
@@ -742,6 +710,19 @@ cdef class RecordBatch(_PandasConvertible):
         return super(RecordBatch, self).__sizeof__() + self.nbytes
 
     def __getitem__(self, key):
+        """
+        Slice or return column at given index
+
+        Parameters
+        ----------
+        key : integer or slice
+            Slices with step not equal to 1 (or None) will produce a copy
+            rather than a zero-copy view
+
+        Returns
+        -------
+        value : ChunkedArray (index) or RecordBatch (slice)
+        """
         if isinstance(key, slice):
             return _normalize_slice(self, key)
         else:
@@ -790,6 +771,7 @@ cdef class RecordBatch(_PandasConvertible):
         if offset < 0:
             raise IndexError('Offset must be non-negative')
 
+        offset = min(len(self), offset)
         if length is None:
             result = self.batch.Slice(offset)
         else:
@@ -799,38 +781,12 @@ cdef class RecordBatch(_PandasConvertible):
 
     def filter(self, Array mask, object null_selection_behavior="drop"):
         """
-        Filter the record batch with a boolean mask.
-
-        Parameters
-        ----------
-        mask : Array
-            The boolean mask indicating which rows to extract.
-        null_selection_behavior : str, default 'drop'
-            Configure the behavior on encountering a null slot in the mask.
-            Allowed values are 'drop' and 'emit_null'.
-
-            - 'drop': nulls will be treated as equivalent to False.
-            - 'emit_null': nulls will result in a null in the output.
-
-        Returns
-        -------
-        RecordBatch
+        Select record from a record batch. See pyarrow.compute.filter for full
+        usage.
         """
-        cdef:
-            CDatum out
-            CFilterOptions options
+        return _pc().filter(self, mask, null_selection_behavior)
 
-        options = _convert_filter_option(null_selection_behavior)
-
-        with nogil:
-            check_status(
-                FilterKernel(_context(), CDatum(self.sp_batch),
-                             CDatum(mask.sp_array), options, &out)
-            )
-
-        return wrap_datum(out)
-
-    def equals(self, RecordBatch other, bint check_metadata=False):
+    def equals(self, object other, bint check_metadata=False):
         """
         Check if contents of two record batches are equal.
 
@@ -847,41 +803,23 @@ cdef class RecordBatch(_PandasConvertible):
         """
         cdef:
             CRecordBatch* this_batch = self.batch
-            CRecordBatch* other_batch = other.batch
+            shared_ptr[CRecordBatch] other_batch = pyarrow_unwrap_batch(other)
             c_bool result
+
+        if not other_batch:
+            return False
 
         with nogil:
             result = this_batch.Equals(deref(other_batch), check_metadata)
 
         return result
 
-    def take(self, Array indices):
+    def take(self, object indices):
         """
-        Take rows from a RecordBatch.
-
-        The resulting batch contains rows taken from the input batch at the
-        given indices. If an index is null then all the cells in that row
-        will be null.
-
-        Parameters
-        ----------
-        indices : Array
-            The indices of the values to extract. Array needs to be of
-            integer type.
-        Returns
-        -------
-        RecordBatch
+        Select records from an RecordBatch. See pyarrow.compute.take for full
+        usage.
         """
-        cdef:
-            CTakeOptions options
-            shared_ptr[CRecordBatch] out
-            CRecordBatch* this_batch = self.batch
-
-        with nogil:
-            check_status(Take(_context(), deref(this_batch),
-                              deref(indices.sp_array), options, &out))
-
-        return pyarrow_wrap_batch(out)
+        return _pc().take(self, indices)
 
     def to_pydict(self):
         """
@@ -1203,6 +1141,7 @@ cdef class Table(_PandasConvertible):
         if offset < 0:
             raise IndexError('Offset must be non-negative')
 
+        offset = min(len(self), offset)
         if length is None:
             result = self.table.Slice(offset)
         else:
@@ -1212,43 +1151,47 @@ cdef class Table(_PandasConvertible):
 
     def filter(self, mask, object null_selection_behavior="drop"):
         """
-        Filter the rows of the table with a boolean mask.
+        Select records from a Table. See pyarrow.compute.filter for full usage.
+        """
+        return _pc().filter(self, mask, null_selection_behavior)
+
+    def take(self, object indices):
+        """
+        Select records from an Table. See pyarrow.compute.take for full
+        usage.
+        """
+        return _pc().take(self, indices)
+
+    def select(self, object columns):
+        """
+        Select columns of the Table.
+
+        Returns a new Table with the specified columns, and metadata
+        preserved.
 
         Parameters
         ----------
-        mask : Array or ChunkedArray
-            The boolean mask indicating which rows to extract.
-        null_selection_behavior : str, default 'drop'
-            Configure the behavior on encountering a null slot in the mask.
-            Allowed values are 'drop' and 'emit_null'.
-
-            - 'drop': nulls will be treated as equivalent to False.
-            - 'emit_null': nulls will result in a null in the output.
+        columns : list-like
+            The column names or integer indices to select.
 
         Returns
         -------
         Table
+
         """
         cdef:
-            CDatum filter
-            CDatum out
-            CFilterOptions options
+            shared_ptr[CTable] c_table
+            vector[int] c_indices
 
-        options = _convert_filter_option(null_selection_behavior)
-
-        mask = asarray(mask)
-        if isinstance(mask, Array):
-            filter = CDatum((<Array> mask).sp_array)
-        else:
-            filter = CDatum((<ChunkedArray> mask).sp_chunked_array)
+        for idx in columns:
+            idx = self._ensure_integer_index(idx)
+            idx = _normalize_index(idx, self.num_columns)
+            c_indices.push_back(<int> idx)
 
         with nogil:
-            check_status(
-                FilterKernel(_context(), CDatum(self.sp_table),
-                             filter, options, &out)
-            )
+            c_table = GetResultValue(self.table.SelectColumns(move(c_indices)))
 
-        return wrap_datum(out)
+        return pyarrow_wrap_table(c_table)
 
     def replace_schema_metadata(self, metadata=None):
         """
@@ -1689,6 +1632,26 @@ cdef class Table(_PandasConvertible):
         """
         return self.schema.field(i)
 
+    def _ensure_integer_index(self, i):
+        """
+        Ensure integer index (convert string column name to integer if needed).
+        """
+        if isinstance(i, (bytes, str)):
+            field_indices = self.schema.get_all_field_indices(i)
+
+            if len(field_indices) == 0:
+                raise KeyError("Field \"{}\" does not exist in table schema"
+                               .format(i))
+            elif len(field_indices) > 1:
+                raise KeyError("Field \"{}\" exists {} times in table schema"
+                               .format(i, len(field_indices)))
+            else:
+                return field_indices[0]
+        elif isinstance(i, int):
+            return i
+        else:
+            raise TypeError("Index must either be string or integer")
+
     def column(self, i):
         """
         Select a column by its column name, or numeric index.
@@ -1702,21 +1665,7 @@ cdef class Table(_PandasConvertible):
         -------
         pyarrow.ChunkedArray
         """
-        if isinstance(i, (bytes, str)):
-            field_indices = self.schema.get_all_field_indices(i)
-
-            if len(field_indices) == 0:
-                raise KeyError("Field \"{}\" does not exist in table schema"
-                               .format(i))
-            elif len(field_indices) > 1:
-                raise KeyError("Field \"{}\" exists {} times in table schema"
-                               .format(i, len(field_indices)))
-            else:
-                return self._column(field_indices[0])
-        elif isinstance(i, int):
-            return self._column(i)
-        else:
-            raise TypeError("Index must either be string or integer")
+        return self._column(self._ensure_integer_index(i))
 
     def _column(self, int i):
         """
@@ -2040,7 +1989,7 @@ def record_batch(data, names=None, schema=None, metadata=None):
         raise TypeError("Expected pandas DataFrame or list of arrays")
 
 
-def table(data, names=None, schema=None, metadata=None):
+def table(data, names=None, schema=None, metadata=None, nthreads=None):
     """
     Create a pyarrow.Table from a Python data structure or sequence of arrays.
 
@@ -2060,6 +2009,9 @@ def table(data, names=None, schema=None, metadata=None):
         specified in the schema, when data is a dict or DataFrame).
     metadata : dict or Mapping, default None
         Optional metadata for the schema (if schema not passed).
+    nthreads : int, default None (may use up to system CPU count threads)
+        For pandas.DataFrame inputs: if greater than 1, convert columns to
+        Arrow in parallel using indicated number of threads.
 
     Returns
     -------
@@ -2087,7 +2039,7 @@ def table(data, names=None, schema=None, metadata=None):
             raise ValueError(
                 "The 'names' and 'metadata' arguments are not valid when "
                 "passing a pandas DataFrame")
-        return Table.from_pandas(data, schema=schema)
+        return Table.from_pandas(data, schema=schema, nthreads=nthreads)
     else:
         raise TypeError(
             "Expected pandas DataFrame, python dictionary or list of arrays")

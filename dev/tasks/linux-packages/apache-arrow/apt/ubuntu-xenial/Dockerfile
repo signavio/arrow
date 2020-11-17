@@ -29,15 +29,14 @@ RUN \
     /etc/apt/apt.conf.d/disable-install-recommends
 
 ARG DEBUG
-ARG LLVM
 RUN \
   quiet=$([ "${DEBUG}" = "yes" ] || echo "-qq") && \
   apt update ${quiet} && \
   apt install -y -V ${quiet} \
     autoconf-archive \
     build-essential \
+    clang-8 \
     cmake \
-    debhelper\
     devscripts \
     dh-autoreconf \
     fakeroot \
@@ -48,6 +47,7 @@ RUN \
     libboost-system-dev \
     libbrotli-dev \
     libbz2-dev \
+    libcurl4-openssl-dev \
     libgirepository1.0-dev \
     libglib2.0-doc \
     libgoogle-glog-dev \
@@ -57,19 +57,19 @@ RUN \
     libre2-dev \
     libsnappy-dev \
     libssl-dev \
+    libutf8proc-dev \
+    libzstd1-dev \
+    llvm-8-dev \
     lsb-release \
     pkg-config \
     protobuf-compiler \
     python3-dev \
     python3-numpy \
     zlib1g-dev && \
-  if apt list | grep "^clang-${LLVM}/"; then \
-    apt install -y -V ${quiet} \
-      clang-${LLVM} \
-      llvm-${LLVM}-dev; \
-  fi && \
   if apt list | grep '^nvidia-cuda-toolkit/'; then \
     apt install -y -V ${quiet} nvidia-cuda-toolkit; \
   fi && \
+  apt install -y -V -t xenial-backports ${quiet} \
+    debhelper && \
   apt clean && \
   rm -rf /var/lib/apt/lists/*

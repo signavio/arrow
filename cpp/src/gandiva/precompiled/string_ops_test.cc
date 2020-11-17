@@ -17,6 +17,7 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+
 #include "gandiva/execution_context.h"
 #include "gandiva/precompiled/types.h"
 
@@ -356,7 +357,12 @@ TEST(TestStringOps, TestConcat) {
   uint64_t ctx_ptr = reinterpret_cast<gdv_int64>(&ctx);
   gdv_int32 out_len = 0;
 
-  const char* out_str = concatOperator_utf8_utf8(ctx_ptr, "asdf", 4, "jkl", 3, &out_len);
+  const char* out_str =
+      concat_utf8_utf8(ctx_ptr, "abcd", 4, true, "\npq", 3, false, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "abcd");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concatOperator_utf8_utf8(ctx_ptr, "asdf", 4, "jkl", 3, &out_len);
   EXPECT_EQ(std::string(out_str, out_len), "asdfjkl");
   EXPECT_FALSE(ctx.has_error());
 
@@ -374,6 +380,106 @@ TEST(TestStringOps, TestConcat) {
 
   out_str = concatOperator_utf8_utf8(ctx_ptr, "abcd\n", 5, "a", 1, &out_len);
   EXPECT_EQ(std::string(out_str, out_len), "abcd\na");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concat_utf8_utf8_utf8(ctx_ptr, "abcd", 4, false, "\npq", 3, true, "ard", 3,
+                                  true, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "\npqard");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str =
+      concatOperator_utf8_utf8_utf8(ctx_ptr, "abcd\n", 5, "a", 1, "bcd", 3, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "abcd\nabcd");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concatOperator_utf8_utf8_utf8(ctx_ptr, "abcd", 4, "a", 1, "", 0, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "abcda");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concatOperator_utf8_utf8_utf8(ctx_ptr, "", 0, "a", 1, "pqrs", 4, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "apqrs");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concat_utf8_utf8_utf8_utf8(ctx_ptr, "abcd", 4, false, "\npq", 3, true, "ard",
+                                       3, true, "uvw", 3, false, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "\npqard");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concatOperator_utf8_utf8_utf8_utf8(ctx_ptr, "pqrs", 4, "", 0, "\nabc", 4, "y",
+                                               1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "pqrs\nabcy");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concat_utf8_utf8_utf8_utf8_utf8(ctx_ptr, "abcd", 4, false, "\npq", 3, true,
+                                            "ard", 3, true, "uvw", 3, false, "abc\n", 4,
+                                            true, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "\npqardabc\n");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concatOperator_utf8_utf8_utf8_utf8_utf8(ctx_ptr, "pqrs", 4, "", 0, "\nabc", 4,
+                                                    "y", 1, "", 0, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "pqrs\nabcy");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concat_utf8_utf8_utf8_utf8_utf8_utf8(
+      ctx_ptr, "abcd", 4, false, "\npq", 3, true, "ard", 3, true, "uvw", 3, false,
+      "abc\n", 4, true, "sdfgs", 5, true, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "\npqardabc\nsdfgs");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concatOperator_utf8_utf8_utf8_utf8_utf8_utf8(
+      ctx_ptr, "pqrs", 4, "", 0, "\nabc", 4, "y", 1, "", 0, "\nbcd", 4, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "pqrs\nabcy\nbcd");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concat_utf8_utf8_utf8_utf8_utf8_utf8_utf8(
+      ctx_ptr, "abcd", 4, false, "\npq", 3, true, "ard", 3, true, "uvw", 3, false,
+      "abc\n", 4, true, "sdfgs", 5, true, "wfw", 3, false, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "\npqardabc\nsdfgs");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concatOperator_utf8_utf8_utf8_utf8_utf8_utf8_utf8(
+      ctx_ptr, "", 0, "pqrs", 4, "abc\n", 4, "y", 1, "", 0, "asdf", 4, "jkl", 3,
+      &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "pqrsabc\nyasdfjkl");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concat_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8(
+      ctx_ptr, "abcd", 4, false, "\npq", 3, true, "ard", 3, true, "uvw", 3, false,
+      "abc\n", 4, true, "sdfgs", 5, true, "wfw", 3, false, "", 0, true, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "\npqardabc\nsdfgs");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concatOperator_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8(
+      ctx_ptr, "", 0, "pqrs", 4, "abc\n", 4, "y", 1, "", 0, "asdf", 4, "jkl", 3, "", 0,
+      &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "pqrsabc\nyasdfjkl");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concat_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8(
+      ctx_ptr, "abcd", 4, false, "\npq", 3, true, "ard", 3, true, "uvw", 3, false,
+      "abc\n", 4, true, "sdfgs", 5, true, "wfw", 3, false, "", 0, true, "qwert|n", 7,
+      true, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "\npqardabc\nsdfgsqwert|n");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concatOperator_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8(
+      ctx_ptr, "", 0, "pqrs", 4, "abc\n", 4, "y", 1, "", 0, "asdf", 4, "jkl", 3, "", 0,
+      "sfl\n", 4, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "pqrsabc\nyasdfjklsfl\n");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concat_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8(
+      ctx_ptr, "abcd", 4, false, "\npq", 3, true, "ard", 3, true, "uvw", 3, false,
+      "abc\n", 4, true, "sdfgs", 5, true, "wfw", 3, false, "", 0, true, "qwert|n", 7,
+      true, "ewfwe", 5, false, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "\npqardabc\nsdfgsqwert|n");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = concatOperator_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8_utf8(
+      ctx_ptr, "", 0, "pqrs", 4, "abc\n", 4, "y", 1, "", 0, "asdf", 4, "", 0, "jkl", 3,
+      "sfl\n", 4, "", 0, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "pqrsabc\nyasdfjklsfl\n");
   EXPECT_FALSE(ctx.has_error());
 }
 
@@ -424,6 +530,279 @@ TEST(TestStringOps, TestReverse) {
               ::testing::HasSubstr(
                   "unexpected byte \\c3 encountered while decoding utf8 string"));
   ctx.Reset();
+}
+
+TEST(TestStringOps, TestLtrim) {
+  gandiva::ExecutionContext ctx;
+  uint64_t ctx_ptr = reinterpret_cast<gdv_int64>(&ctx);
+  gdv_int32 out_len = 0;
+  const char* out_str;
+
+  out_str = ltrim_utf8(ctx_ptr, "TestString  ", 12, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "TestString  ");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8(ctx_ptr, "      TestString  ", 18, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "TestString  ");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8(ctx_ptr, " Test  çåå†bD", 18, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "Test  çåå†bD");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8(ctx_ptr, "", 0, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8(ctx_ptr, "      ", 6, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8_utf8(ctx_ptr, "", 0, "TestString", 10, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8_utf8(ctx_ptr, "TestString", 10, "", 0, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "TestString");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8_utf8(ctx_ptr, "abcbbaccabbcdef", 15, "abc", 3, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "def");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8_utf8(ctx_ptr, "abcbbaccabbcdef", 15, "ababbac", 7, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "def");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8_utf8(ctx_ptr, "ååçåå†eç†Dd", 21, "çåå†", 9, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "eç†Dd");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8_utf8(ctx_ptr, "ç†ååçåå†", 18, "çåå†", 9, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+
+  std::string d(
+      "aa\xc3"
+      "bcd");
+  out_str =
+      ltrim_utf8_utf8(ctx_ptr, d.data(), static_cast<int>(d.length()), "a", 1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len),
+            "\xc3"
+            "bcd");
+  EXPECT_FALSE(ctx.has_error());
+
+  std::string e(
+      "åå\xe0\xa0"
+      "bcd");
+  out_str =
+      ltrim_utf8_utf8(ctx_ptr, e.data(), static_cast<int>(e.length()), "å", 2, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len),
+            "\xE0\xa0"
+            "bcd");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8_utf8(ctx_ptr, "TestString", 10, "abcd", 4, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "TestString");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = ltrim_utf8_utf8(ctx_ptr, "acbabbcabb", 10, "abcbd", 5, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+}
+
+TEST(TestStringOps, TestRtrim) {
+  gandiva::ExecutionContext ctx;
+  uint64_t ctx_ptr = reinterpret_cast<gdv_int64>(&ctx);
+  gdv_int32 out_len = 0;
+  const char* out_str;
+
+  out_str = rtrim_utf8(ctx_ptr, "  TestString", 12, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "  TestString");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8(ctx_ptr, "  TestString      ", 18, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "  TestString");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8(ctx_ptr, "Test  çåå†bD   ", 20, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "Test  çåå†bD");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8(ctx_ptr, "", 0, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8(ctx_ptr, "      ", 6, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8_utf8(ctx_ptr, "", 0, "TestString", 10, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8_utf8(ctx_ptr, "TestString", 10, "", 0, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "TestString");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8_utf8(ctx_ptr, "TestString", 10, "ring", 4, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "TestSt");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8_utf8(ctx_ptr, "defabcbbaccabbc", 15, "abc", 3, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "def");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8_utf8(ctx_ptr, "defabcbbaccabbc", 15, "ababbac", 7, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "def");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8_utf8(ctx_ptr, "eDdç†ååçåå†", 21, "çåå†", 9, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "eDd");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8_utf8(ctx_ptr, "ç†ååçåå†", 18, "çåå†", 9, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+
+  std::string d(
+      "\xc3"
+      "aaa");
+  out_str =
+      rtrim_utf8_utf8(ctx_ptr, d.data(), static_cast<int>(d.length()), "a", 1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_TRUE(ctx.has_error());
+  ctx.Reset();
+
+  std::string e(
+      "\xe0\xa0"
+      "åå");
+  out_str =
+      rtrim_utf8_utf8(ctx_ptr, e.data(), static_cast<int>(e.length()), "å", 2, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_TRUE(ctx.has_error());
+  ctx.Reset();
+
+  out_str = rtrim_utf8_utf8(ctx_ptr, "åeçå", 7, "çå", 4, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "åe");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8_utf8(ctx_ptr, "TestString", 10, "abcd", 4, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "TestString");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = rtrim_utf8_utf8(ctx_ptr, "acbabbcabb", 10, "abcbd", 5, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+}
+
+TEST(TestStringOps, TestBtrim) {
+  gandiva::ExecutionContext ctx;
+  uint64_t ctx_ptr = reinterpret_cast<gdv_int64>(&ctx);
+  gdv_int32 out_len = 0;
+  const char* out_str;
+
+  out_str = btrim_utf8(ctx_ptr, "TestString", 10, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "TestString");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8(ctx_ptr, "      TestString  ", 18, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "TestString");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8(ctx_ptr, " Test  çåå†bD   ", 21, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "Test  çåå†bD");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8(ctx_ptr, "", 0, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8(ctx_ptr, "      ", 6, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8_utf8(ctx_ptr, "", 0, "TestString", 10, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8_utf8(ctx_ptr, "TestString", 10, "Test", 4, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "String");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8_utf8(ctx_ptr, "TestString", 10, "String", 6, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "Tes");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8_utf8(ctx_ptr, "TestString", 10, "", 0, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "TestString");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8_utf8(ctx_ptr, "abcbbadefccabbc", 15, "abc", 3, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "def");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8_utf8(ctx_ptr, "abcbbadefccabbc", 15, "ababbac", 7, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "def");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8_utf8(ctx_ptr, "ååçåå†Ddeç†", 21, "çåå†", 9, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "Dde");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8_utf8(ctx_ptr, "ç†ååçåå†", 18, "çåå†", 9, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
+  ctx.Reset();
+
+  std::string d(
+      "acd\xc3"
+      "aaa");
+  out_str =
+      btrim_utf8_utf8(ctx_ptr, d.data(), static_cast<int>(d.length()), "a", 1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_TRUE(ctx.has_error());
+  ctx.Reset();
+
+  std::string e(
+      "åbc\xe0\xa0"
+      "åå");
+  out_str =
+      btrim_utf8_utf8(ctx_ptr, e.data(), static_cast<int>(e.length()), "å", 2, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_TRUE(ctx.has_error());
+  ctx.Reset();
+
+  std::string f(
+      "aa\xc3"
+      "bcd");
+  out_str =
+      btrim_utf8_utf8(ctx_ptr, f.data(), static_cast<int>(f.length()), "a", 1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len),
+            "\xc3"
+            "bcd");
+  EXPECT_FALSE(ctx.has_error());
+
+  std::string g(
+      "åå\xe0\xa0"
+      "bcå");
+  out_str =
+      btrim_utf8_utf8(ctx_ptr, g.data(), static_cast<int>(g.length()), "å", 2, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len),
+            "\xe0\xa0"
+            "bc");
+
+  out_str = btrim_utf8_utf8(ctx_ptr, "åe†çå", 10, "çå", 4, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "e†");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8_utf8(ctx_ptr, "TestString", 10, "abcd", 4, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "TestString");
+  EXPECT_FALSE(ctx.has_error());
+
+  out_str = btrim_utf8_utf8(ctx_ptr, "acbabbcabb", 10, "abcbd", 5, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_FALSE(ctx.has_error());
 }
 
 TEST(TestStringOps, TestLocate) {
@@ -533,6 +912,95 @@ TEST(TestStringOps, TestReplace) {
                                                 &out_len);
   EXPECT_THAT(ctx.get_error(), ::testing::HasSubstr("Buffer overflow for output string"));
   ctx.Reset();
+}
+
+TEST(TestStringOps, TestBinaryString) {
+  gandiva::ExecutionContext ctx;
+  uint64_t ctx_ptr = reinterpret_cast<gdv_int64>(&ctx);
+  gdv_int32 out_len = 0;
+  const char* out_str;
+
+  out_str = binary_string(ctx_ptr, "TestString", 10, &out_len);
+  std::string output = std::string(out_str, out_len);
+  EXPECT_EQ(output, "TestString");
+
+  out_str = binary_string(ctx_ptr, "", 0, &out_len);
+  output = std::string(out_str, out_len);
+  EXPECT_EQ(output, "");
+
+  out_str = binary_string(ctx_ptr, "T", 1, &out_len);
+  output = std::string(out_str, out_len);
+  EXPECT_EQ(output, "T");
+
+  out_str = binary_string(ctx_ptr, "\\x41\\x42\\x43", 12, &out_len);
+  output = std::string(out_str, out_len);
+  EXPECT_EQ(output, "ABC");
+
+  out_str = binary_string(ctx_ptr, "\\x41", 4, &out_len);
+  output = std::string(out_str, out_len);
+  EXPECT_EQ(output, "A");
+
+  out_str = binary_string(ctx_ptr, "\\x6d\\x6D", 8, &out_len);
+  output = std::string(out_str, out_len);
+  EXPECT_EQ(output, "mm");
+
+  out_str = binary_string(ctx_ptr, "\\x6f\\x6d", 8, &out_len);
+  output = std::string(out_str, out_len);
+  EXPECT_EQ(output, "om");
+
+  out_str = binary_string(ctx_ptr, "\\x4f\\x4D", 8, &out_len);
+  output = std::string(out_str, out_len);
+  EXPECT_EQ(output, "OM");
+}
+
+TEST(TestStringOps, TestSplitPart) {
+  gandiva::ExecutionContext ctx;
+  uint64_t ctx_ptr = reinterpret_cast<gdv_int64>(&ctx);
+  gdv_int32 out_len = 0;
+  const char* out_str;
+
+  out_str = split_part(ctx_ptr, "A,B,C", 5, ",", 1, 0, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+  EXPECT_THAT(
+      ctx.get_error(),
+      ::testing::HasSubstr("Index in split_part must be positive, value provided was 0"));
+
+  out_str = split_part(ctx_ptr, "A,B,C", 5, ",", 1, 1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "A");
+
+  out_str = split_part(ctx_ptr, "A,B,C", 5, ",", 1, 2, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "B");
+
+  out_str = split_part(ctx_ptr, "A,B,C", 5, ",", 1, 3, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "C");
+
+  out_str = split_part(ctx_ptr, "abc~@~def~@~ghi", 15, "~@~", 3, 1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "abc");
+
+  out_str = split_part(ctx_ptr, "abc~@~def~@~ghi", 15, "~@~", 3, 2, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "def");
+
+  out_str = split_part(ctx_ptr, "abc~@~def~@~ghi", 15, "~@~", 3, 3, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "ghi");
+
+  // Result must be empty when the index is > no of elements
+  out_str = split_part(ctx_ptr, "123|456|789", 11, "|", 1, 4, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+
+  out_str = split_part(ctx_ptr, "123|", 4, "|", 1, 1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "123");
+
+  out_str = split_part(ctx_ptr, "|123", 4, "|", 1, 1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "");
+
+  out_str = split_part(ctx_ptr, "ç†ååçåå†", 18, "å", 2, 1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "ç†");
+
+  out_str = split_part(ctx_ptr, "ç†ååçåå†", 18, "†åå", 6, 1, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "ç");
+
+  out_str = split_part(ctx_ptr, "ç†ååçåå†", 18, "†", 3, 2, &out_len);
+  EXPECT_EQ(std::string(out_str, out_len), "ååçåå");
 }
 
 }  // namespace gandiva

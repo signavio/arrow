@@ -35,11 +35,6 @@ A caveat about the \code{$} method: because \code{RecordBatch} is an \code{R6} o
 precedence over the table's columns. So, \code{batch$Slice} would return the
 "Slice" method function even if there were a column in the table called
 "Slice".
-
-A caveat about the \code{[} method for row operations: only "slicing" is
-currently supported. That is, you can select a continuous range of rows
-from the table, but you can't filter with a \code{logical} vector or take an
-arbitrary selection of rows by integer indices.
 }
 
 \section{R6 Methods}{
@@ -53,9 +48,7 @@ the following R6 methods that map onto the underlying C++ methods:
 \item \verb{$names()}: Get all column names (called by \code{names(batch)})
 \item \verb{$GetColumnByName(name)}: Extract an \code{Array} by string name
 \item \verb{$RemoveColumn(i)}: Drops a column from the batch by integer position
-\item \verb{$select(spec)}: Return a new record batch with a selection of columns.
-This supports the usual \code{character}, \code{numeric}, and \code{logical} selection
-methods as well as "tidy select" expressions.
+\item \verb{$selectColumns(indices)}: Return a new record batch with a selection of columns, expressed as 0-based integers.
 \item \verb{$Slice(offset, length = NULL)}: Create a zero-copy view starting at the
 indicated integer offset and going for the given length, or to the end
 of the table if \code{NULL}, the default.
@@ -73,6 +66,9 @@ There are also some active bindings
 \item \verb{$num_columns}
 \item \verb{$num_rows}
 \item \verb{$schema}
+\item \verb{$metadata}: Returns the key-value metadata of the \code{Schema} as a named list.
+Modify or replace by assigning in (\code{batch$metadata <- new_metadata}).
+All list elements are coerced to string.
 \item \verb{$columns}: Returns a list of \code{Array}s
 }
 }

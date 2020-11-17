@@ -19,6 +19,7 @@ package org.apache.arrow.vector;
 
 import static org.apache.arrow.vector.NullCheckingForGet.NULL_CHECKING_ENABLED;
 
+import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.complex.impl.UInt1ReaderImpl;
 import org.apache.arrow.vector.complex.reader.FieldReader;
@@ -29,15 +30,22 @@ import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.util.TransferPair;
 
-import io.netty.buffer.ArrowBuf;
-
-
 /**
  * UInt1Vector implements a fixed width (1 bytes) vector of
  * integer values which could be null. A validity buffer (bit vector) is
  * maintained to track which elements in the vector are null.
  */
 public final class UInt1Vector extends BaseFixedWidthVector implements BaseIntVector {
+  /**
+   * The mask to use when promoting the unsigned byte value to an integer.
+   */
+  public static final int PROMOTION_MASK = 0xFF;
+
+  /**
+   * The maximum 8-bit unsigned integer.
+   */
+  public static final byte MAX_UINT1 = (byte) 0XFF;
+
   private static final byte TYPE_WIDTH = 1;
   private final FieldReader reader;
 
@@ -85,7 +93,7 @@ public final class UInt1Vector extends BaseFixedWidthVector implements BaseIntVe
    */
   public static short getNoOverflow(final ArrowBuf buffer, final int index) {
     byte b = buffer.getByte(index * TYPE_WIDTH);
-    return (short)(0xFF & b);
+    return (short) (PROMOTION_MASK & b);
   }
 
 
@@ -317,7 +325,7 @@ public final class UInt1Vector extends BaseFixedWidthVector implements BaseIntVe
 
   @Override
   public long getValueAsLong(int index) {
-    return this.get(index);
+    return this.get(index) & PROMOTION_MASK;
   }
 
 

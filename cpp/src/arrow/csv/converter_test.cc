@@ -34,6 +34,7 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/decimal.h"
 #include "arrow/util/logging.h"
+#include "arrow/util/value_parsing.h"
 
 namespace arrow {
 namespace csv {
@@ -51,7 +52,8 @@ template <typename DATA_TYPE, typename C_TYPE>
 void AssertConversion(const std::shared_ptr<DataType>& type,
                       const std::vector<std::string>& csv_string,
                       const std::vector<std::vector<C_TYPE>>& expected,
-                      ConvertOptions options = ConvertOptions::Defaults()) {
+                      ConvertOptions options = ConvertOptions::Defaults(),
+                      bool validate_full = true) {
   std::shared_ptr<BlockParser> parser;
   std::shared_ptr<Converter> converter;
   std::shared_ptr<Array> array, expected_array;
@@ -62,7 +64,11 @@ void AssertConversion(const std::shared_ptr<DataType>& type,
   for (int32_t col_index = 0; col_index < static_cast<int32_t>(expected.size());
        ++col_index) {
     ASSERT_OK_AND_ASSIGN(array, converter->Convert(*parser, col_index));
-    ASSERT_OK(array->ValidateFull());
+    if (validate_full) {
+      ASSERT_OK(array->ValidateFull());
+    } else {
+      ASSERT_OK(array->Validate());
+    }
     ArrayFromVector<DATA_TYPE, C_TYPE>(type, expected[col_index], &expected_array);
     AssertArraysEqual(*expected_array, *array);
   }
@@ -114,7 +120,8 @@ void AssertDictConversion(const std::string& csv_string,
                           const std::shared_ptr<Array>& expected_indices,
                           const std::shared_ptr<Array>& expected_dict,
                           int32_t max_cardinality = -1,
-                          ConvertOptions options = ConvertOptions::Defaults()) {
+                          ConvertOptions options = ConvertOptions::Defaults(),
+                          bool validate_full = true) {
   std::shared_ptr<BlockParser> parser;
   std::shared_ptr<DictionaryConverter> converter;
   std::shared_ptr<Array> array, expected_array;
@@ -122,7 +129,11 @@ void AssertDictConversion(const std::string& csv_string,
 
   ASSERT_OK_AND_ASSIGN(
       array, DictConversion(expected_dict->type(), csv_string, max_cardinality, options));
-  ASSERT_OK(array->ValidateFull());
+  if (validate_full) {
+    ASSERT_OK(array->ValidateFull());
+  } else {
+    ASSERT_OK(array->Validate());
+  }
   expected_type = dictionary(expected_indices->type(), expected_dict->type());
   ASSERT_TRUE(array->type()->Equals(*expected_type));
   const auto& dict_array = internal::checked_cast<const DictionaryArray&>(*array);
@@ -192,7 +203,8 @@ static void TestStringConversionBasics() {
   auto options = ConvertOptions::Defaults();
   options.check_utf8 = false;
   AssertConversion<T, std::string>(type, {"ab,cdé\n", ",\xffgh\n"},
-                                   {{"ab", ""}, {"cdé", "\xffgh"}}, options);
+                                   {{"ab", ""}, {"cdé", "\xffgh"}}, options,
+                                   /*validate_full=*/false);
 }
 
 TEST(StringConversion, Basics) { TestStringConversionBasics<StringType>(); }
@@ -238,7 +250,8 @@ TEST(NullConversion, Basics) {
   std::shared_ptr<Array> array;
   std::shared_ptr<DataType> type = null();
 
-  ASSERT_OK_AND_ASSIGN(converter, Converter::Make(type, ConvertOptions::Defaults()));
+  auto options = ConvertOptions::Defaults();
+  ASSERT_OK_AND_ASSIGN(converter, Converter::Make(type, options));
 
   MakeCSVParser({"NA,z\n", ",0\n"}, &parser);
   ASSERT_OK_AND_ASSIGN(array, converter->Convert(*parser, 0));
@@ -341,6 +354,26 @@ TEST(BooleanConversion, CustomNulls) {
                                       {{true, false}, {false, true}}, options);
 }
 
+TEST(Date32Conversion, Basics) {
+  AssertConversion<Date32Type, int32_t>(date32(), {"1945-05-08\n", "2020-03-15\n"},
+                                        {{-9004, 18336}});
+}
+
+TEST(Date32Conversion, Nulls) {
+  AssertConversion<Date32Type, int32_t>(date32(), {"N/A\n", "2020-03-15\n"}, {{0, 18336}},
+                                        {{false, true}});
+}
+
+TEST(Date64Conversion, Basics) {
+  AssertConversion<Date64Type, int64_t>(date64(), {"1945-05-08\n", "2020-03-15\n"},
+                                        {{-777945600000LL, 1584230400000LL}});
+}
+
+TEST(Date64Conversion, Nulls) {
+  AssertConversion<Date64Type, int64_t>(date64(), {"N/A\n", "2020-03-15\n"},
+                                        {{0, 1584230400000LL}}, {{false, true}});
+}
+
 TEST(TimestampConversion, Basics) {
   auto type = timestamp(TimeUnit::SECOND);
 
@@ -359,9 +392,9 @@ TEST(TimestampConversion, Basics) {
 
 TEST(TimestampConversion, Nulls) {
   auto type = timestamp(TimeUnit::MILLI);
-  AssertConversion<TimestampType, int64_t>(type, {"1970-01-01 00:01:00,,N/A\n"},
-                                           {{60000}, {0}, {0}},
-                                           {{true}, {false}, {false}});
+  AssertConversion<TimestampType, int64_t>(
+      type, {"1970-01-01 00:01:00,,N/A\n"}, {{60000}, {0}, {0}},
+      {{true}, {false}, {false}}, ConvertOptions::Defaults());
 }
 
 TEST(TimestampConversion, CustomNulls) {
@@ -372,6 +405,21 @@ TEST(TimestampConversion, CustomNulls) {
   AssertConversion<TimestampType, int64_t>(type, {"1970-01-01 00:01:00,xxx,zzz\n"},
                                            {{60000}, {0}, {0}},
                                            {{true}, {false}, {false}}, options);
+}
+
+TEST(TimestampConversion, UserDefinedParsers) {
+  auto options = ConvertOptions::Defaults();
+  auto type = timestamp(TimeUnit::MILLI);
+
+  // Test a single parser
+  options.timestamp_parsers = {TimestampParser::MakeStrptime("%m/%d/%Y")};
+  AssertConversion<TimestampType, int64_t>(type, {"01/02/1970,01/03/1970\n"},
+                                           {{86400000}, {172800000}}, options);
+
+  // Test multiple parsers
+  options.timestamp_parsers.push_back(TimestampParser::MakeISO8601());
+  AssertConversion<TimestampType, int64_t>(type, {"01/02/1970,1970-01-03\n"},
+                                           {{86400000}, {172800000}}, options);
 }
 
 Decimal128 Dec128(util::string_view value) {
@@ -425,7 +473,45 @@ TEST(DecimalConversion, OverflowFails) {
 // DictionaryConverter tests
 
 template <typename T>
-class TestDictConverter : public ::testing::Test {
+class TestNumericDictConverter : public ::testing::Test {
+ public:
+  std::shared_ptr<DataType> type() const { return TypeTraits<T>::type_singleton(); }
+};
+
+using NumericDictConversionTypes =
+    ::testing::Types<Int32Type, UInt32Type, Int64Type, UInt64Type, FloatType, DoubleType>;
+
+TYPED_TEST_SUITE(TestNumericDictConverter, NumericDictConversionTypes);
+
+TYPED_TEST(TestNumericDictConverter, Basics) {
+  auto expected_dict = ArrayFromJSON(this->type(), "[4, 5]");
+  auto expected_indices = ArrayFromJSON(int32(), "[0, 1, 0, 0]");
+
+  AssertDictConversion("4\n5\n4\n4\n", expected_indices, expected_dict);
+}
+
+TYPED_TEST(TestNumericDictConverter, Nulls) {
+  auto expected_dict = ArrayFromJSON(this->type(), "[4, 5]");
+  auto expected_indices = ArrayFromJSON(int32(), "[0, 1, null, 0]");
+
+  AssertDictConversion("4\n5\nN/A\n4\n", expected_indices, expected_dict);
+}
+
+TYPED_TEST(TestNumericDictConverter, Errors) {
+  auto value_type = this->type();
+  ASSERT_RAISES(Invalid, DictConversion(value_type, "xxx\n"));
+
+  // Overflow
+  if (is_integer(value_type->id())) {
+    ASSERT_RAISES(Invalid, DictConversion(value_type, "99999999999999999999999\n"));
+  }
+  if (is_unsigned_integer(value_type->id())) {
+    ASSERT_RAISES(Invalid, DictConversion(value_type, "-1\n"));
+  }
+}
+
+template <typename T>
+class TestStringDictConverter : public ::testing::Test {
  public:
   std::shared_ptr<DataType> type() const { return TypeTraits<T>::type_singleton(); }
 
@@ -434,18 +520,19 @@ class TestDictConverter : public ::testing::Test {
   }
 };
 
-using DictConversionTypes = ::testing::Types<BinaryType, StringType>;
+using StringDictConversionTypes =
+    ::testing::Types<BinaryType, LargeBinaryType, StringType, LargeStringType>;
 
-TYPED_TEST_SUITE(TestDictConverter, DictConversionTypes);
+TYPED_TEST_SUITE(TestStringDictConverter, StringDictConversionTypes);
 
-TYPED_TEST(TestDictConverter, Basics) {
+TYPED_TEST(TestStringDictConverter, Basics) {
   auto expected_dict = ArrayFromJSON(this->type(), R"(["ab", "cdé", ""])");
   auto expected_indices = ArrayFromJSON(int32(), "[0, 1, 2, 0]");
 
   AssertDictConversion("ab\ncdé\n\nab\n", expected_indices, expected_dict);
 }
 
-TYPED_TEST(TestDictConverter, Nulls) {
+TYPED_TEST(TestStringDictConverter, Nulls) {
   auto expected_dict = ArrayFromJSON(this->type(), R"(["ab", "N/A", ""])");
   auto expected_indices = ArrayFromJSON(int32(), "[0, 1, 2, 0]");
 
@@ -458,7 +545,7 @@ TYPED_TEST(TestDictConverter, Nulls) {
   AssertDictConversion("ab\nN/A\n\nab\n", expected_indices, expected_dict, -1, options);
 }
 
-TYPED_TEST(TestDictConverter, NonUTF8) {
+TYPED_TEST(TestStringDictConverter, NonUTF8) {
   auto expected_indices = ArrayFromJSON(int32(), "[0, 1, 2, 0]");
   std::shared_ptr<Array> expected_dict;
   ArrayFromVector<TypeParam, std::string>({"ab", "cd\xff", ""}, &expected_dict);
@@ -469,19 +556,53 @@ TYPED_TEST(TestDictConverter, NonUTF8) {
 
     auto options = ConvertOptions::Defaults();
     options.check_utf8 = false;
-    AssertDictConversion(csv_string, expected_indices, expected_dict, -1, options);
+    AssertDictConversion(csv_string, expected_indices, expected_dict, -1, options,
+                         /*validate_full=*/false);
   } else {
     AssertDictConversion(csv_string, expected_indices, expected_dict);
   }
 }
 
-TYPED_TEST(TestDictConverter, MaxCardinality) {
+TYPED_TEST(TestStringDictConverter, MaxCardinality) {
   auto expected_dict = ArrayFromJSON(this->type(), R"(["ab", "cd", "ef"])");
   auto expected_indices = ArrayFromJSON(int32(), "[0, 1, 2, 1]");
   std::string csv_string = "ab\ncd\nef\ncd\n";
 
   AssertDictConversion(csv_string, expected_indices, expected_dict, 3);
   ASSERT_RAISES(IndexError, DictConversion(this->type(), csv_string, 2));
+}
+
+TEST(TestFixedSizeBinaryDictConverter, Basics) {
+  auto value_type = fixed_size_binary(3);
+
+  auto expected_dict = ArrayFromJSON(value_type, R"(["abc", "def"])");
+  auto expected_indices = ArrayFromJSON(int32(), "[0, 1, 0, 1]");
+
+  AssertDictConversion("abc\ndef\nabc\ndef\n", expected_indices, expected_dict);
+}
+
+TEST(TestFixedSizeBinaryDictConverter, Errors) {
+  auto value_type = fixed_size_binary(3);
+
+  // Invalid string size
+  ASSERT_RAISES(Invalid, DictConversion(value_type, "abc\nde\n"));
+}
+
+TEST(TestDecimalDictConverter, Basics) {
+  auto value_type = decimal(9, 3);
+
+  auto expected_dict = ArrayFromJSON(value_type, R"(["1.234", "456.789"])");
+  auto expected_indices = ArrayFromJSON(int32(), "[0, 1, null, 1]");
+
+  AssertDictConversion("1.234\n456.789\nN/A\n4.56789e2\n", expected_indices,
+                       expected_dict);
+}
+
+TEST(TestDecimalDictConverter, Errors) {
+  auto value_type = decimal(9, 3);
+
+  // Overflow
+  ASSERT_RAISES(Invalid, DictConversion(value_type, "1e10\n"));
 }
 
 }  // namespace csv

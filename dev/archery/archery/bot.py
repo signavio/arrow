@@ -122,7 +122,12 @@ class CrossbowCommentFormatter:
             title='Appveyor',
             url='https://ci.appveyor.com/project/{repo}/history',
             badge='https://img.shields.io/appveyor/ci/{repo}/{branch}.svg'
-        )
+        ),
+        'drone': _markdown_badge.format(
+            title='Drone',
+            url='https://cloud.drone.io/{repo}',
+            badge='https://img.shields.io/drone/build/{repo}/{branch}.svg'
+        ),
     }
 
     def __init__(self, crossbow_repo):
@@ -132,8 +137,9 @@ class CrossbowCommentFormatter:
         url = 'https://github.com/{repo}/branches/all?query={branch}'
         sha = job['target']['head']
 
-        msg = f'Revision: {sha}\n\n'
-        msg += f'Submitted crossbow builds: [{{repo}} @ {{branch}}]({url})\n'
+        msg = 'Revision: {}\n\n'.format(sha)
+        msg += 'Submitted crossbow builds: [{repo} @ {branch}]'
+        msg += '({})\n'.format(url)
         msg += '\n|Task|Status|\n|----|------|'
 
         tasks = sorted(job['tasks'].items(), key=operator.itemgetter(0))
@@ -150,7 +156,7 @@ class CrossbowCommentFormatter:
             except KeyError:
                 badge = 'unsupported CI service `{}`'.format(task['ci'])
 
-            msg += f'\n|{key}|{badge}|'
+            msg += '\n|{}|{}|'.format(key, badge)
 
         return msg.format(repo=self.crossbow_repo, branch=job['branch'])
 
@@ -169,7 +175,7 @@ class CommentBot:
         # only allow users of apache org to submit commands, for more see
         # https://developer.github.com/v4/enum/commentauthorassociation/
         allowed_roles = {'OWNER', 'MEMBER', 'CONTRIBUTOR'}
-        mention = f'@{self.name}'
+        mention = '@{}'.format(self.name)
         comment = payload['comment']
 
         if payload['sender']['login'] == self.name:
@@ -247,13 +253,15 @@ def crossbow(obj, crossbow):
 
 
 @crossbow.command()
-@click.argument('task', nargs=-1, required=False)
-@click.option('--group', '-g', multiple=True,
+@click.argument('tasks', nargs=-1, required=False)
+@click.option('--group', '-g', 'groups', multiple=True,
               help='Submit task groups as defined in tests.yml')
+@click.option('--param', '-p', 'params', multiple=True,
+              help='Additional task parameters for rendering the CI templates')
 @click.option('--dry-run/--push', default=False,
               help='Just display the new changelog, don\'t write it')
 @click.pass_obj
-def submit(obj, task, group, dry_run):
+def submit(obj, tasks, groups, params, dry_run):
     """Submit crossbow testing tasks.
 
     See groups defined in arrow/dev/tasks/tests.yml
@@ -267,9 +275,11 @@ def submit(obj, task, group, dry_run):
     if dry_run:
         args.append('--dry-run')
 
-    for g in group:
+    for p in params:
+        args.extend(['-p', p])
+    for g in groups:
         args.extend(['-g', g])
-    for t in task:
+    for t in tasks:
         args.append(t)
 
     # pygithub pull request object

@@ -21,6 +21,8 @@ import static org.junit.Assert.assertEquals;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
 
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.BitVector;
@@ -35,6 +37,7 @@ import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.IntervalDayVector;
 import org.apache.arrow.vector.IntervalYearVector;
+import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.SmallIntVector;
 import org.apache.arrow.vector.TimeMicroVector;
 import org.apache.arrow.vector.TimeMilliVector;
@@ -57,9 +60,12 @@ import org.apache.arrow.vector.VarBinaryVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.complex.BaseRepeatedValueVector;
 import org.apache.arrow.vector.complex.FixedSizeListVector;
+import org.apache.arrow.vector.complex.LargeListVector;
 import org.apache.arrow.vector.complex.ListVector;
+import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.holders.IntervalDayHolder;
 import org.apache.arrow.vector.types.Types;
+import org.apache.arrow.vector.types.Types.MinorType;
 import org.apache.arrow.vector.types.pojo.FieldType;
 
 /**
@@ -535,6 +541,20 @@ public class ValueVectorDataPopulator {
   }
 
   /**
+   * Populate values for LargeVarCharVector.
+   */
+  public static void setVector(LargeVarCharVector vector, byte[]... values) {
+    final int length = values.length;
+    vector.allocateNewSafe();
+    for (int i = 0; i < length; i++) {
+      if (values[i] != null) {
+        vector.set(i, values[i]);
+      }
+    }
+    vector.setValueCount(length);
+  }
+
+  /**
    * Populate values for VarCharVector.
    */
   public static void setVector(VarCharVector vector, String... values) {
@@ -549,9 +569,24 @@ public class ValueVectorDataPopulator {
   }
 
   /**
+   * Populate values for LargeVarCharVector.
+   */
+  public static void setVector(LargeVarCharVector vector, String... values) {
+    final int length = values.length;
+    vector.allocateNewSafe();
+    for (int i = 0; i < length; i++) {
+      if (values[i] != null) {
+        vector.setSafe(i, values[i].getBytes(StandardCharsets.UTF_8));
+      }
+    }
+    vector.setValueCount(length);
+  }
+
+  /**
    * Populate values for {@link ListVector}.
    */
   public static void setVector(ListVector vector, List<Integer>... values) {
+    vector.allocateNewSafe();
     Types.MinorType type = Types.MinorType.INT;
     vector.addOrGetVector(FieldType.nullable(type.getType()));
 
@@ -567,7 +602,7 @@ public class ValueVectorDataPopulator {
       } else {
         BitVectorHelper.setBit(vector.getValidityBuffer(), i);
         for (int value : values[i]) {
-          dataVector.set(curPos, value);
+          dataVector.setSafe(curPos, value);
           curPos += 1;
         }
       }
@@ -579,9 +614,41 @@ public class ValueVectorDataPopulator {
   }
 
   /**
+   * Populate values for {@link LargeListVector}.
+   */
+  public static void setVector(LargeListVector vector, List<Integer>... values) {
+    vector.allocateNewSafe();
+    Types.MinorType type = Types.MinorType.INT;
+    vector.addOrGetVector(FieldType.nullable(type.getType()));
+
+    IntVector dataVector = (IntVector) vector.getDataVector();
+    dataVector.allocateNew();
+
+    // set underlying vectors
+    int curPos = 0;
+    vector.getOffsetBuffer().setLong(0, curPos);
+    for (int i = 0; i < values.length; i++) {
+      if (values[i] == null) {
+        BitVectorHelper.unsetBit(vector.getValidityBuffer(), i);
+      } else {
+        BitVectorHelper.setBit(vector.getValidityBuffer(), i);
+        for (int value : values[i]) {
+          dataVector.setSafe(curPos, value);
+          curPos += 1;
+        }
+      }
+      vector.getOffsetBuffer().setLong((long) (i + 1) * LargeListVector.OFFSET_WIDTH, curPos);
+    }
+    dataVector.setValueCount(curPos);
+    vector.setLastSet(values.length - 1);
+    vector.setValueCount(values.length);
+  }
+
+  /**
    * Populate values for {@link FixedSizeListVector}.
    */
   public static void setVector(FixedSizeListVector vector, List<Integer>... values) {
+    vector.allocateNewSafe();
     for (int i = 0; i < values.length; i++) {
       if (values[i] != null) {
         assertEquals(vector.getListSize(), values[i].size());
@@ -602,12 +669,40 @@ public class ValueVectorDataPopulator {
       } else {
         BitVectorHelper.setBit(vector.getValidityBuffer(), i);
         for (int value : values[i]) {
-          dataVector.set(curPos, value);
+          dataVector.setSafe(curPos, value);
           curPos += 1;
         }
       }
     }
     dataVector.setValueCount(curPos);
     vector.setValueCount(values.length);
+  }
+
+  /**
+   * Populate values for {@link StructVector}.
+   */
+  public static void setVector(StructVector vector, Map<String, List<Integer>> values) {
+    vector.allocateNewSafe();
+
+    int valueCount = 0;
+    for (final Entry<String, List<Integer>> entry : values.entrySet()) {
+      // Add the child
+      final IntVector child = vector.addOrGet(entry.getKey(),
+          FieldType.nullable(MinorType.INT.getType()), IntVector.class);
+
+      // Write the values to the child
+      child.allocateNew();
+      final List<Integer> v = entry.getValue();
+      for (int i = 0; i < v.size(); i++) {
+        if (v.get(i) != null) {
+          child.set(i, v.get(i));
+          vector.setIndexDefined(i);
+        } else {
+          child.setNull(i);
+        }
+      }
+      valueCount = Math.max(valueCount, v.size());
+    }
+    vector.setValueCount(valueCount);
   }
 }

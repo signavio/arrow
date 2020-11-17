@@ -23,7 +23,10 @@
 
 #include <gtest/gtest.h>
 
-#include "arrow/builder.h"
+#include "arrow/array/array_base.h"
+#include "arrow/array/builder_binary.h"
+#include "arrow/array/builder_nested.h"
+#include "arrow/array/builder_primitive.h"
 #include "arrow/record_batch.h"
 #include "arrow/status.h"
 #include "arrow/table_builder.h"
@@ -33,8 +36,6 @@
 #include "arrow/util/checked_cast.h"
 
 namespace arrow {
-
-class Array;
 
 using internal::checked_cast;
 
@@ -148,6 +149,33 @@ TEST_F(TestRecordBatchBuilder, InvalidFieldLength) {
 
   std::shared_ptr<RecordBatch> dummy;
   ASSERT_RAISES(Invalid, builder->Flush(&dummy));
+}
+
+// In #ARROW-9969 dictionary types were not updated
+// in schema when the index width grew.
+TEST_F(TestRecordBatchBuilder, DictionaryTypes) {
+  const int num_rows = static_cast<int>(UINT8_MAX) + 2;
+  std::vector<std::string> f0_values;
+  std::vector<bool> is_valid(num_rows, true);
+  for (int i = 0; i < num_rows; i++) {
+    f0_values.push_back(std::to_string(i));
+  }
+
+  auto f0 = field("f0", dictionary(int8(), utf8()));
+
+  auto schema = ::arrow::schema({f0});
+
+  std::unique_ptr<RecordBatchBuilder> builder;
+  ASSERT_OK(RecordBatchBuilder::Make(schema, pool_, &builder));
+
+  auto b0 = builder->GetFieldAs<StringDictionaryBuilder>(0);
+
+  AppendValues<StringDictionaryBuilder, std::string>(b0, f0_values, is_valid);
+
+  std::shared_ptr<RecordBatch> batch;
+  ASSERT_OK(builder->Flush(&batch));
+
+  AssertTypeEqual(batch->column(0)->type(), batch->schema()->field(0)->type());
 }
 
 }  // namespace arrow

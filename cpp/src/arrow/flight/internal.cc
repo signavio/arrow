@@ -465,11 +465,9 @@ Status FromProto(const pb::SchemaResult& pb_result, std::string* result) {
 }
 
 Status SchemaToString(const Schema& schema, std::string* out) {
-  // TODO(wesm): Do we care about better memory efficiency here?
   ipc::DictionaryMemo unused_dict_memo;
-  ARROW_ASSIGN_OR_RAISE(
-      std::shared_ptr<Buffer> serialized_schema,
-      ipc::SerializeSchema(schema, &unused_dict_memo, default_memory_pool()));
+  ARROW_ASSIGN_OR_RAISE(std::shared_ptr<Buffer> serialized_schema,
+                        ipc::SerializeSchema(schema));
   *out = std::string(reinterpret_cast<const char*>(serialized_schema->data()),
                      static_cast<size_t>(serialized_schema->size()));
   return Status::OK();
@@ -496,6 +494,18 @@ Status ToProto(const FlightInfo& info, pb::FlightInfo* pb_info) {
 
 Status ToProto(const SchemaResult& result, pb::SchemaResult* pb_result) {
   pb_result->set_schema(result.serialized_schema());
+  return Status::OK();
+}
+
+Status ToPayload(const FlightDescriptor& descr, std::shared_ptr<Buffer>* out) {
+  // TODO(lidavidm): make these use Result<T>
+  std::string str_descr;
+  pb::FlightDescriptor pb_descr;
+  RETURN_NOT_OK(ToProto(descr, &pb_descr));
+  if (!pb_descr.SerializeToString(&str_descr)) {
+    return Status::UnknownError("Failed to serialize Flight descriptor");
+  }
+  *out = Buffer::FromString(std::move(str_descr));
   return Status::OK();
 }
 

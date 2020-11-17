@@ -17,10 +17,8 @@
 
 #include "./arrow_types.h"
 
-using Rcpp::List;
-using Rcpp::wrap;
-
 #if defined(ARROW_R_WITH_ARROW)
+#include <arrow/array/data.h>
 
 // [[arrow::export]]
 std::shared_ptr<arrow::DataType> ArrayData__get_type(
@@ -44,8 +42,8 @@ int ArrayData__get_offset(const std::shared_ptr<arrow::ArrayData>& x) {
 }
 
 // [[arrow::export]]
-List ArrayData__buffers(const std::shared_ptr<arrow::ArrayData>& x) {
-  return wrap(x->buffers);
+cpp11::list ArrayData__buffers(const std::shared_ptr<arrow::ArrayData>& x) {
+  return cpp11::as_sexp(x->buffers);
 }
 
 #endif

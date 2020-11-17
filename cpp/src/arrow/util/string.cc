@@ -18,6 +18,8 @@
 #include "arrow/util/string.h"
 
 #include <algorithm>
+#include <cctype>
+#include <memory>
 
 #include "arrow/status.h"
 
@@ -95,7 +97,7 @@ std::string JoinStrings(const std::vector<util::string_view>& strings,
   if (strings.size() == 0) {
     return "";
   }
-  std::string out = strings.front().to_string();
+  std::string out = std::string(strings.front());
   for (size_t i = 1; i < strings.size(); ++i) {
     out.append(delimiter.begin(), delimiter.end());
     out.append(strings[i].begin(), strings[i].end());
@@ -118,6 +120,46 @@ std::string TrimString(std::string value) {
   }
   value.erase(value.size() - rtrim_chars, rtrim_chars);
   return value;
+}
+
+bool AsciiEqualsCaseInsensitive(util::string_view left, util::string_view right) {
+  // TODO: ASCII validation
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < left.size(); ++i) {
+    if (std::tolower(static_cast<unsigned char>(left[i])) !=
+        std::tolower(static_cast<unsigned char>(right[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string AsciiToLower(util::string_view value) {
+  // TODO: ASCII validation
+  std::string result = std::string(value);
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  return result;
+}
+
+std::string AsciiToUpper(util::string_view value) {
+  // TODO: ASCII validation
+  std::string result = std::string(value);
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char c) { return std::toupper(c); });
+  return result;
+}
+
+util::optional<std::string> Replace(util::string_view s, util::string_view token,
+                                    util::string_view replacement) {
+  size_t token_start = s.find(token);
+  if (token_start == std::string::npos) {
+    return util::nullopt;
+  }
+  return s.substr(0, token_start).to_string() + replacement.to_string() +
+         s.substr(token_start + token.size()).to_string();
 }
 
 }  // namespace internal

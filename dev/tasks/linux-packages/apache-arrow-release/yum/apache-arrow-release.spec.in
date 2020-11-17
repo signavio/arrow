@@ -94,5 +94,14 @@ else
 fi
 
 %changelog
+* Mon Oct 12 2020 Krisztián Szűcs <szucs.krisztian@gmail.com> - 2.0.0-1
+- New upstream release.
+
+* Mon Jul 20 2020 Krisztián Szűcs <szucs.krisztian@gmail.com> - 1.0.0-1
+- New upstream release.
+
+* Thu Apr 16 2020 Krisztián Szűcs <szucs.krisztian@gmail.com> - 0.17.0-1
+- New upstream release.
+
 * Thu Jan 30 2020 Krisztián Szűcs <szucs.krisztian@gmail.com> - 0.16.0-1
 - New upstream release.

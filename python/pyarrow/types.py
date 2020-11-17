@@ -31,12 +31,14 @@ _UNSIGNED_INTEGER_TYPES = {lib.Type_UINT8, lib.Type_UINT16, lib.Type_UINT32,
                            lib.Type_UINT64}
 _INTEGER_TYPES = _SIGNED_INTEGER_TYPES | _UNSIGNED_INTEGER_TYPES
 _FLOATING_TYPES = {lib.Type_HALF_FLOAT, lib.Type_FLOAT, lib.Type_DOUBLE}
+_DECIMAL_TYPES = {lib.Type_DECIMAL128, lib.Type_DECIMAL256}
 _DATE_TYPES = {lib.Type_DATE32, lib.Type_DATE64}
 _TIME_TYPES = {lib.Type_TIME32, lib.Type_TIME64}
 _TEMPORAL_TYPES = {lib.Type_TIMESTAMP,
                    lib.Type_DURATION} | _TIME_TYPES | _DATE_TYPES
+_UNION_TYPES = {lib.Type_SPARSE_UNION, lib.Type_DENSE_UNION}
 _NESTED_TYPES = {lib.Type_LIST, lib.Type_LARGE_LIST, lib.Type_STRUCT,
-                 lib.Type_UNION, lib.Type_MAP}
+                 lib.Type_MAP} | _UNION_TYPES
 
 
 def is_null(t):
@@ -190,7 +192,7 @@ def is_union(t):
     """
     Return True if value is an instance of a union type.
     """
-    return t.id == lib.Type_UNION
+    return t.id in _UNION_TYPES
 
 
 def is_nested(t):
@@ -324,7 +326,21 @@ def is_decimal(t):
     """
     Return True if value is an instance of a decimal type.
     """
-    return t.id == lib.Type_DECIMAL
+    return t.id in _DECIMAL_TYPES
+
+
+def is_decimal128(t):
+    """
+    Return True if value is an instance of a decimal type.
+    """
+    return t.id == lib.Type_DECIMAL128
+
+
+def is_decimal256(t):
+    """
+    Return True if value is an instance of a decimal type.
+    """
+    return t.id == lib.Type_DECIMAL256
 
 
 def is_dictionary(t):

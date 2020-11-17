@@ -54,7 +54,12 @@ set(PROTO_HDRS "${PROTO_OUTPUT_DIR}/Types.pb.h")
 set(JNI_HEADERS_DIR "${CMAKE_CURRENT_BINARY_DIR}/java")
 add_subdirectory(../../../../java/gandiva ./java/gandiva)
 
-set(GANDIVA_LINK_LIBS ${ARROW_PROTOBUF_LIBPROTOBUF} gandiva_static)
+set(GANDIVA_LINK_LIBS ${ARROW_PROTOBUF_LIBPROTOBUF})
+if(ARROW_BUILD_STATIC)
+  list(APPEND GANDIVA_LINK_LIBS gandiva_static)
+else()
+  list(APPEND GANDIVA_LINK_LIBS gandiva_shared)
+endif()
 
 set(GANDIVA_JNI_SOURCES
     config_builder.cc
@@ -78,9 +83,10 @@ add_arrow_lib(gandiva_jni
               STATIC_LINK_LIBS
               ${GANDIVA_LINK_LIBS}
               DEPENDENCIES
+              ${GANDIVA_LINK_LIBS}
               gandiva_java
-              gandiva_jni_proto
               gandiva_jni_headers
+              gandiva_jni_proto
               EXTRA_INCLUDES
               $<INSTALL_INTERFACE:include>
               $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -91,11 +97,13 @@ add_arrow_lib(gandiva_jni
 
 add_dependencies(gandiva ${GANDIVA_JNI_LIBRARIES})
 
-# filter out everything that is not needed for the jni bridge
-# statically linked stdc++ has conflicts with stdc++ loaded by other libraries.
-if(NOT APPLE)
-  set_target_properties(
-    gandiva_jni_shared
-    PROPERTIES LINK_FLAGS
-               "-Wl,--version-script=${CMAKE_SOURCE_DIR}/src/gandiva/jni/symbols.map")
+if(ARROW_BUILD_SHARED)
+  # filter out everything that is not needed for the jni bridge
+  # statically linked stdc++ has conflicts with stdc++ loaded by other libraries.
+  if(NOT APPLE)
+    set_target_properties(
+      gandiva_jni_shared
+      PROPERTIES LINK_FLAGS
+                 "-Wl,--version-script=${CMAKE_SOURCE_DIR}/src/gandiva/jni/symbols.map")
+  endif()
 endif()

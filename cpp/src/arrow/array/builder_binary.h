@@ -17,25 +17,29 @@
 
 #pragma once
 
-#include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
 #include <vector>
 
-#include "arrow/array.h"
+#include "arrow/array/array_base.h"
+#include "arrow/array/array_binary.h"
 #include "arrow/array/builder_base.h"
+#include "arrow/array/data.h"
+#include "arrow/buffer.h"
 #include "arrow/buffer_builder.h"
 #include "arrow/status.h"
-#include "arrow/type_traits.h"
+#include "arrow/type.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/string_view.h"  // IWYU pragma: export
+#include "arrow/util/visibility.h"
 
 namespace arrow {
-
-constexpr int64_t kBinaryMemoryLimit = std::numeric_limits<int32_t>::max() - 1;
 
 // ----------------------------------------------------------------------
 // Binary and String
@@ -57,6 +61,7 @@ class BaseBinaryBuilder : public ArrayBuilder {
     ARROW_RETURN_NOT_OK(AppendNextOffset());
     // Safety check for UBSAN.
     if (ARROW_PREDICT_TRUE(length > 0)) {
+      ARROW_RETURN_NOT_OK(ValidateOverflow(length));
       ARROW_RETURN_NOT_OK(value_data_builder_.Append(value, length));
     }
 
@@ -74,9 +79,6 @@ class BaseBinaryBuilder : public ArrayBuilder {
 
   Status AppendNulls(int64_t length) final {
     const int64_t num_bytes = value_data_builder_.length();
-    if (ARROW_PREDICT_FALSE(num_bytes > memory_limit())) {
-      return AppendOverflow(num_bytes);
-    }
     ARROW_RETURN_NOT_OK(Reserve(length));
     for (int64_t i = 0; i < length; ++i) {
       offsets_builder_.UnsafeAppend(static_cast<offset_type>(num_bytes));
@@ -89,6 +91,23 @@ class BaseBinaryBuilder : public ArrayBuilder {
     ARROW_RETURN_NOT_OK(AppendNextOffset());
     ARROW_RETURN_NOT_OK(Reserve(1));
     UnsafeAppendToBitmap(false);
+    return Status::OK();
+  }
+
+  Status AppendEmptyValue() final {
+    ARROW_RETURN_NOT_OK(AppendNextOffset());
+    ARROW_RETURN_NOT_OK(Reserve(1));
+    UnsafeAppendToBitmap(true);
+    return Status::OK();
+  }
+
+  Status AppendEmptyValues(int64_t length) final {
+    const int64_t num_bytes = value_data_builder_.length();
+    ARROW_RETURN_NOT_OK(Reserve(length));
+    for (int64_t i = 0; i < length; ++i) {
+      offsets_builder_.UnsafeAppend(static_cast<offset_type>(num_bytes));
+    }
+    UnsafeAppendToBitmap(length, true);
     return Status::OK();
   }
 
@@ -228,6 +247,16 @@ class BaseBinaryBuilder : public ArrayBuilder {
     value_data_builder_.Reset();
   }
 
+  Status ValidateOverflow(int64_t new_bytes) {
+    auto new_size = value_data_builder_.length() + new_bytes;
+    if (ARROW_PREDICT_FALSE(new_size > memory_limit())) {
+      return Status::CapacityError("array cannot contain more than ", memory_limit(),
+                                   " bytes, have ", new_size);
+    } else {
+      return Status::OK();
+    }
+  }
+
   Status Resize(int64_t capacity) override {
     // XXX Why is this check necessary?  There is no reason to disallow, say,
     // binary arrays with more than 2**31 empty or null values.
@@ -245,12 +274,8 @@ class BaseBinaryBuilder : public ArrayBuilder {
   /// \brief Ensures there is enough allocated capacity to append the indicated
   /// number of bytes to the value data buffer without additional allocations
   Status ReserveData(int64_t elements) {
-    const int64_t size = value_data_length() + elements;
-    ARROW_RETURN_IF(size > memory_limit(),
-                    Status::CapacityError("Cannot reserve capacity larger than ",
-                                          memory_limit(), " bytes"));
-    return (size > value_data_capacity()) ? value_data_builder_.Reserve(elements)
-                                          : Status::OK();
+    ARROW_RETURN_NOT_OK(ValidateOverflow(elements));
+    return value_data_builder_.Reserve(elements);
   }
 
   Status FinishInternal(std::shared_ptr<ArrayData>* out) override {
@@ -313,16 +338,8 @@ class BaseBinaryBuilder : public ArrayBuilder {
   TypedBufferBuilder<offset_type> offsets_builder_;
   TypedBufferBuilder<uint8_t> value_data_builder_;
 
-  Status AppendOverflow(int64_t num_bytes) {
-    return Status::CapacityError("array cannot contain more than ", memory_limit(),
-                                 " bytes, have ", num_bytes);
-  }
-
   Status AppendNextOffset() {
     const int64_t num_bytes = value_data_builder_.length();
-    if (ARROW_PREDICT_FALSE(num_bytes > memory_limit())) {
-      return AppendOverflow(num_bytes);
-    }
     return offsets_builder_.Append(static_cast<offset_type>(num_bytes));
   }
 
@@ -436,14 +453,20 @@ class ARROW_EXPORT FixedSizeBinaryBuilder : public ArrayBuilder {
                       const uint8_t* valid_bytes = NULLPTR);
 
   Status AppendNull() final;
-
   Status AppendNulls(int64_t length) final;
+
+  Status AppendEmptyValue() final;
+  Status AppendEmptyValues(int64_t length) final;
 
   void UnsafeAppend(const uint8_t* value) {
     UnsafeAppendToBitmap(true);
     if (ARROW_PREDICT_TRUE(byte_width_ > 0)) {
       byte_builder_.UnsafeAppend(value, byte_width_);
     }
+  }
+
+  void UnsafeAppend(const char* value) {
+    UnsafeAppend(reinterpret_cast<const uint8_t*>(value));
   }
 
   void UnsafeAppend(util::string_view value) {
@@ -456,6 +479,23 @@ class ARROW_EXPORT FixedSizeBinaryBuilder : public ArrayBuilder {
   void UnsafeAppendNull() {
     UnsafeAppendToBitmap(false);
     byte_builder_.UnsafeAppend(/*num_copies=*/byte_width_, 0);
+  }
+
+  Status ValidateOverflow(int64_t new_bytes) const {
+    auto new_size = byte_builder_.length() + new_bytes;
+    if (ARROW_PREDICT_FALSE(new_size > memory_limit())) {
+      return Status::CapacityError("array cannot contain more than ", memory_limit(),
+                                   " bytes, have ", new_size);
+    } else {
+      return Status::OK();
+    }
+  }
+
+  /// \brief Ensures there is enough allocated capacity to append the indicated
+  /// number of bytes to the value data buffer without additional allocations
+  Status ReserveData(int64_t elements) {
+    ARROW_RETURN_NOT_OK(ValidateOverflow(elements));
+    return byte_builder_.Reserve(elements);
   }
 
   void Reset() override;

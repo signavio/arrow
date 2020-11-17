@@ -22,15 +22,17 @@
 
 #include "arrow/filesystem/hdfs.h"
 #include "arrow/filesystem/path_util.h"
+#include "arrow/filesystem/util_internal.h"
 #include "arrow/io/hdfs.h"
 #include "arrow/io/hdfs_internal.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
-#include "arrow/util/parsing.h"
+#include "arrow/util/value_parsing.h"
 #include "arrow/util/windows_fixup.h"
 
 namespace arrow {
 
+using internal::ParseValue;
 using internal::Uri;
 
 namespace fs {
@@ -252,25 +254,33 @@ class HadoopFileSystem::Impl {
   }
 };
 
-void HdfsOptions::ConfigureEndPoint(const std::string& host, int port) {
-  connection_config.host = host;
+void HdfsOptions::ConfigureEndPoint(std::string host, int port) {
+  connection_config.host = std::move(host);
   connection_config.port = port;
 }
 
-void HdfsOptions::ConfigureHdfsUser(const std::string& user_name) {
-  connection_config.user = user_name;
+void HdfsOptions::ConfigureUser(std::string user_name) {
+  connection_config.user = std::move(user_name);
 }
 
-void HdfsOptions::ConfigureHdfsReplication(int16_t replication) {
+void HdfsOptions::ConfigureKerberosTicketCachePath(std::string path) {
+  connection_config.kerb_ticket = std::move(path);
+}
+
+void HdfsOptions::ConfigureReplication(int16_t replication) {
   this->replication = replication;
 }
 
-void HdfsOptions::ConfigureHdfsBufferSize(int32_t buffer_size) {
+void HdfsOptions::ConfigureBufferSize(int32_t buffer_size) {
   this->buffer_size = buffer_size;
 }
 
-void HdfsOptions::ConfigureHdfsBlockSize(int64_t default_block_size) {
+void HdfsOptions::ConfigureBlockSize(int64_t default_block_size) {
   this->default_block_size = default_block_size;
+}
+
+void HdfsOptions::ConfigureExtraConf(std::string key, std::string val) {
+  connection_config.extra_conf.emplace(std::move(key), std::move(val));
 }
 
 bool HdfsOptions::Equals(const HdfsOptions& other) const {
@@ -308,43 +318,57 @@ Result<HdfsOptions> HdfsOptions::FromUri(const Uri& uri) {
   auto it = options_map.find("replication");
   if (it != options_map.end()) {
     const auto& v = it->second;
-    ::arrow::internal::StringConverter<Int16Type> converter;
     int16_t replication;
-    if (!converter(v.data(), v.size(), &replication)) {
+    if (!ParseValue<Int16Type>(v.data(), v.size(), &replication)) {
       return Status::Invalid("Invalid value for option 'replication': '", v, "'");
     }
-    options.ConfigureHdfsReplication(replication);
+    options.ConfigureReplication(replication);
+    options_map.erase(it);
   }
 
   // configure buffer_size
   it = options_map.find("buffer_size");
   if (it != options_map.end()) {
     const auto& v = it->second;
-    ::arrow::internal::StringConverter<Int32Type> converter;
     int32_t buffer_size;
-    if (!converter(v.data(), v.size(), &buffer_size)) {
+    if (!ParseValue<Int32Type>(v.data(), v.size(), &buffer_size)) {
       return Status::Invalid("Invalid value for option 'buffer_size': '", v, "'");
     }
-    options.ConfigureHdfsBufferSize(buffer_size);
+    options.ConfigureBufferSize(buffer_size);
+    options_map.erase(it);
   }
 
   // configure default_block_size
   it = options_map.find("default_block_size");
   if (it != options_map.end()) {
     const auto& v = it->second;
-    ::arrow::internal::StringConverter<Int64Type> converter;
     int64_t default_block_size;
-    if (!converter(v.data(), v.size(), &default_block_size)) {
+    if (!ParseValue<Int64Type>(v.data(), v.size(), &default_block_size)) {
       return Status::Invalid("Invalid value for option 'default_block_size': '", v, "'");
     }
-    options.ConfigureHdfsBlockSize(default_block_size);
+    options.ConfigureBlockSize(default_block_size);
+    options_map.erase(it);
   }
 
   // configure user
   it = options_map.find("user");
   if (it != options_map.end()) {
     const auto& user = it->second;
-    options.ConfigureHdfsUser(user);
+    options.ConfigureUser(user);
+    options_map.erase(it);
+  }
+
+  // configure kerberos
+  it = options_map.find("kerb_ticket");
+  if (it != options_map.end()) {
+    const auto& ticket = it->second;
+    options.ConfigureKerberosTicketCachePath(ticket);
+    options_map.erase(it);
+  }
+
+  // configure other options
+  for (const auto& it : options_map) {
+    options.ConfigureExtraConf(it.first, it.second);
   }
 
   return options;
@@ -398,8 +422,13 @@ Status HadoopFileSystem::DeleteDir(const std::string& path) {
 }
 
 Status HadoopFileSystem::DeleteDirContents(const std::string& path) {
+  if (internal::IsEmptyPath(path)) {
+    return internal::InvalidDeleteDirContents(path);
+  }
   return impl_->DeleteDirContents(path);
 }
+
+Status HadoopFileSystem::DeleteRootDirContents() { return impl_->DeleteDirContents(""); }
 
 Status HadoopFileSystem::DeleteFile(const std::string& path) {
   return impl_->DeleteFile(path);

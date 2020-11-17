@@ -18,7 +18,7 @@
 # Common path suffixes to be searched by find_library or find_path.
 # Windows artifacts may be found under "<root>/Library", so
 # search there as well.
-set(LIB_PATH_SUFFIXES
+set(ARROW_LIBRARY_PATH_SUFFIXES
     "${CMAKE_LIBRARY_ARCHITECTURE}"
     "lib/${CMAKE_LIBRARY_ARCHITECTURE}"
     "lib64"
@@ -28,7 +28,23 @@ set(LIB_PATH_SUFFIXES
     "Library"
     "Library/lib"
     "Library/bin")
-set(INCLUDE_PATH_SUFFIXES "include" "Library" "Library/include")
+set(ARROW_INCLUDE_PATH_SUFFIXES "include" "Library" "Library/include")
+
+set(ARROW_BOOST_PROCESS_COMPILE_DEFINITIONS)
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  # boost/process/detail/windows/handle_workaround.hpp doesn't work
+  # without BOOST_USE_WINDOWS_H with MinGW because MinGW doesn't
+  # provide __kernel_entry without winternl.h.
+  #
+  # See also:
+  # https://github.com/boostorg/process/blob/develop/include/boost/process/detail/windows/handle_workaround.hpp
+  #
+  # You can use this like the following:
+  #
+  #   target_compile_definitions(target PRIVATE
+  #                              ${ARROW_BOOST_PROCESS_COMPILE_DEFINITIONS})
+  list(APPEND ARROW_BOOST_PROCESS_COMPILE_DEFINITIONS "BOOST_USE_WINDOWS_H=1")
+endif()
 
 function(ADD_THIRDPARTY_LIB LIB_NAME)
   set(options)
@@ -128,11 +144,99 @@ function(REUSE_PRECOMPILED_HEADER_LIB TARGET_NAME LIB_NAME)
   endif()
 endfunction()
 
+# Based on MIT-licensed
+# https://gist.github.com/cristianadam/ef920342939a89fae3e8a85ca9459b49
+function(create_merged_static_lib output_target)
+  set(options)
+  set(one_value_args NAME ROOT)
+  set(multi_value_args TO_MERGE)
+  cmake_parse_arguments(ARG
+                        "${options}"
+                        "${one_value_args}"
+                        "${multi_value_args}"
+                        ${ARGN})
+  if(ARG_UNPARSED_ARGUMENTS)
+    message(SEND_ERROR "Error: unrecognized arguments: ${ARG_UNPARSED_ARGUMENTS}")
+  endif()
+
+  set(
+    output_lib_path
+    ${BUILD_OUTPUT_ROOT_DIRECTORY}${CMAKE_STATIC_LIBRARY_PREFIX}${ARG_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX}
+    )
+
+  set(all_library_paths $<TARGET_FILE:${ARG_ROOT}>)
+  foreach(lib ${ARG_TO_MERGE})
+    list(APPEND all_library_paths $<TARGET_FILE:${lib}>)
+  endforeach()
+
+  if(APPLE)
+    set(BUNDLE_COMMAND
+        "libtool"
+        "-no_warning_for_no_symbols"
+        "-static"
+        "-o"
+        ${output_lib_path}
+        ${all_library_paths})
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|GNU|Intel)$")
+    set(ar_script_path ${CMAKE_BINARY_DIR}/${ARG_NAME}.ar)
+
+    file(WRITE ${ar_script_path}.in "CREATE ${output_lib_path}\n")
+    file(APPEND ${ar_script_path}.in "ADDLIB $<TARGET_FILE:${ARG_ROOT}>\n")
+
+    foreach(lib ${ARG_TO_MERGE})
+      file(APPEND ${ar_script_path}.in "ADDLIB $<TARGET_FILE:${lib}>\n")
+    endforeach()
+
+    file(APPEND ${ar_script_path}.in "SAVE\nEND\n")
+    file(GENERATE OUTPUT ${ar_script_path} INPUT ${ar_script_path}.in)
+    set(ar_tool ${CMAKE_AR})
+
+    if(CMAKE_INTERPROCEDURAL_OPTIMIZATION)
+      set(ar_tool ${CMAKE_CXX_COMPILER_AR})
+    endif()
+
+    set(BUNDLE_COMMAND ${ar_tool} -M < ${ar_script_path})
+
+  elseif(MSVC)
+    if(NOT CMAKE_LIBTOOL)
+      find_program(lib_tool lib HINTS "${CMAKE_CXX_COMPILER}/..")
+      if("${lib_tool}" STREQUAL "lib_tool-NOTFOUND")
+        message(FATAL_ERROR "Cannot locate libtool to bundle libraries")
+      endif()
+    else()
+      set(${lib_tool} ${CMAKE_LIBTOOL})
+    endif()
+    set(BUNDLE_TOOL ${lib_tool})
+    set(BUNDLE_COMMAND ${BUNDLE_TOOL} /NOLOGO /OUT:${output_lib_path}
+                       ${all_library_paths})
+  else()
+    message(FATAL_ERROR "Unknown bundle scenario!")
+  endif()
+
+  add_custom_command(COMMAND ${BUNDLE_COMMAND}
+                     OUTPUT ${output_lib_path}
+                     COMMENT "Bundling ${output_lib_path}"
+                     VERBATIM)
+
+  message(
+    STATUS "Creating bundled static library target ${output_target} at ${output_lib_path}"
+    )
+
+  add_custom_target(${output_target} ALL DEPENDS ${output_lib_path})
+  add_dependencies(${output_target} ${ARG_ROOT} ${ARG_TO_MERGE})
+  install(FILES ${output_lib_path} DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endfunction()
+
 # \arg OUTPUTS list to append built targets to
 function(ADD_ARROW_LIB LIB_NAME)
-  set(options BUILD_SHARED BUILD_STATIC)
-  set(one_value_args CMAKE_PACKAGE_NAME PKG_CONFIG_NAME SHARED_LINK_FLAGS
-                     PRECOMPILED_HEADER_LIB)
+  set(options)
+  set(one_value_args
+      BUILD_SHARED
+      BUILD_STATIC
+      CMAKE_PACKAGE_NAME
+      PKG_CONFIG_NAME
+      SHARED_LINK_FLAGS
+      PRECOMPILED_HEADER_LIB)
   set(multi_value_args
       SOURCES
       PRECOMPILED_HEADERS
@@ -160,12 +264,12 @@ function(ADD_ARROW_LIB LIB_NAME)
   endif()
 
   # Allow overriding ARROW_BUILD_SHARED and ARROW_BUILD_STATIC
-  if(ARG_BUILD_SHARED)
+  if(DEFINED ARG_BUILD_SHARED)
     set(BUILD_SHARED ${ARG_BUILD_SHARED})
   else()
     set(BUILD_SHARED ${ARROW_BUILD_SHARED})
   endif()
-  if(ARG_BUILD_STATIC)
+  if(DEFINED ARG_BUILD_STATIC)
     set(BUILD_STATIC ${ARG_BUILD_STATIC})
   else()
     set(BUILD_STATIC ${ARROW_BUILD_STATIC})
@@ -250,7 +354,8 @@ function(ADD_ARROW_LIB LIB_NAME)
       target_include_directories(${LIB_NAME}_shared PRIVATE ${ARG_PRIVATE_INCLUDES})
     endif()
 
-    if(APPLE AND NOT DEFINED $ENV{EMSCRIPTEN})
+    # On iOS, specifying -undefined conflicts with enabling bitcode
+    if(APPLE AND NOT IOS AND NOT DEFINED ENV{EMSCRIPTEN})
       # On OS X, you can avoid linking at library load time and instead
       # expecting that the symbols have been loaded separately. This happens
       # with libpython* where there can be conflicts between system Python and
@@ -335,7 +440,7 @@ function(ADD_ARROW_LIB LIB_NAME)
       target_include_directories(${LIB_NAME}_static PRIVATE ${ARG_PRIVATE_INCLUDES})
     endif()
 
-    if(MSVC)
+    if(MSVC_TOOLCHAIN)
       set(LIB_NAME_STATIC ${LIB_NAME}_static)
     else()
       set(LIB_NAME_STATIC ${LIB_NAME})
@@ -350,14 +455,14 @@ function(ADD_ARROW_LIB LIB_NAME)
                                      ${LIB_NAME_STATIC})
 
     if(ARG_STATIC_INSTALL_INTERFACE_LIBS)
-      set(INTERFACE_LIBS ${ARG_STATIC_INSTALL_INTERFACE_LIBS})
-    else()
-      set(INTERFACE_LIBS ${ARG_STATIC_LINK_LIBS})
+      target_link_libraries(${LIB_NAME}_static LINK_PUBLIC
+                            "$<INSTALL_INTERFACE:${ARG_STATIC_INSTALL_INTERFACE_LIBS}>")
     endif()
 
-    target_link_libraries(${LIB_NAME}_static LINK_PUBLIC
-                          "$<BUILD_INTERFACE:${ARG_STATIC_LINK_LIBS}>"
-                          "$<INSTALL_INTERFACE:${INTERFACE_LIBS}>")
+    if(ARG_STATIC_LINK_LIBS)
+      target_link_libraries(${LIB_NAME}_static LINK_PRIVATE
+                            "$<BUILD_INTERFACE:${ARG_STATIC_LINK_LIBS}>")
+    endif()
 
     install(TARGETS ${LIB_NAME}_static ${INSTALL_IS_OPTIONAL}
             EXPORT ${LIB_NAME}_targets
@@ -555,6 +660,7 @@ function(ADD_TEST_CASE REL_TEST_NAME)
       EXTRA_INCLUDES
       EXTRA_DEPENDENCIES
       LABELS
+      EXTRA_LABELS
       PREFIX)
   cmake_parse_arguments(ARG
                         "${options}"
@@ -633,8 +739,8 @@ function(ADD_TEST_CASE REL_TEST_NAME)
       ${TEST_NAME} bash -c
       "cd '${CMAKE_SOURCE_DIR}'; \
                valgrind --suppressions=valgrind.supp --tool=memcheck --gen-suppressions=all \
-                 --leak-check=full --leak-check-heuristics=stdstring --error-exitcode=1 ${TEST_PATH}"
-      )
+                 --num-callers=500 --leak-check=full --leak-check-heuristics=stdstring \
+                 --error-exitcode=1 ${TEST_PATH}")
   elseif(WIN32)
     add_test(${TEST_NAME} ${TEST_PATH})
   else()
@@ -651,10 +757,15 @@ function(ADD_TEST_CASE REL_TEST_NAME)
     add_dependencies(${TARGET} ${TEST_NAME})
   endforeach()
 
+  set(LABELS)
+  list(APPEND LABELS "unittest")
   if(ARG_LABELS)
-    set(ARG_LABELS "unittest;${ARG_LABELS}")
-  else()
-    set(ARG_LABELS unittest)
+    list(APPEND LABELS ${ARG_LABELS})
+  endif()
+  # EXTRA_LABELS don't create their own dependencies, they are only used
+  # to ease running certain test categories.
+  if(ARG_EXTRA_LABELS)
+    list(APPEND LABELS ${ARG_EXTRA_LABELS})
   endif()
 
   foreach(LABEL ${ARG_LABELS})
@@ -672,7 +783,7 @@ function(ADD_TEST_CASE REL_TEST_NAME)
     add_dependencies(${LABEL_TEST_NAME} ${TEST_NAME})
   endforeach()
 
-  set_property(TEST ${TEST_NAME} APPEND PROPERTY LABELS ${ARG_LABELS})
+  set_property(TEST ${TEST_NAME} APPEND PROPERTY LABELS ${LABELS})
 endfunction()
 
 #
@@ -825,3 +936,12 @@ function(ARROW_INSTALL_CMAKE_FIND_MODULE MODULE)
   install(FILES "${ARROW_SOURCE_DIR}/cmake_modules/Find${MODULE}.cmake"
           DESTINATION "${ARROW_CMAKE_INSTALL_DIR}")
 endfunction()
+
+# Implementations of lisp "car" and "cdr" functions
+macro(ARROW_CAR var)
+  set(${var} ${ARGV1})
+endmacro()
+
+macro(ARROW_CDR var rest)
+  set(${var} ${ARGN})
+endmacro()

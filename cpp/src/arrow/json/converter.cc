@@ -24,13 +24,15 @@
 #include "arrow/builder.h"
 #include "arrow/json/parser.h"
 #include "arrow/type.h"
+#include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
-#include "arrow/util/parsing.h"
 #include "arrow/util/string_view.h"
+#include "arrow/util/value_parsing.h"
 
 namespace arrow {
 namespace json {
 
+using internal::checked_cast;
 using util::string_view;
 
 template <typename... Args>
@@ -105,10 +107,10 @@ class BooleanConverter : public PrimitiveConverter {
 template <typename T>
 class NumericConverter : public PrimitiveConverter {
  public:
-  using value_type = typename internal::StringConverter<T>::value_type;
+  using value_type = typename T::c_type;
 
   NumericConverter(MemoryPool* pool, const std::shared_ptr<DataType>& type)
-      : PrimitiveConverter(pool, type), convert_one_(type) {}
+      : PrimitiveConverter(pool, type), numeric_type_(checked_cast<const T&>(*type)) {}
 
   Status Convert(const std::shared_ptr<Array>& in, std::shared_ptr<Array>* out) override {
     if (in->type_id() == Type::NA) {
@@ -122,7 +124,7 @@ class NumericConverter : public PrimitiveConverter {
 
     auto visit_valid = [&](string_view repr) {
       value_type value;
-      if (!convert_one_(repr.data(), repr.size(), &value)) {
+      if (!internal::ParseValue(numeric_type_, repr.data(), repr.size(), &value)) {
         return GenericConversionError(*out_type_, ", couldn't parse:", repr);
       }
 
@@ -139,7 +141,7 @@ class NumericConverter : public PrimitiveConverter {
     return builder.Finish(out);
   }
 
-  internal::StringConverter<T> convert_one_;
+  const T& numeric_type_;
 };
 
 template <typename DateTimeType>
@@ -281,7 +283,7 @@ const PromotionGraph* GetPromotionGraph() {
           return list(value_field->WithType(Infer(value_field)));
         }
         case Kind::kObject: {
-          auto fields = unexpected_field->type()->children();
+          auto fields = unexpected_field->type()->fields();
           for (auto& field : fields) {
             field = field->WithType(Infer(field));
           }

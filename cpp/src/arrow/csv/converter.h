@@ -42,6 +42,7 @@ class ARROW_EXPORT Converter {
 
   std::shared_ptr<DataType> type() const { return type_; }
 
+  // Create a Converter for the given data type
   static Result<std::shared_ptr<Converter>> Make(
       const std::shared_ptr<DataType>& type, const ConvertOptions& options,
       MemoryPool* pool = default_memory_pool());
@@ -60,15 +61,21 @@ class ARROW_EXPORT Converter {
 
 class ARROW_EXPORT DictionaryConverter : public Converter {
  public:
-  using Converter::Converter;
+  DictionaryConverter(const std::shared_ptr<DataType>& value_type,
+                      const ConvertOptions& options, MemoryPool* pool);
 
   // If the dictionary length goes above this value, conversion will fail
   // with Status::IndexError.
   virtual void SetMaxCardinality(int32_t max_length) = 0;
 
+  // Create a Converter for the given dictionary value type.
+  // The dictionary index type will always be Int32.
   static Result<std::shared_ptr<DictionaryConverter>> Make(
       const std::shared_ptr<DataType>& value_type, const ConvertOptions& options,
       MemoryPool* pool = default_memory_pool());
+
+ protected:
+  std::shared_ptr<DataType> value_type_;
 };
 
 }  // namespace csv

@@ -194,8 +194,8 @@ class TestPlasmaClient:
                                                           with_meta=True)
             assert data_tuple[1].to_pybytes() == i * b'a'
             assert (self.plasma_client.get_metadata(
-                        [object_ids[i]])[0].to_pybytes()
-                    == i * b'b')
+                [object_ids[i]])[0].to_pybytes() ==
+                i * b'b')
 
         # Make sure that creating the same object twice raises an exception.
         object_id = random_object_id()
@@ -262,7 +262,7 @@ class TestPlasmaClient:
             [object_id], timeout_ms=1, with_meta=True)[0][1] is None
         self.plasma_client.seal(object_id)
         assert self.plasma_client.get_buffers(
-            [object_id], timeout_ms=0, with_meta=True)[0][1]is not None
+            [object_id], timeout_ms=0, with_meta=True)[0][1] is not None
 
     def test_buffer_lifetime(self):
         # ARROW-2195
@@ -307,6 +307,8 @@ class TestPlasmaClient:
             [result] = self.plasma_client.get([object_id], timeout_ms=0)
             assert result == pa.plasma.ObjectNotAvailable
 
+    @pytest.mark.filterwarnings(
+        "ignore:'pyarrow.deserialize':DeprecationWarning")
     def test_put_and_get_raw_buffer(self):
         temp_id = random_object_id()
         use_meta = b"RAW"
@@ -338,6 +340,8 @@ class TestPlasmaClient:
             result = deserialize_or_output(result)
             assert result == pa.plasma.ObjectNotAvailable
 
+    @pytest.mark.filterwarnings(
+        "ignore:'serialization_context':DeprecationWarning")
     def test_put_and_get_serialization_context(self):
 
         class CustomType:
@@ -349,7 +353,7 @@ class TestPlasmaClient:
         with pytest.raises(pa.ArrowSerializationError):
             self.plasma_client.put(val)
 
-        serialization_context = pa.SerializationContext()
+        serialization_context = pa.lib.SerializationContext()
         serialization_context.register_type(CustomType, 20*"\x00")
 
         object_id = self.plasma_client.put(
@@ -367,15 +371,15 @@ class TestPlasmaClient:
         # Write an arrow object.
         object_id = random_object_id()
         tensor = pa.Tensor.from_numpy(data)
-        data_size = pa.get_tensor_size(tensor)
+        data_size = pa.ipc.get_tensor_size(tensor)
         buf = self.plasma_client.create(object_id, data_size)
         stream = pa.FixedSizeBufferWriter(buf)
-        pa.write_tensor(tensor, stream)
+        pa.ipc.write_tensor(tensor, stream)
         self.plasma_client.seal(object_id)
         # Read the arrow object.
         [tensor] = self.plasma_client.get_buffers([object_id])
         reader = pa.BufferReader(tensor)
-        array = pa.read_tensor(reader).to_numpy()
+        array = pa.ipc.read_tensor(reader).to_numpy()
         # Assert that they are equal.
         np.testing.assert_equal(data, array)
 
@@ -408,7 +412,7 @@ class TestPlasmaClient:
         reader = pa.RecordBatchStreamReader(pa.BufferReader(data))
         result = reader.read_next_batch().to_pandas()
 
-        pd.util.testing.assert_frame_equal(df, result)
+        pd.testing.assert_frame_equal(df, result)
 
     def test_pickle_object_ids(self):
         # This can be used for sharing object IDs between processes.
@@ -758,8 +762,8 @@ class TestPlasmaClient:
             data_sizes = [np.random.randint(1000) + 1 for _ in range(i)]
             for j in range(i):
                 x = self.plasma_client2.create(
-                        object_ids[j], data_sizes[j],
-                        metadata=bytearray(np.random.bytes(metadata_sizes[j])))
+                    object_ids[j], data_sizes[j],
+                    metadata=bytearray(np.random.bytes(metadata_sizes[j])))
                 self.plasma_client2.seal(object_ids[j])
             del x
             # Check that we received notifications for creating all of the
@@ -794,8 +798,8 @@ class TestPlasmaClient:
         data_sizes.append(np.random.randint(1000))
         for i in range(num_object_ids):
             x = self.plasma_client2.create(
-                    object_ids[i], data_sizes[i],
-                    metadata=bytearray(np.random.bytes(metadata_sizes[i])))
+                object_ids[i], data_sizes[i],
+                metadata=bytearray(np.random.bytes(metadata_sizes[i])))
             self.plasma_client2.seal(object_ids[i])
         del x
         for i in range(num_object_ids):

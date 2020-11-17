@@ -31,6 +31,7 @@
 
 #include "arrow/array.h"
 #include "arrow/buffer.h"
+#include "arrow/chunked_array.h"
 #include "arrow/io/interfaces.h"
 #include "arrow/ipc/metadata_internal.h"
 #include "arrow/ipc/options.h"
@@ -308,17 +309,14 @@ class ReaderV1 : public Reader {
 
   std::shared_ptr<Schema> schema() const override { return schema_; }
 
-  Status GetDictionary(int field_index, std::shared_ptr<Array>* out) {
+  Status GetDictionary(int field_index, std::shared_ptr<ArrayData>* out) {
     const fbs::Column* col_meta = metadata_->columns()->Get(field_index);
     auto dict_meta = col_meta->metadata_as<fbs::CategoryMetadata>();
     const auto& dict_type =
         checked_cast<const DictionaryType&>(*schema_->field(field_index)->type());
 
-    std::shared_ptr<ArrayData> out_data;
-    RETURN_NOT_OK(LoadValues(dict_type.value_type(), dict_meta->levels(),
-                             fbs::TypeMetadata::NONE, nullptr, &out_data));
-    *out = MakeArray(out_data);
-    return Status::OK();
+    return LoadValues(dict_type.value_type(), dict_meta->levels(),
+                      fbs::TypeMetadata::NONE, nullptr, out);
   }
 
   Status GetColumn(int field_index, std::shared_ptr<ChunkedArray>* out) {
@@ -716,24 +714,12 @@ class ReaderV2 : public Reader {
 
   Status Read(const IpcReadOptions& options, std::shared_ptr<Table>* out) {
     ARROW_ASSIGN_OR_RAISE(auto reader, RecordBatchFileReader::Open(source_, options));
-    std::vector<std::shared_ptr<RecordBatch>> batches(reader->num_record_batches());
+    RecordBatchVector batches(reader->num_record_batches());
     for (int i = 0; i < reader->num_record_batches(); ++i) {
       ARROW_ASSIGN_OR_RAISE(batches[i], reader->ReadRecordBatch(i));
     }
 
-    // XXX: Handle included_fields in RecordBatchFileReader::schema
-    auto out_schema = reader->schema();
-    if (options.included_fields) {
-      const auto& indices = *options.included_fields;
-      std::vector<std::shared_ptr<Field>> fields;
-      for (int i = 0; i < out_schema->num_fields(); ++i) {
-        if (std::find(indices.begin(), indices.end(), i) != indices.end()) {
-          fields.push_back(out_schema->field(i));
-        }
-      }
-      out_schema = ::arrow::schema(fields, out_schema->metadata());
-    }
-    return Table::FromRecordBatches(std::move(out_schema), std::move(batches)).Value(out);
+    return Table::FromRecordBatches(reader->schema(), batches).Value(out);
   }
 
   Status Read(std::shared_ptr<Table>* out) override {
@@ -809,11 +795,12 @@ Status WriteTable(const Table& table, io::OutputStream* dst,
     return WriteFeatherV1(table, dst);
   } else {
     IpcWriteOptions ipc_options = IpcWriteOptions::Defaults();
-    ipc_options.compression = properties.compression;
-    ipc_options.compression_level = properties.compression_level;
+    ARROW_ASSIGN_OR_RAISE(
+        ipc_options.codec,
+        util::Codec::Create(properties.compression, properties.compression_level));
 
     std::shared_ptr<RecordBatchWriter> writer;
-    ARROW_ASSIGN_OR_RAISE(writer, NewFileWriter(dst, table.schema(), ipc_options));
+    ARROW_ASSIGN_OR_RAISE(writer, MakeFileWriter(dst, table.schema(), ipc_options));
     RETURN_NOT_OK(writer->WriteTable(table, properties.chunksize));
     return writer->Close();
   }

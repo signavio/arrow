@@ -17,8 +17,9 @@
 
 //! Data types that connect Parquet physical types with their Rust-specific
 //! representations.
-
+use std::cmp::Ordering;
 use std::mem;
+use std::str::from_utf8;
 
 use byteorder::{BigEndian, ByteOrder};
 
@@ -26,12 +27,14 @@ use crate::basic::Type;
 use crate::column::reader::{ColumnReader, ColumnReaderImpl};
 use crate::column::writer::{ColumnWriter, ColumnWriterImpl};
 use crate::errors::{ParquetError, Result};
-use crate::util::memory::{ByteBuffer, ByteBufferPtr};
-use std::str::from_utf8;
+use crate::util::{
+    bit_util::{from_ne_slice, FromBytes},
+    memory::{ByteBuffer, ByteBufferPtr},
+};
 
 /// Rust representation for logical type INT96, value is backed by an array of `u32`.
 /// The type only takes 12 bytes, without extra padding.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialOrd)]
 pub struct Int96 {
     value: Option<[u32; 3]>,
 }
@@ -62,19 +65,8 @@ impl Int96 {
         let day = self.data()[2] as i64;
         let nanoseconds = ((self.data()[1] as i64) << 32) + self.data()[0] as i64;
         let seconds = (day - JULIAN_DAY_OF_EPOCH) * SECONDS_PER_DAY;
-        let millis = seconds * MILLIS_PER_SECOND + nanoseconds / 1_000_000;
 
-        // TODO: Add support for negative milliseconds.
-        // Chrono library does not handle negative timestamps, but we could probably write
-        // something similar to java.util.Date and java.util.Calendar.
-        if millis < 0 {
-            panic!(
-                "Expected non-negative milliseconds when converting Int96, found {}",
-                millis
-            );
-        }
-
-        millis
+        seconds * MILLIS_PER_SECOND + nanoseconds / 1_000_000
     }
 }
 
@@ -110,6 +102,29 @@ pub struct ByteArray {
     data: Option<ByteBufferPtr>,
 }
 
+impl PartialOrd for ByteArray {
+    fn partial_cmp(&self, other: &ByteArray) -> Option<Ordering> {
+        if self.data.is_some() && other.data.is_some() {
+            if self.len() > other.len() {
+                Some(Ordering::Greater)
+            } else if self.len() < other.len() {
+                Some(Ordering::Less)
+            } else {
+                for (v1, v2) in self.data().iter().zip(other.data().iter()) {
+                    if *v1 > *v2 {
+                        return Some(Ordering::Greater);
+                    } else if *v1 < *v2 {
+                        return Some(Ordering::Less);
+                    }
+                }
+                Some(Ordering::Equal)
+            }
+        } else {
+            None
+        }
+    }
+}
+
 impl ByteArray {
     /// Creates new byte array with no data set.
     pub fn new() -> Self {
@@ -120,6 +135,11 @@ impl ByteArray {
     pub fn len(&self) -> usize {
         assert!(self.data.is_some());
         self.data.as_ref().unwrap().len()
+    }
+
+    /// Checks if the underlying buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Returns slice of data.
@@ -303,6 +323,19 @@ pub trait AsBytes {
     fn as_bytes(&self) -> &[u8];
 }
 
+/// Converts an slice of a data type to a slice of bytes.
+pub trait SliceAsBytes: Sized {
+    /// Returns slice of bytes for a slice of this data type.
+    fn slice_as_bytes(self_: &[Self]) -> &[u8];
+    fn slice_as_bytes_mut(self_: &mut [Self]) -> &mut [u8];
+}
+
+impl AsBytes for [u8] {
+    fn as_bytes(&self) -> &[u8] {
+        self
+    }
+}
+
 macro_rules! gen_as_bytes {
     ($source_ty:ident) => {
         impl AsBytes for $source_ty {
@@ -315,16 +348,43 @@ macro_rules! gen_as_bytes {
                 }
             }
         }
+        impl SliceAsBytes for $source_ty {
+            fn slice_as_bytes(self_: &[Self]) -> &[u8] {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        self_.as_ptr() as *const u8,
+                        std::mem::size_of::<$source_ty>() * self_.len(),
+                    )
+                }
+            }
+            fn slice_as_bytes_mut(self_: &mut [Self]) -> &mut [u8] {
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        self_.as_mut_ptr() as *mut u8,
+                        std::mem::size_of::<$source_ty>() * self_.len(),
+                    )
+                }
+            }
+        }
     };
 }
 
-gen_as_bytes!(bool);
-gen_as_bytes!(u8);
+gen_as_bytes!(i8);
+gen_as_bytes!(i16);
 gen_as_bytes!(i32);
-gen_as_bytes!(u32);
 gen_as_bytes!(i64);
+gen_as_bytes!(u8);
+gen_as_bytes!(u16);
+gen_as_bytes!(u32);
+gen_as_bytes!(u64);
 gen_as_bytes!(f32);
 gen_as_bytes!(f64);
+
+impl AsBytes for bool {
+    fn as_bytes(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self as *const bool as *const u8, 1) }
+    }
+}
 
 impl AsBytes for Int96 {
     fn as_bytes(&self) -> &[u8] {
@@ -371,7 +431,9 @@ pub trait DataType: 'static {
         + std::fmt::Debug
         + std::default::Default
         + std::clone::Clone
-        + AsBytes;
+        + AsBytes
+        + FromBytes
+        + PartialOrd;
 
     /// Returns Parquet physical type.
     fn get_physical_type() -> Type;
@@ -400,8 +462,23 @@ pub trait DataType: 'static {
         Self: Sized;
 }
 
+// Workaround bug in specialization
+pub trait SliceAsBytesDataType: DataType
+where
+    Self::T: SliceAsBytes,
+{
+}
+
+impl<T> SliceAsBytesDataType for T
+where
+    T: DataType,
+    <T as DataType>::T: SliceAsBytes,
+{
+}
+
 macro_rules! make_type {
     ($name:ident, $physical_ty:path, $reader_ident: ident, $writer_ident: ident, $native_ty:ty, $size:expr) => {
+        #[derive(Clone)]
         pub struct $name {}
 
         impl DataType for $name {
@@ -521,11 +598,47 @@ make_type!(
     mem::size_of::<ByteArray>()
 );
 
+impl FromBytes for Int96 {
+    type Buffer = [u8; 12];
+    fn from_le_bytes(_bs: Self::Buffer) -> Self {
+        unimplemented!()
+    }
+    fn from_be_bytes(_bs: Self::Buffer) -> Self {
+        unimplemented!()
+    }
+    fn from_ne_bytes(bs: Self::Buffer) -> Self {
+        let mut i = Int96::new();
+        i.set_data(
+            from_ne_slice(&bs[0..4]),
+            from_ne_slice(&bs[4..8]),
+            from_ne_slice(&bs[8..12]),
+        );
+        i
+    }
+}
+
+// FIXME Needed to satisfy the constraint of many decoding functions but ByteArray does not
+// appear to actual be converted directly from bytes
+impl FromBytes for ByteArray {
+    type Buffer = [u8; 8];
+    fn from_le_bytes(_bs: Self::Buffer) -> Self {
+        unreachable!()
+    }
+    fn from_be_bytes(_bs: Self::Buffer) -> Self {
+        unreachable!()
+    }
+    fn from_ne_bytes(bs: Self::Buffer) -> Self {
+        ByteArray::from(bs.to_vec())
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::float_cmp, clippy::approx_constant)]
 mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::string_lit_as_bytes)]
     fn test_as_bytes() {
         assert_eq!(false.as_bytes(), &[0]);
         assert_eq!(true.as_bytes(), &[1]);
@@ -607,5 +720,21 @@ mod tests {
         assert!(Decimal::from_i32(222, 5, 2) != Decimal::from_i32(222, 5, 3));
 
         assert!(Decimal::from_i64(222, 5, 2) != Decimal::from_i32(222, 5, 2));
+    }
+
+    #[test]
+    fn test_byte_array_ord() {
+        let ba1 = ByteArray::from(vec![1, 2, 3]);
+        let ba11 = ByteArray::from(vec![1, 2, 3]);
+        let ba2 = ByteArray::from(vec![3, 4]);
+        let ba3 = ByteArray::from(vec![1, 2, 4]);
+        let ba4 = ByteArray::from(vec![]);
+        let ba5 = ByteArray::from(vec![2, 2, 3]);
+
+        assert!(ba1 > ba2);
+        assert!(ba3 > ba1);
+        assert!(ba1 > ba4);
+        assert_eq!(ba1, ba11);
+        assert!(ba5 > ba1);
     }
 }

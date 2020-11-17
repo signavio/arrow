@@ -20,6 +20,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <iosfwd>
 #include <limits>
 #include <string>
 #include <utility>
@@ -102,9 +103,7 @@ class SmallString {
   uint8_t length_;
   char data_[N];
 
-#ifndef NDEBUG
   void CheckSize(size_t n) { assert(n <= N); }
-#endif
 };
 
 template <uint8_t N>

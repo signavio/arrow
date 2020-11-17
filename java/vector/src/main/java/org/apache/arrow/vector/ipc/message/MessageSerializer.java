@@ -31,15 +31,15 @@ import org.apache.arrow.flatbuf.Message;
 import org.apache.arrow.flatbuf.MessageHeader;
 import org.apache.arrow.flatbuf.MetadataVersion;
 import org.apache.arrow.flatbuf.RecordBatch;
+import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.util.Preconditions;
+import org.apache.arrow.vector.compression.NoCompressionCodec;
 import org.apache.arrow.vector.ipc.ReadChannel;
 import org.apache.arrow.vector.ipc.WriteChannel;
 import org.apache.arrow.vector.types.pojo.Schema;
 
 import com.google.flatbuffers.FlatBufferBuilder;
-
-import io.netty.buffer.ArrowBuf;
 
 /**
  * Utility class for serializing Messages. Messages are all serialized a similar way.
@@ -62,10 +62,10 @@ public class MessageSerializer {
   public static final int IPC_CONTINUATION_TOKEN = -1;
 
   /**
-   * Convert an array of 4 bytes to a little endian i32 value.
+   * Convert an array of 4 bytes in little-endian to an native-endian i32 value.
    *
-   * @param bytes byte array with minimum length of 4
-   * @return converted little endian 32-bit integer
+   * @param bytes byte array with minimum length of 4 in little-endian
+   * @return converted an native-endian 32-bit integer
    */
   public static int bytesToInt(byte[] bytes) {
     return ((bytes[3] & 255) << 24) +
@@ -75,7 +75,7 @@ public class MessageSerializer {
   }
 
   /**
-   * Convert an integer to a 4 byte array.
+   * Convert an integer to a little endian 4 byte array.
    *
    * @param value integer value input
    * @param bytes existing byte array with minimum length of 4 to contain the conversion output
@@ -88,7 +88,7 @@ public class MessageSerializer {
   }
 
   /**
-   * Convert a long to a 8 byte array.
+   * Convert a long to a little-endian 8 byte array.
    *
    * @param value long value input
    * @param bytes existing byte array with minimum length of 8 to contain the conversion output
@@ -162,7 +162,7 @@ public class MessageSerializer {
     long start = out.getCurrentPosition();
     Preconditions.checkArgument(start % 8 == 0, "out is not aligned");
 
-    ByteBuffer serializedMessage = serializeMetadata(schema);
+    ByteBuffer serializedMessage = serializeMetadata(schema, option);
 
     int messageLength = serializedMessage.remaining();
 
@@ -174,10 +174,19 @@ public class MessageSerializer {
   /**
    * Returns the serialized flatbuffer bytes of the schema wrapped in a message table.
    */
+  @Deprecated
   public static ByteBuffer serializeMetadata(Schema schema) {
+    return serializeMetadata(schema, new IpcOption());
+  }
+
+  /**
+   * Returns the serialized flatbuffer bytes of the schema wrapped in a message table.
+   */
+  public static ByteBuffer serializeMetadata(Schema schema, IpcOption writeOption) {
     FlatBufferBuilder builder = new FlatBufferBuilder();
     int schemaOffset = schema.getSchema(builder);
-    return MessageSerializer.serializeMessage(builder, org.apache.arrow.flatbuf.MessageHeader.Schema, schemaOffset, 0);
+    return MessageSerializer.serializeMessage(builder, org.apache.arrow.flatbuf.MessageHeader.Schema, schemaOffset, 0,
+        writeOption);
   }
 
   /**
@@ -242,7 +251,7 @@ public class MessageSerializer {
     long bodyLength = batch.computeBodyLength();
     Preconditions.checkArgument(bodyLength % 8 == 0, "batch is not aligned");
 
-    ByteBuffer serializedMessage = serializeMetadata(batch);
+    ByteBuffer serializedMessage = serializeMetadata(batch, option);
 
     int metadataLength = serializedMessage.remaining();
 
@@ -304,11 +313,19 @@ public class MessageSerializer {
   /**
    * Returns the serialized form of {@link RecordBatch} wrapped in a {@link org.apache.arrow.flatbuf.Message}.
    */
+  @Deprecated
   public static ByteBuffer serializeMetadata(ArrowMessage message) {
+    return serializeMetadata(message, new IpcOption());
+  }
+
+  /**
+   * Returns the serialized form of {@link RecordBatch} wrapped in a {@link org.apache.arrow.flatbuf.Message}.
+   */
+  public static ByteBuffer serializeMetadata(ArrowMessage message, IpcOption writeOption) {
     FlatBufferBuilder builder = new FlatBufferBuilder();
     int batchOffset = message.writeTo(builder);
     return serializeMessage(builder, message.getMessageType(), batchOffset,
-            message.computeBodyLength());
+        message.computeBodyLength(), writeOption);
   }
 
   /**
@@ -409,11 +426,16 @@ public class MessageSerializer {
       ArrowBuf vectorBuffer = body.slice(bufferFB.offset(), bufferFB.length());
       buffers.add(vectorBuffer);
     }
+
+    ArrowBodyCompression bodyCompression = recordBatchFB.compression() == null ?
+        NoCompressionCodec.DEFAULT_BODY_COMPRESSION
+        : new ArrowBodyCompression(recordBatchFB.compression().codec(), recordBatchFB.compression().method());
+
     if ((int) recordBatchFB.length() != recordBatchFB.length()) {
       throw new IOException("Cannot currently deserialize record batches with more than INT_MAX records.");
     }
     ArrowRecordBatch arrowRecordBatch =
-        new ArrowRecordBatch(checkedCastToInt(recordBatchFB.length()), nodes, buffers);
+        new ArrowRecordBatch(checkedCastToInt(recordBatchFB.length()), nodes, buffers, bodyCompression);
     body.getReferenceManager().release();
     return arrowRecordBatch;
   }
@@ -447,7 +469,7 @@ public class MessageSerializer {
     long bodyLength = batch.computeBodyLength();
     Preconditions.checkArgument(bodyLength % 8 == 0, "batch is not aligned");
 
-    ByteBuffer serializedMessage = serializeMetadata(batch);
+    ByteBuffer serializedMessage = serializeMetadata(batch, option);
 
     int metadataLength = serializedMessage.remaining();
 
@@ -583,8 +605,9 @@ public class MessageSerializer {
       throw new IOException("Cannot currently deserialize record batches over 2GB");
     }
 
-    if (result.getMessage().version() != MetadataVersion.V4) {
-      throw new IOException("Received metadata with an incompatible version number");
+    if (result.getMessage().version() != MetadataVersion.V4 &&
+        result.getMessage().version() != MetadataVersion.V5) {
+      throw new IOException("Received metadata with an incompatible version number: " + result.getMessage().version());
     }
 
     switch (result.getMessage().headerType()) {
@@ -609,6 +632,15 @@ public class MessageSerializer {
     return deserializeMessageBatch(new MessageChannelReader(in, alloc));
   }
 
+  @Deprecated
+  public static ByteBuffer serializeMessage(
+      FlatBufferBuilder builder,
+      byte headerType,
+      int headerOffset,
+      long bodyLength) {
+    return serializeMessage(builder, headerType, headerOffset, bodyLength, new IpcOption());
+  }
+
   /**
    * Serializes a message header.
    *
@@ -616,17 +648,19 @@ public class MessageSerializer {
    * @param headerType   headerType field
    * @param headerOffset header offset field
    * @param bodyLength   body length field
+   * @param writeOption  IPC write options
    * @return the corresponding ByteBuffer
    */
   public static ByteBuffer serializeMessage(
       FlatBufferBuilder builder,
       byte headerType,
       int headerOffset,
-      long bodyLength) {
+      long bodyLength,
+      IpcOption writeOption) {
     Message.startMessage(builder);
     Message.addHeaderType(builder, headerType);
     Message.addHeader(builder, headerOffset);
-    Message.addVersion(builder, MetadataVersion.V4);
+    Message.addVersion(builder, writeOption.metadataVersion.toFlatbufID());
     Message.addBodyLength(builder, bodyLength);
     builder.finish(Message.endMessage(builder));
     return builder.dataBuffer();

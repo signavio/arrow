@@ -33,6 +33,7 @@
 #include "arrow/builder.h"
 #include "arrow/memory_pool.h"
 #include "arrow/type.h"
+#include "arrow/util/bitset_stack.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/make_unique.h"
 #include "arrow/util/string_view.h"
@@ -371,7 +372,7 @@ class RawArrayBuilder<Kind::kObject> {
       std::shared_ptr<Array> field_values;
       RETURN_NOT_OK(finish_child(field_builders_[i], &field_values));
       child_data[i] = field_values->data();
-      fields[i] = field(field_names[i].to_string(), field_values->type(),
+      fields[i] = field(std::string(field_names[i]), field_values->type(),
                         field_builders_[i].nullable, Kind::Tag(field_builders_[i].kind));
     }
 
@@ -442,7 +443,7 @@ class RawBuilderSet {
         RETURN_NOT_OK(MakeBuilder<Kind::kObject>(leading_nulls, builder));
         const auto& struct_type = static_cast<const StructType&>(t);
 
-        for (const auto& f : struct_type.children()) {
+        for (const auto& f : struct_type.fields()) {
           BuilderPtr field_builder;
           RETURN_NOT_OK(MakeBuilder(*f->type(), leading_nulls, &field_builder));
           field_builder.nullable = f->nullable();

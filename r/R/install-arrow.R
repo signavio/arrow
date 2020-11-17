@@ -55,8 +55,12 @@ install_arrow <- function(nightly = FALSE,
   conda <- isTRUE(grepl("conda", R.Version()$platform))
 
   if (sysname %in% c("windows", "darwin", "linux")) {
-    if (conda && !nightly && (sysname %in% c("darwin", "linux"))) {
-      system("conda install -y -c conda-forge --strict-channel-priority r-arrow")
+    if (conda) {
+      if (nightly) {
+        system("conda install -y -c arrow-nightlies -c conda-forge --strict-channel-priority r-arrow")
+      } else {
+        system("conda install -y -c conda-forge --strict-channel-priority r-arrow")
+      }
     } else {
       Sys.setenv(
         LIBARROW_DOWNLOAD = "true",
@@ -64,6 +68,15 @@ install_arrow <- function(nightly = FALSE,
         LIBARRWOW_MINIMAL = minimal,
         ARROW_USE_PKG_CONFIG = use_system
       )
+      if (isTRUE(binary)) {
+        # Unless otherwise directed, don't consider newer source packages when
+        # options(pkgType) == "both" (default on win/mac)
+        opts <- options(
+          install.packages.check.source = "no",
+          install.packages.compile.from.source = "never"
+        )
+        on.exit(options(opts))
+      }
       install.packages("arrow", repos = arrow_repos(repos, nightly), ...)
     }
     if ("arrow" %in% loadedNamespaces()) {
@@ -81,12 +94,12 @@ arrow_repos <- function(repos = getOption("repos"), nightly = FALSE) {
     # Set the default/CDN
     repos <- "https://cloud.r-project.org/"
   }
-  bintray <- getOption("arrow.dev.repo", "https://dl.bintray.com/ursalabs/arrow-r")
+  dev_repo <- getOption("arrow.dev_repo", "https://arrow-r-nightly.s3.amazonaws.com")
   # Remove it if it's there (so nightly=FALSE won't accidentally pull from it)
-  repos <- setdiff(repos, bintray)
+  repos <- setdiff(repos, dev_repo)
   if (nightly) {
     # Add it first
-    repos <- c(bintray, repos)
+    repos <- c(dev_repo, repos)
   }
   repos
 }

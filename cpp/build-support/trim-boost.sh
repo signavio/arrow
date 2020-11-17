@@ -38,9 +38,9 @@ BOOST_LIBS="$BOOST_LIBS config build boost_install headers log predef"
 # Parquet needs this (if using gcc < 4.9)
 BOOST_LIBS="$BOOST_LIBS regex.hpp"
 # Gandiva needs these
-BOOST_LIBS="$BOOST_LIBS functional/hash.hpp multiprecision/cpp_int.hpp"
+BOOST_LIBS="$BOOST_LIBS multiprecision/cpp_int.hpp"
 # These are for Thrift when Thrift_SOURCE=BUNDLED
-BOOST_LIBS="$BOOST_LIBS algorithm/string.hpp locale.hpp noncopyable.hpp numeric/conversion/cast.hpp scope_exit.hpp scoped_array.hpp shared_array.hpp tokenizer.hpp version.hpp"
+BOOST_LIBS="$BOOST_LIBS algorithm/string.hpp locale.hpp noncopyable.hpp numeric/conversion/cast.hpp scope_exit.hpp typeof/incr_registration_group.hpp scoped_array.hpp shared_array.hpp tokenizer.hpp version.hpp"
 
 if [ ! -d ${BOOST_FILE} ]; then
   curl -L "${BOOST_URL}" > ${BOOST_FILE}.tar.gz

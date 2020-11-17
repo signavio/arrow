@@ -18,9 +18,9 @@
 .. currentmodule:: pyarrow
 .. _python-development:
 
-******************
+==================
 Python Development
-******************
+==================
 
 This page provides general Python development guidelines and source build
 instructions for all platforms.
@@ -29,22 +29,23 @@ Coding Style
 ============
 
 We follow a similar PEP8-like coding style to the `pandas project
-<https://github.com/pandas-dev/pandas>`_.
-
-The code must pass ``flake8`` (available from pip or conda) or it will fail the
-build. Check for style errors before submitting your pull request with:
+<https://github.com/pandas-dev/pandas>`_.  To check style issues, use the
+:ref:`Archery <archery>` subcommand ``lint``:
 
 .. code-block:: shell
 
-   flake8 .
-   flake8 --config=.flake8.cython .
-
-The package ``autopep8`` (also available from pip or conda) can automatically
-fix many of the errors reported by ``flake8``:
+   pip install -e arrow/dev/archery
+   pip install -r arrow/dev/archery/requirements-lint.txt
 
 .. code-block:: shell
 
-   autopep8 --in-place --global-config=.flake8.cython pyarrow/table.pxi
+   archery lint --python
+
+Some of the issues can be automatically fixed by passing the ``--fix`` option:
+
+.. code-block:: shell
+
+   archery lint --python --fix
 
 Unit Testing
 ============
@@ -55,9 +56,7 @@ like so:
 
 .. code-block:: shell
 
-   pushd arrow/python
    pytest pyarrow
-   popd
 
 Package requirements to run the unit tests are found in
 ``requirements-test.txt`` and can be installed if needed with ``pip install -r
@@ -154,7 +153,7 @@ Pull in the test data and setup the environment variables:
    git submodule update
    export PARQUET_TEST_DATA="${PWD}/cpp/submodules/parquet-testing/data"
    export ARROW_TEST_DATA="${PWD}/testing/data"
-
+   popd
 
 Using Conda
 ~~~~~~~~~~~
@@ -311,7 +310,7 @@ libraries are needed for Parquet support.
 If multiple versions of Python are installed in your environment, you may have
 to pass additional parameters to cmake so that it can find the right
 executable, headers and libraries.  For example, specifying
-``-DPYTHON_EXECUTABLE=$VIRTUAL_ENV/bin/python`` (assuming that you're in
+``-DPython3_EXECUTABLE=$VIRTUAL_ENV/bin/python`` (assuming that you're in
 virtualenv) enables cmake to choose the python executable which you are using.
 
 .. note::
@@ -328,6 +327,12 @@ virtualenv) enables cmake to choose the python executable which you are using.
    ``-DARROW_DEPENDENCY_SOURCE=AUTO`` or some other value (described
    :ref:`here <cpp-build-dependency-management>`)
    to explicitly tell CMake not to use conda.
+
+.. note::
+
+   With older versions of ``cmake`` (<3.15) you might need to pass ``-DPYTHON_EXECUTABLE``
+   instead of ``-DPython3_EXECUTABLE``. See `cmake documentation <https://cmake.org/cmake/help/latest/module/FindPython3.html#artifacts-specification>`
+   for more details.
 
 For any other C++ build challenges, see :ref:`cpp-development`.
 
@@ -463,7 +468,12 @@ Let's configure, build and install the Arrow C++ libraries:
    pushd arrow\cpp\build
    cmake -G "%PYARROW_CMAKE_GENERATOR%" ^
        -DCMAKE_INSTALL_PREFIX=%ARROW_HOME% ^
+       -DCMAKE_UNITY_BUILD=ON ^
        -DARROW_CXXFLAGS="/WX /MP" ^
+       -DARROW_WITH_LZ4=on ^
+       -DARROW_WITH_SNAPPY=on ^
+       -DARROW_WITH_ZLIB=on ^
+       -DARROW_WITH_ZSTD=on ^
        -DARROW_PARQUET=on ^
        -DARROW_PYTHON=on ^
        ..

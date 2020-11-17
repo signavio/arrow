@@ -56,6 +56,26 @@ class ParamExtType(pa.PyExtensionType):
         return ParamExtType, (self.width,)
 
 
+class MyStructType(pa.PyExtensionType):
+    storage_type = pa.struct([('left', pa.int64()),
+                              ('right', pa.int64())])
+
+    def __init__(self):
+        pa.PyExtensionType.__init__(self, self.storage_type)
+
+    def __reduce__(self):
+        return MyStructType, ()
+
+
+class MyListType(pa.PyExtensionType):
+
+    def __init__(self, storage_type):
+        pa.PyExtensionType.__init__(self, storage_type)
+
+    def __reduce__(self):
+        return MyListType, (self.storage_type,)
+
+
 def ipc_write_batch(batch):
     stream = pa.BufferOutputStream()
     writer = pa.RecordBatchStreamWriter(stream, batch.schema)
@@ -72,6 +92,18 @@ def ipc_read_batch(buf):
 def test_ext_type_basics():
     ty = UuidType()
     assert ty.extension_name == "arrow.py_extension_type"
+
+
+def test_ext_type_str():
+    ty = IntegerType()
+    expected = "extension<arrow.py_extension_type<IntegerType>>"
+    assert str(ty) == expected
+    assert pa.DataType.__str__(ty) == expected
+
+
+def test_ext_type_repr():
+    ty = IntegerType()
+    assert repr(ty) == "IntegerType(DataType(int64))"
 
 
 def test_ext_type__lifetime():
@@ -278,7 +310,7 @@ class PeriodType(pa.ExtensionType):
         # attributes need to be set first before calling
         # super init (as that calls serialize)
         self._freq = freq
-        pa.ExtensionType.__init__(self, pa.int64(), 'pandas.period')
+        pa.ExtensionType.__init__(self, pa.int64(), 'test.period')
 
     @property
     def freq(self):
@@ -325,14 +357,14 @@ def registered_period_type(request):
     yield period_type, period_class
     # teardown
     try:
-        pa.unregister_extension_type('pandas.period')
+        pa.unregister_extension_type('test.period')
     except KeyError:
         pass
 
 
 def test_generic_ext_type():
     period_type = PeriodType('D')
-    assert period_type.extension_name == "pandas.period"
+    assert period_type.extension_name == "test.period"
     assert period_type.storage_type == pa.int64()
     # default ext_class expected.
     assert period_type.__arrow_ext_class__() == pa.ExtensionArray
@@ -353,7 +385,7 @@ def test_generic_ext_type_ipc(registered_period_type):
     result = batch.column(0)
     # check the deserialized array class is the expected one
     assert type(result) == period_class
-    assert result.type.extension_name == "pandas.period"
+    assert result.type.extension_name == "test.period"
     assert arr.storage.to_pylist() == [1, 2, 3, 4]
 
     # we get back an actual PeriodType
@@ -363,7 +395,7 @@ def test_generic_ext_type_ipc(registered_period_type):
 
     # using different parametrization as how it was registered
     period_type_H = period_type.__class__('H')
-    assert period_type_H.extension_name == "pandas.period"
+    assert period_type_H.extension_name == "test.period"
     assert period_type_H.freq == 'H'
 
     arr = pa.ExtensionArray.from_storage(period_type_H, storage)
@@ -389,7 +421,7 @@ def test_generic_ext_type_ipc_unknown(registered_period_type):
 
     # unregister type before loading again => reading unknown extension type
     # as plain array (but metadata in schema's field are preserved)
-    pa.unregister_extension_type('pandas.period')
+    pa.unregister_extension_type('test.period')
 
     batch = ipc_read_batch(buf)
     result = batch.column(0)
@@ -398,13 +430,13 @@ def test_generic_ext_type_ipc_unknown(registered_period_type):
     ext_field = batch.schema.field('ext')
     assert ext_field.metadata == {
         b'ARROW:extension:metadata': b'freq=D',
-        b'ARROW:extension:name': b'pandas.period'
+        b'ARROW:extension:name': b'test.period'
     }
 
 
 def test_generic_ext_type_equality():
     period_type = PeriodType('D')
-    assert period_type.extension_name == "pandas.period"
+    assert period_type.extension_name == "test.period"
 
     period_type2 = PeriodType('D')
     period_type3 = PeriodType('H')
@@ -424,8 +456,8 @@ def test_generic_ext_type_register(registered_period_type):
 
 
 @pytest.mark.parquet
-def test_parquet(tmpdir, registered_period_type):
-    # parquet support for extension types
+def test_parquet_period(tmpdir, registered_period_type):
+    # Parquet support for primitive extension types
     period_type, period_class = registered_period_type
     storage = pa.array([1, 2, 3, 4], pa.int64())
     arr = pa.ExtensionArray.from_storage(period_type, storage)
@@ -433,10 +465,10 @@ def test_parquet(tmpdir, registered_period_type):
 
     import pyarrow.parquet as pq
 
-    filename = tmpdir / 'extension_type.parquet'
+    filename = tmpdir / 'period_extension_type.parquet'
     pq.write_table(table, filename)
 
-    # stored in parquet as storage type but with extension metadata saved
+    # Stored in parquet as storage type but with extension metadata saved
     # in the serialized arrow schema
     meta = pq.read_metadata(filename)
     assert meta.schema.column(0).physical_type == "INT64"
@@ -445,21 +477,122 @@ def test_parquet(tmpdir, registered_period_type):
     import base64
     decoded_schema = base64.b64decode(meta.metadata[b"ARROW:schema"])
     schema = pa.ipc.read_schema(pa.BufferReader(decoded_schema))
-    assert schema.field("ext").metadata == {
-        b'ARROW:extension:metadata': b'freq=D',
-        b'ARROW:extension:name': b'pandas.period'}
+    # Since the type could be reconstructed, the extension type metadata is
+    # absent.
+    assert schema.field("ext").metadata == {}
 
-    # when reading in, properly create extension type if it is registered
+    # When reading in, properly create extension type if it is registered
     result = pq.read_table(filename)
-    assert result.column("ext").type == period_type
-    # get the exact array class defined by the registered type.
+    assert result.schema.field("ext").type == period_type
+    assert result.schema.field("ext").metadata == {b'PARQUET:field_id': b'1'}
+    # Get the exact array class defined by the registered type.
     result_array = result.column("ext").chunk(0)
-    assert type(result_array) == period_class
+    assert type(result_array) is period_class
 
-    # when the type is not registered, read in as storage type
+    # When the type is not registered, read in as storage type
     pa.unregister_extension_type(period_type.extension_name)
     result = pq.read_table(filename)
-    assert result.column("ext").type == pa.int64()
+    assert result.schema.field("ext").type == pa.int64()
+    # The extension metadata is present for roundtripping.
+    assert result.schema.field("ext").metadata == {
+        b'ARROW:extension:metadata': b'freq=D',
+        b'ARROW:extension:name': b'test.period',
+        b'PARQUET:field_id': b'1',
+    }
+
+
+@pytest.mark.parquet
+def test_parquet_extension_with_nested_storage(tmpdir):
+    # Parquet support for extension types with nested storage type
+    import pyarrow.parquet as pq
+
+    struct_array = pa.StructArray.from_arrays(
+        [pa.array([0, 1], type="int64"), pa.array([4, 5], type="int64")],
+        names=["left", "right"])
+    list_array = pa.array([[1, 2, 3], [4, 5]], type=pa.list_(pa.int32()))
+
+    mystruct_array = pa.ExtensionArray.from_storage(MyStructType(),
+                                                    struct_array)
+    mylist_array = pa.ExtensionArray.from_storage(
+        MyListType(list_array.type), list_array)
+
+    orig_table = pa.table({'structs': mystruct_array,
+                           'lists': mylist_array})
+    filename = tmpdir / 'nested_extension_storage.parquet'
+    pq.write_table(orig_table, filename)
+
+    table = pq.read_table(filename)
+    assert table.column('structs').type == mystruct_array.type
+    assert table.column('lists').type == mylist_array.type
+    assert table == orig_table
+
+
+@pytest.mark.parquet
+def test_parquet_nested_extension(tmpdir):
+    # Parquet support for extension types nested in struct or list
+    import pyarrow.parquet as pq
+
+    ext_type = IntegerType()
+    storage = pa.array([4, 5, 6, 7], type=pa.int64())
+    ext_array = pa.ExtensionArray.from_storage(ext_type, storage)
+
+    # Struct of extensions
+    struct_array = pa.StructArray.from_arrays(
+        [storage, ext_array],
+        names=['ints', 'exts'])
+
+    orig_table = pa.table({'structs': struct_array})
+    filename = tmpdir / 'struct_of_ext.parquet'
+    pq.write_table(orig_table, filename)
+
+    table = pq.read_table(filename)
+    assert table.column(0).type == struct_array.type
+    assert table == orig_table
+
+    # List of extensions
+    list_array = pa.ListArray.from_arrays([0, 1, None, 3], ext_array)
+
+    orig_table = pa.table({'lists': list_array})
+    filename = tmpdir / 'list_of_ext.parquet'
+    pq.write_table(orig_table, filename)
+
+    table = pq.read_table(filename)
+    assert table.column(0).type == list_array.type
+    assert table == orig_table
+
+    # Large list of extensions
+    list_array = pa.LargeListArray.from_arrays([0, 1, None, 3], ext_array)
+
+    orig_table = pa.table({'lists': list_array})
+    filename = tmpdir / 'list_of_ext.parquet'
+    pq.write_table(orig_table, filename)
+
+    table = pq.read_table(filename)
+    assert table.column(0).type == list_array.type
+    assert table == orig_table
+
+
+@pytest.mark.parquet
+def test_parquet_extension_nested_in_extension(tmpdir):
+    # Parquet support for extension<list<extension>>
+    import pyarrow.parquet as pq
+
+    inner_ext_type = IntegerType()
+    inner_storage = pa.array([4, 5, 6, 7], type=pa.int64())
+    inner_ext_array = pa.ExtensionArray.from_storage(inner_ext_type,
+                                                     inner_storage)
+
+    list_array = pa.ListArray.from_arrays([0, 1, None, 3], inner_ext_array)
+    mylist_array = pa.ExtensionArray.from_storage(
+        MyListType(list_array.type), list_array)
+
+    orig_table = pa.table({'lists': mylist_array})
+    filename = tmpdir / 'ext_of_list_of_ext.parquet'
+    pq.write_table(orig_table, filename)
+
+    table = pq.read_table(filename)
+    assert table.column(0).type == mylist_array.type
+    assert table == orig_table
 
 
 def test_to_numpy():
@@ -475,7 +608,20 @@ def test_to_numpy():
     np.testing.assert_array_equal(result, expected)
 
     # chunked array
-    charr = pa.chunked_array([arr])
+    a1 = pa.chunked_array([arr, arr])
+    a2 = pa.chunked_array([arr, arr], type=period_type)
+    expected = np.hstack([expected, expected])
 
-    result = np.asarray(charr)
-    np.testing.assert_array_equal(result, expected)
+    for charr in [a1, a2]:
+        assert charr.type == period_type
+        for result in [np.asarray(charr), charr.to_numpy()]:
+            assert result.dtype == np.int64
+            np.testing.assert_array_equal(result, expected)
+
+    # zero chunks
+    charr = pa.chunked_array([], type=period_type)
+    assert charr.type == period_type
+
+    for result in [np.asarray(charr), charr.to_numpy()]:
+        assert result.dtype == np.int64
+        np.testing.assert_array_equal(result, np.array([], dtype='int64'))

@@ -50,8 +50,8 @@ test_that("RecordBatch", {
   expect_error(batch$column_name(NA), "'i' cannot be NA")
   expect_error(batch$column_name(-1), "subscript out of bounds")
   expect_error(batch$column_name(1000), "subscript out of bounds")
-  expect_error(batch$column_name(1:2), class = "Rcpp::not_compatible")
-  expect_error(batch$column_name("one"), class = "Rcpp::not_compatible")
+  expect_error(batch$column_name(1:2))
+  expect_error(batch$column_name("one"))
 
   col_int <- batch$column(0)
   expect_true(inherits(col_int, 'Array'))
@@ -82,8 +82,8 @@ test_that("RecordBatch", {
   expect_error(batch$column(NA), "'i' cannot be NA")
   expect_error(batch$column(-1), "subscript out of bounds")
   expect_error(batch$column(1000), "subscript out of bounds")
-  expect_error(batch$column(1:2), class = "Rcpp::not_compatible")
-  expect_error(batch$column("one"), class = "Rcpp::not_compatible")
+  expect_error(batch$column(1:2))
+  expect_error(batch$column("one"))
 
   batch2 <- batch$RemoveColumn(0)
   expect_equal(
@@ -97,8 +97,16 @@ test_that("RecordBatch", {
   expect_error(batch$RemoveColumn(NA), "'i' cannot be NA")
   expect_error(batch$RemoveColumn(-1), "subscript out of bounds")
   expect_error(batch$RemoveColumn(1000), "subscript out of bounds")
-  expect_error(batch$RemoveColumn(1:2), class = "Rcpp::not_compatible")
-  expect_error(batch$RemoveColumn("one"), class = "Rcpp::not_compatible")
+  expect_error(batch$RemoveColumn(1:2))
+  expect_error(batch$RemoveColumn("one"))
+})
+
+test_that("RecordBatch S3 methods", {
+  tab <- RecordBatch$create(example_data)
+  for (f in c("dim", "nrow", "ncol", "dimnames", "colnames", "row.names", "as.list")) {
+    fun <- get(f)
+    expect_identical(fun(tab), fun(example_data), info = f)
+  }
 })
 
 test_that("RecordBatch$Slice", {
@@ -109,14 +117,14 @@ test_that("RecordBatch$Slice", {
   expect_data_frame(batch4, tbl[6:7,])
 
   # Input validation
-  expect_error(batch$Slice("ten"), class = "Rcpp::not_compatible")
+  expect_error(batch$Slice("ten"))
   expect_error(batch$Slice(NA_integer_), "Slice 'offset' cannot be NA")
   expect_error(batch$Slice(NA), "Slice 'offset' cannot be NA")
-  expect_error(batch$Slice(10, "ten"), class = "Rcpp::not_compatible")
+  expect_error(batch$Slice(10, "ten"))
   expect_error(batch$Slice(10, NA_integer_), "Slice 'length' cannot be NA")
   expect_error(batch$Slice(NA_integer_, NA_integer_), "Slice 'offset' cannot be NA")
-  expect_error(batch$Slice(c(10, 10)), class = "Rcpp::not_compatible")
-  expect_error(batch$Slice(10, c(10, 10)), class = "Rcpp::not_compatible")
+  expect_error(batch$Slice(c(10, 10)))
+  expect_error(batch$Slice(10, c(10, 10)))
   expect_error(batch$Slice(1000), "Slice 'offset' greater than array length")
   expect_error(batch$Slice(-1), "Slice 'offset' cannot be negative")
   expect_error(batch4$Slice(10, 10), "Slice 'offset' greater than array length")
@@ -147,10 +155,10 @@ test_that("[[ and $ on RecordBatch", {
   expect_vector(batch[[4]], tbl$chr)
   expect_null(batch$qwerty)
   expect_null(batch[["asdf"]])
-  expect_error(batch[[c(4, 3)]], class = "Rcpp::not_compatible")
+  expect_error(batch[[c(4, 3)]])
   expect_error(batch[[NA]], "'i' must be character or numeric, not logical")
   expect_error(batch[[NULL]], "'i' must be character or numeric, not NULL")
-  expect_error(batch[[c("asdf", "jkl;")]], 'length(name) not equal to 1', fixed = TRUE)
+  expect_error(batch[[c("asdf", "jkl;")]], 'name is not a string', fixed = TRUE)
 })
 
 test_that("head and tail on RecordBatch", {
@@ -254,7 +262,7 @@ test_that("record_batch() handles data frame columns", {
   tib <- tibble::tibble(x = 1:10, y = 1:10)
   # because tib is named here, this becomes a struct array
   batch <- record_batch(a = 1:10, b = tib)
-  expect_equal(
+  expect_equivalent(
     batch$schema,
     schema(
       a = int32(),
@@ -280,7 +288,7 @@ test_that("record_batch() handles data frame columns with schema spec", {
   tib_float$y <- as.numeric(tib_float$y)
   schema <- schema(a = int32(), b = struct(x = int16(), y = float64()))
   batch <- record_batch(a = 1:10, b = tib, schema = schema)
-  expect_equal(batch$schema, schema)
+  expect_equivalent(batch$schema, schema)
   out <- as.data.frame(batch)
   expect_equivalent(out, tibble::tibble(a = 1:10, b = tib_float))
 
@@ -326,7 +334,7 @@ test_that("record_batch() only auto splice data frames", {
 
 test_that("record_batch() handles null type (ARROW-7064)", {
   batch <- record_batch(a = 1:10, n = vctrs::unspecified(10))
-  expect_equal(batch$schema,  schema(a = int32(), n = null()))
+  expect_equivalent(batch$schema,  schema(a = int32(), n = null()))
 })
 
 test_that("RecordBatch$Equals", {
@@ -347,7 +355,7 @@ test_that("RecordBatch$Equals(check_metadata)", {
   expect_is(rb2, "RecordBatch")
   expect_false(rb1$schema$HasMetadata)
   expect_true(rb2$schema$HasMetadata)
-  expect_match(rb2$schema$metadata, "some: metadata", fixed = TRUE)
+  expect_identical(rb2$schema$metadata, list(some = "metadata"))
 
   expect_true(rb1 == rb2)
   expect_true(rb1$Equals(rb2))

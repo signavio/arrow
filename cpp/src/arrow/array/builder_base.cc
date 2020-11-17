@@ -17,23 +17,33 @@
 
 #include "arrow/array/builder_base.h"
 
-#include <algorithm>
-#include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <utility>
 #include <vector>
 
-#include "arrow/array.h"
+#include "arrow/array/array_base.h"
+#include "arrow/array/data.h"
+#include "arrow/array/util.h"
 #include "arrow/buffer.h"
 #include "arrow/status.h"
-#include "arrow/type.h"
-#include "arrow/type_traits.h"
-#include "arrow/util/bit_util.h"
-#include "arrow/util/int_util.h"
 #include "arrow/util/logging.h"
 
 namespace arrow {
+
+Status ArrayBuilder::CheckArrayType(const std::shared_ptr<DataType>& expected_type,
+                                    const Array& array, const char* message) {
+  if (!expected_type->Equals(*array.type())) {
+    return Status::TypeError(message);
+  }
+  return Status::OK();
+}
+
+Status ArrayBuilder::CheckArrayType(Type::type expected_type, const Array& array,
+                                    const char* message) {
+  if (array.type_id() != expected_type) {
+    return Status::TypeError(message);
+  }
+  return Status::OK();
+}
 
 Status ArrayBuilder::TrimBuffer(const int64_t bytes_filled, ResizableBuffer* buffer) {
   if (buffer) {
@@ -87,6 +97,12 @@ Status ArrayBuilder::Finish(std::shared_ptr<Array>* out) {
   RETURN_NOT_OK(FinishInternal(&internal_data));
   *out = MakeArray(internal_data);
   return Status::OK();
+}
+
+Result<std::shared_ptr<Array>> ArrayBuilder::Finish() {
+  std::shared_ptr<Array> out;
+  RETURN_NOT_OK(Finish(&out));
+  return out;
 }
 
 void ArrayBuilder::Reset() {

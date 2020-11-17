@@ -24,6 +24,12 @@
 #include "arrow/filesystem/filesystem.h"
 
 namespace arrow {
+namespace internal {
+
+class Uri;
+
+}
+
 namespace fs {
 
 /// Options for the LocalFileSystem implementation.
@@ -36,6 +42,9 @@ struct ARROW_EXPORT LocalFileSystemOptions {
   static LocalFileSystemOptions Defaults();
 
   bool Equals(const LocalFileSystemOptions& other) const;
+
+  static Result<LocalFileSystemOptions> FromUri(const ::arrow::internal::Uri& uri,
+                                                std::string* out_path);
 };
 
 /// \brief A FileSystem implementation accessing files on the local machine.
@@ -68,6 +77,7 @@ class ARROW_EXPORT LocalFileSystem : public FileSystem {
 
   Status DeleteDir(const std::string& path) override;
   Status DeleteDirContents(const std::string& path) override;
+  Status DeleteRootDirContents() override;
 
   Status DeleteFile(const std::string& path) override;
 

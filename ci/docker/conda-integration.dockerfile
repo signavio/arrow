@@ -21,7 +21,7 @@ FROM ${repo}:${arch}-conda-cpp
 
 ARG arch=amd64
 ARG maven=3.5
-ARG node=11
+ARG node=14
 ARG jdk=8
 ARG go=1.12
 
@@ -33,6 +33,8 @@ RUN conda install -q \
         nodejs=${node} \
         openjdk=${jdk} && \
     conda clean --all
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
 ENV GOROOT=/opt/go \
     GOBIN=/opt/go/bin \

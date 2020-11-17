@@ -28,13 +28,14 @@ from pyarrow.util import find_free_port
 
 # setup hypothesis profiles
 h.settings.register_profile('ci', max_examples=1000)
-h.settings.register_profile('dev', max_examples=10)
+h.settings.register_profile('dev', max_examples=50)
 h.settings.register_profile('debug', max_examples=10,
                             verbosity=h.Verbosity.verbose)
 
 # load default hypothesis profile, either set HYPOTHESIS_PROFILE environment
 # variable or pass --hypothesis-profile option to pytest, to see the generated
-# examples try: pytest pyarrow -sv --only-hypothesis --hypothesis-profile=debug
+# examples try:
+# pytest pyarrow -sv --enable-hypothesis --hypothesis-profile=debug
 h.settings.load_profile(os.environ.get('HYPOTHESIS_PROFILE', 'dev'))
 
 groups = [
@@ -104,7 +105,7 @@ except ImportError:
     pass
 
 try:
-    import pyarrow.orc # noqa
+    import pyarrow.orc  # noqa
     defaults['orc'] = True
 except ImportError:
     pass
@@ -168,12 +169,13 @@ def pytest_addoption(parser):
                              .format(name.upper(), value))
 
     for group in groups:
-        for flag, envvar in [('--{}', 'PYARROW_TEST_{}'),
-                             ('--enable-{}', 'PYARROW_TEST_ENABLE_{}')]:
-            default = bool_env(envvar.format(group), defaults[group])
-            parser.addoption(flag.format(group),
-                             action='store_true', default=default,
-                             help=('Enable the {} test group'.format(group)))
+        default = bool_env('PYARROW_TEST_{}'.format(group), defaults[group])
+        parser.addoption('--enable-{}'.format(group),
+                         action='store_true', default=default,
+                         help=('Enable the {} test group'.format(group)))
+        parser.addoption('--disable-{}'.format(group),
+                         action='store_true', default=False,
+                         help=('Disable the {} test group'.format(group)))
 
 
 class PyArrowConfig:
@@ -199,11 +201,11 @@ def pytest_configure(config):
             "markers", mark,
         )
 
-        flag = '--{}'.format(mark)
         enable_flag = '--enable-{}'.format(mark)
+        disable_flag = '--disable-{}'.format(mark)
 
-        is_enabled = (config.getoption(flag) or
-                      config.getoption(enable_flag))
+        is_enabled = (config.getoption(enable_flag) and not
+                      config.getoption(disable_flag))
         config.pyarrow.is_enabled[mark] = is_enabled
 
 

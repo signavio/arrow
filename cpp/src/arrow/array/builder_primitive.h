@@ -21,15 +21,19 @@
 #include <memory>
 #include <vector>
 
-#include "arrow/array.h"
 #include "arrow/array/builder_base.h"
+#include "arrow/array/data.h"
 #include "arrow/type.h"
+#include "arrow/type_traits.h"
 
 namespace arrow {
 
 class ARROW_EXPORT NullBuilder : public ArrayBuilder {
  public:
   explicit NullBuilder(MemoryPool* pool = default_memory_pool()) : ArrayBuilder(pool) {}
+  explicit NullBuilder(const std::shared_ptr<DataType>& type,
+                       MemoryPool* pool = default_memory_pool())
+      : NullBuilder(pool) {}
 
   /// \brief Append the specified number of null elements
   Status AppendNulls(int64_t length) final {
@@ -41,6 +45,10 @@ class ARROW_EXPORT NullBuilder : public ArrayBuilder {
 
   /// \brief Append a single null element
   Status AppendNull() final { return AppendNulls(1); }
+
+  Status AppendEmptyValues(int64_t length) final { return AppendNulls(length); }
+
+  Status AppendEmptyValue() final { return AppendEmptyValues(1); }
 
   Status Append(std::nullptr_t) { return AppendNull(); }
 
@@ -66,10 +74,10 @@ class NumericBuilder : public ArrayBuilder {
   template <typename T1 = T>
   explicit NumericBuilder(
       enable_if_parameter_free<T1, MemoryPool*> pool = default_memory_pool())
-      : ArrayBuilder(pool), type_(TypeTraits<T>::type_singleton()) {}
+      : ArrayBuilder(pool), type_(TypeTraits<T>::type_singleton()), data_builder_(pool) {}
 
   NumericBuilder(const std::shared_ptr<DataType>& type, MemoryPool* pool)
-      : ArrayBuilder(pool), type_(type) {}
+      : ArrayBuilder(pool), type_(type), data_builder_(pool) {}
 
   /// Append a single scalar and increase the size if necessary.
   Status Append(const value_type val) {
@@ -93,6 +101,22 @@ class NumericBuilder : public ArrayBuilder {
     ARROW_RETURN_NOT_OK(Reserve(1));
     data_builder_.UnsafeAppend(value_type{});  // zero
     UnsafeAppendToBitmap(false);
+    return Status::OK();
+  }
+
+  /// \brief Append a empty element
+  Status AppendEmptyValue() final {
+    ARROW_RETURN_NOT_OK(Reserve(1));
+    data_builder_.UnsafeAppend(value_type{});  // zero
+    UnsafeAppendToBitmap(true);
+    return Status::OK();
+  }
+
+  /// \brief Append several empty elements
+  Status AppendEmptyValues(int64_t length) final {
+    ARROW_RETURN_NOT_OK(Reserve(length));
+    data_builder_.UnsafeAppend(length, value_type{});  // zero
+    UnsafeSetNotNull(length);
     return Status::OK();
   }
 
@@ -290,6 +314,20 @@ class ARROW_EXPORT BooleanBuilder : public ArrayBuilder {
   Status AppendNull() final {
     ARROW_RETURN_NOT_OK(Reserve(1));
     UnsafeAppendNull();
+    return Status::OK();
+  }
+
+  Status AppendEmptyValue() final {
+    ARROW_RETURN_NOT_OK(Reserve(1));
+    data_builder_.UnsafeAppend(false);
+    UnsafeSetNotNull(1);
+    return Status::OK();
+  }
+
+  Status AppendEmptyValues(int64_t length) final {
+    ARROW_RETURN_NOT_OK(Reserve(length));
+    data_builder_.UnsafeAppend(length, false);
+    UnsafeSetNotNull(length);
     return Status::OK();
   }
 

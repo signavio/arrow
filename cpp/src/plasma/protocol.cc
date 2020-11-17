@@ -508,7 +508,7 @@ Status ReadDeleteReply(const uint8_t* data, size_t size,
     return ObjectID::from_binary(request.object_ids()->Get(i)->str());
   });
   ToVector(*message, errors, [](const PlasmaDeleteReply& request, int i) {
-    return static_cast<PlasmaError>(request.errors()->data()[i]);
+    return static_cast<PlasmaError>(request.errors()->Get(i));
   });
   return Status::OK();
 }
@@ -581,7 +581,7 @@ Status ReadListReply(const uint8_t* data, size_t size, ObjectTable* objects) {
   DCHECK(data);
   auto message = flatbuffers::GetRoot<fb::PlasmaListReply>(data);
   DCHECK(VerifyFlatbuffer(message, data, size));
-  for (auto const& object : *message->objects()) {
+  for (auto const object : *message->objects()) {
     ObjectID object_id = ObjectID::from_binary(object->object_id()->str());
     auto entry = std::unique_ptr<ObjectTableEntry>(new ObjectTableEntry());
     entry->data_size = object->data_size();

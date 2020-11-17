@@ -28,29 +28,32 @@
 
 #include "arrow/buffer.h"
 #include "arrow/buffer_builder.h"
-#include "arrow/compute/context.h"
-#include "arrow/compute/kernels/boolean.h"
-#include "arrow/compute/kernels/cast.h"
-#include "arrow/compute/kernels/compare.h"
-#include "arrow/compute/kernels/filter.h"
-#include "arrow/compute/kernels/isin.h"
+#include "arrow/builder.h"
+#include "arrow/compute/api.h"
 #include "arrow/dataset/dataset.h"
+#include "arrow/io/memory.h"
+#include "arrow/ipc/reader.h"
+#include "arrow/ipc/writer.h"
 #include "arrow/record_batch.h"
 #include "arrow/result.h"
 #include "arrow/scalar.h"
 #include "arrow/type_fwd.h"
 #include "arrow/util/checked_cast.h"
+#include "arrow/util/int_util_internal.h"
 #include "arrow/util/iterator.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/string.h"
 #include "arrow/visitor_inline.h"
 
 namespace arrow {
+
+using compute::CompareOperator;
+using compute::ExecContext;
+
 namespace dataset {
 
-using arrow::compute::Datum;
-using internal::checked_cast;
-using internal::checked_pointer_cast;
+using arrow::internal::checked_cast;
+using arrow::internal::checked_pointer_cast;
 
 inline std::shared_ptr<ScalarExpression> NullExpression() {
   return std::make_shared<ScalarExpression>(std::make_shared<BooleanScalar>());
@@ -76,6 +79,16 @@ struct Comparison {
     NULL_,
   };
 };
+
+Result<std::shared_ptr<Scalar>> EnsureNotDictionary(
+    const std::shared_ptr<Scalar>& scalar) {
+  if (scalar->type->id() == Type::DICTIONARY) {
+    return checked_cast<const DictionaryScalar&>(*scalar).GetEncodedValue();
+  }
+  return scalar;
+}
+
+Result<Comparison::type> Compare(const Scalar& lhs, const Scalar& rhs);
 
 struct CompareVisitor {
   template <typename T>
@@ -131,6 +144,7 @@ struct CompareVisitor {
   }
 
   Status Visit(const Decimal128Type&) { return CompareValues<Decimal128Type>(); }
+  Status Visit(const Decimal256Type&) { return CompareValues<Decimal256Type>(); }
 
   // Explicit because it falls under `physical_unsigned_integer`.
   // TODO(bkietz) whenever we vendor a float16, this can be implemented
@@ -169,7 +183,7 @@ struct CompareVisitor {
 
 // Compare two scalars
 // if either is null, return is null
-// TODO(bkietz) extract this to scalar.h
+// TODO(bkietz) extract this to the scalar comparison kernels
 Result<Comparison::type> Compare(const Scalar& lhs, const Scalar& rhs) {
   if (!lhs.type->Equals(*rhs.type)) {
     return Status::TypeError("Cannot compare scalars of differing type: ", *lhs.type,
@@ -183,9 +197,7 @@ Result<Comparison::type> Compare(const Scalar& lhs, const Scalar& rhs) {
   return vis.result_;
 }
 
-compute::CompareOperator InvertCompareOperator(compute::CompareOperator op) {
-  using compute::CompareOperator;
-
+CompareOperator InvertCompareOperator(CompareOperator op) {
   switch (op) {
     case CompareOperator::EQUAL:
       return CompareOperator::NOT_EQUAL;
@@ -254,22 +266,36 @@ std::shared_ptr<Expression> Invert(const Expression& expr) {
 }
 
 std::shared_ptr<Expression> Expression::Assume(const Expression& given) const {
-  if (given.type() == ExpressionType::COMPARISON) {
-    const auto& given_cmp = checked_cast<const ComparisonExpression&>(given);
-    if (given_cmp.op() == compute::CompareOperator::EQUAL) {
-      if (this->Equals(given_cmp.left_operand()) &&
-          given_cmp.right_operand()->type() == ExpressionType::SCALAR) {
-        return given_cmp.right_operand();
-      }
+  std::shared_ptr<Expression> out;
 
-      if (this->Equals(given_cmp.right_operand()) &&
-          given_cmp.left_operand()->type() == ExpressionType::SCALAR) {
-        return given_cmp.left_operand();
-      }
+  DCHECK_OK(VisitConjunctionMembers(given, [&](const Expression& given) {
+    if (out != nullptr) {
+      return Status::OK();
     }
-  }
 
-  return Copy();
+    if (given.type() != ExpressionType::COMPARISON) {
+      return Status::OK();
+    }
+
+    const auto& given_cmp = checked_cast<const ComparisonExpression&>(given);
+    if (given_cmp.op() != CompareOperator::EQUAL) {
+      return Status::OK();
+    }
+
+    if (this->Equals(given_cmp.left_operand())) {
+      out = given_cmp.right_operand();
+      return Status::OK();
+    }
+
+    if (this->Equals(given_cmp.right_operand())) {
+      out = given_cmp.left_operand();
+      return Status::OK();
+    }
+
+    return Status::OK();
+  }));
+
+  return out ? out : Copy();
 }
 
 std::shared_ptr<Expression> ComparisonExpression::Assume(const Expression& given) const {
@@ -336,9 +362,17 @@ std::shared_ptr<Expression> ComparisonExpression::AssumeGivenComparison(
     }
   }
 
-  const auto& this_rhs = checked_cast<const ScalarExpression&>(*right_operand_).value();
-  const auto& given_rhs =
-      checked_cast<const ScalarExpression&>(*given.right_operand_).value();
+  auto this_rhs =
+      EnsureNotDictionary(checked_cast<const ScalarExpression&>(*right_operand_).value())
+          .ValueOr(nullptr);
+  auto given_rhs =
+      EnsureNotDictionary(
+          checked_cast<const ScalarExpression&>(*given.right_operand_).value())
+          .ValueOr(nullptr);
+
+  if (!this_rhs || !given_rhs) {
+    return Copy();
+  }
 
   auto cmp = Compare(*this_rhs, *given_rhs).ValueOrDie();
 
@@ -349,8 +383,6 @@ std::shared_ptr<Expression> ComparisonExpression::AssumeGivenComparison(
 
   static auto always = scalar(true);
   static auto never = scalar(false);
-
-  using compute::CompareOperator;
 
   if (cmp == Comparison::GREATER) {
     // the rhs of e is greater than that of given
@@ -566,14 +598,30 @@ std::shared_ptr<Expression> InExpression::Assume(const Expression& given) const 
     return scalar(set_->null_count() > 0);
   }
 
-  const auto& value = checked_cast<const ScalarExpression&>(*operand).value();
+  Datum set, value;
+  if (set_->type_id() == Type::DICTIONARY) {
+    const auto& dict_set = checked_cast<const DictionaryArray&>(*set_);
+    auto maybe_decoded = compute::Take(dict_set.dictionary(), dict_set.indices());
+    auto maybe_value = checked_cast<const DictionaryScalar&>(
+                           *checked_cast<const ScalarExpression&>(*operand).value())
+                           .GetEncodedValue();
+    if (!maybe_decoded.ok() || !maybe_value.ok()) {
+      return std::make_shared<InExpression>(std::move(operand), set_);
+    }
+    set = *maybe_decoded;
+    value = *maybe_value;
+  } else {
+    set = set_;
+    value = checked_cast<const ScalarExpression&>(*operand).value();
+  }
 
-  Datum out;
-  compute::FunctionContext ctx;
-  arrow::compute::CompareOptions eq(compute::CompareOperator::EQUAL);
-  if (!compute::Compare(&ctx, Datum(set_), Datum(value), eq, &out).ok()) {
+  compute::CompareOptions eq(CompareOperator::EQUAL);
+  Result<Datum> maybe_out = compute::Compare(set, value, eq);
+  if (!maybe_out.ok()) {
     return std::make_shared<InExpression>(std::move(operand), set_);
   }
+
+  Datum out = maybe_out.ValueOrDie();
 
   DCHECK(out.is_array());
   DCHECK_EQ(out.type()->id(), Type::BOOL);
@@ -626,7 +674,6 @@ const std::shared_ptr<Expression>& CastExpression::like_expr() const {
 std::string FieldExpression::ToString() const { return name_; }
 
 std::string OperatorName(compute::CompareOperator op) {
-  using compute::CompareOperator;
   switch (op) {
     case CompareOperator::EQUAL:
       return "==";
@@ -655,31 +702,32 @@ std::string ScalarExpression::ToString() const {
   return value_->ToString() + ":" + type_repr;
 }
 
+using arrow::internal::JoinStrings;
+
 std::string AndExpression::ToString() const {
-  return internal::JoinStrings(
+  return JoinStrings(
       {"(", left_operand_->ToString(), " and ", right_operand_->ToString(), ")"}, "");
 }
 
 std::string OrExpression::ToString() const {
-  return internal::JoinStrings(
+  return JoinStrings(
       {"(", left_operand_->ToString(), " or ", right_operand_->ToString(), ")"}, "");
 }
 
 std::string NotExpression::ToString() const {
   if (operand_->type() == ExpressionType::IS_VALID) {
     const auto& is_valid = checked_cast<const IsValidExpression&>(*operand_);
-    return internal::JoinStrings({"(", is_valid.operand()->ToString(), " is null)"}, "");
+    return JoinStrings({"(", is_valid.operand()->ToString(), " is null)"}, "");
   }
-  return internal::JoinStrings({"(not ", operand_->ToString(), ")"}, "");
+  return JoinStrings({"(not ", operand_->ToString(), ")"}, "");
 }
 
 std::string IsValidExpression::ToString() const {
-  return internal::JoinStrings({"(", operand_->ToString(), " is not null)"}, "");
+  return JoinStrings({"(", operand_->ToString(), " is not null)"}, "");
 }
 
 std::string InExpression::ToString() const {
-  return internal::JoinStrings(
-      {"(", operand_->ToString(), " is in ", set_->ToString(), ")"}, "");
+  return JoinStrings({"(", operand_->ToString(), " is in ", set_->ToString(), ")"}, "");
 }
 
 std::string CastExpression::ToString() const {
@@ -691,13 +739,13 @@ std::string CastExpression::ToString() const {
     auto like = arrow::util::get<std::shared_ptr<Expression>>(to_);
     to = " like " + like->ToString();
   }
-  return internal::JoinStrings({"(cast ", operand_->ToString(), std::move(to), ")"}, "");
+  return JoinStrings({"(cast ", operand_->ToString(), std::move(to), ")"}, "");
 }
 
 std::string ComparisonExpression::ToString() const {
-  return internal::JoinStrings({"(", left_operand_->ToString(), " ", OperatorName(op()),
-                                " ", right_operand_->ToString(), ")"},
-                               "");
+  return JoinStrings({"(", left_operand_->ToString(), " ", OperatorName(op()), " ",
+                      right_operand_->ToString(), ")"},
+                     "");
 }
 
 bool UnaryExpression::Equals(const Expression& other) const {
@@ -762,39 +810,35 @@ std::shared_ptr<Expression> ScalarExpression::Copy() const {
   return std::make_shared<ScalarExpression>(*this);
 }
 
-std::shared_ptr<AndExpression> and_(std::shared_ptr<Expression> lhs,
-                                    std::shared_ptr<Expression> rhs) {
+std::shared_ptr<Expression> and_(std::shared_ptr<Expression> lhs,
+                                 std::shared_ptr<Expression> rhs) {
   return std::make_shared<AndExpression>(std::move(lhs), std::move(rhs));
 }
 
 std::shared_ptr<Expression> and_(const ExpressionVector& subexpressions) {
-  if (subexpressions.size() == 0) {
-    return scalar(true);
+  auto acc = scalar(true);
+  for (const auto& next : subexpressions) {
+    if (next->Equals(false)) return next;
+    acc = acc->Equals(true) ? next : and_(std::move(acc), next);
   }
-  return std::accumulate(
-      subexpressions.begin(), subexpressions.end(), std::shared_ptr<Expression>(),
-      [](std::shared_ptr<Expression> acc, const std::shared_ptr<Expression>& next) {
-        return acc == nullptr ? next : and_(std::move(acc), next);
-      });
+  return acc;
 }
 
-std::shared_ptr<OrExpression> or_(std::shared_ptr<Expression> lhs,
-                                  std::shared_ptr<Expression> rhs) {
+std::shared_ptr<Expression> or_(std::shared_ptr<Expression> lhs,
+                                std::shared_ptr<Expression> rhs) {
   return std::make_shared<OrExpression>(std::move(lhs), std::move(rhs));
 }
 
 std::shared_ptr<Expression> or_(const ExpressionVector& subexpressions) {
-  if (subexpressions.size() == 0) {
-    return scalar(false);
+  auto acc = scalar(false);
+  for (const auto& next : subexpressions) {
+    if (next->Equals(true)) return next;
+    acc = acc->Equals(false) ? next : or_(std::move(acc), next);
   }
-  return std::accumulate(
-      subexpressions.begin(), subexpressions.end(), std::shared_ptr<Expression>(),
-      [](std::shared_ptr<Expression> acc, const std::shared_ptr<Expression>& next) {
-        return acc == nullptr ? next : or_(std::move(acc), next);
-      });
+  return acc;
 }
 
-std::shared_ptr<NotExpression> not_(std::shared_ptr<Expression> operand) {
+std::shared_ptr<Expression> not_(std::shared_ptr<Expression> operand) {
   return std::make_shared<NotExpression>(std::move(operand));
 }
 
@@ -872,6 +916,10 @@ Result<std::shared_ptr<DataType>> NotExpression::Validate(const Schema& schema) 
 
 Result<std::shared_ptr<DataType>> InExpression::Validate(const Schema& schema) const {
   ARROW_ASSIGN_OR_RAISE(auto operand_type, operand_->Validate(schema));
+  if (operand_type->id() == Type::NA || set_->type()->id() == Type::NA) {
+    return boolean();
+  }
+
   if (!operand_type->Equals(set_->type())) {
     return Status::TypeError("mismatch: set type ", *set_->type(), " vs operand type ",
                              *operand_type);
@@ -904,8 +952,10 @@ Result<std::shared_ptr<DataType>> CastExpression::Validate(const Schema& schema)
     return to_type;
   }
 
-  std::unique_ptr<compute::UnaryKernel> kernel;
-  RETURN_NOT_OK(GetCastFunction(*operand_type, to_type, options_, &kernel));
+  if (!compute::CanCast(*operand_type, *to_type)) {
+    return Status::Invalid("Cannot cast to ", to_type->ToString());
+  }
+
   return to_type;
 }
 
@@ -919,6 +969,22 @@ Result<std::shared_ptr<DataType>> FieldExpression::Validate(const Schema& schema
     return field->type();
   }
   return null();
+}
+
+Result<Datum> CastOrDictionaryEncode(const Datum& arr,
+                                     const std::shared_ptr<DataType>& type,
+                                     const compute::CastOptions opts) {
+  if (type->id() == Type::DICTIONARY) {
+    const auto& dict_type = checked_cast<const DictionaryType&>(*type);
+    if (dict_type.index_type()->id() != Type::INT32) {
+      return Status::TypeError("cannot DictionaryEncode to index type ",
+                               *dict_type.index_type());
+    }
+    ARROW_ASSIGN_OR_RAISE(auto dense, compute::Cast(arr, dict_type.value_type(), opts));
+    return compute::DictionaryEncode(dense);
+  }
+
+  return compute::Cast(arr, type, opts);
 }
 
 struct InsertImplicitCastsImpl {
@@ -952,9 +1018,8 @@ struct InsertImplicitCastsImpl {
 
     if (!op.type->Equals(set->type())) {
       // cast the set (which we assume to be small) to match op.type
-      compute::FunctionContext ctx;
-      const auto options = compute::CastOptions::Safe();
-      RETURN_NOT_OK(arrow::compute::Cast(&ctx, *set, op.type, options, &set));
+      ARROW_ASSIGN_OR_RAISE(auto encoded_set, CastOrDictionaryEncode(*set, op.type, {}));
+      set = encoded_set.make_array();
     }
 
     return std::make_shared<InExpression>(std::move(op.expr), std::move(set));
@@ -1023,6 +1088,18 @@ Result<std::shared_ptr<Expression>> InsertImplicitCasts(const Expression& expr,
                                                         const Schema& schema) {
   RETURN_NOT_OK(schema.CanReferenceFieldsByNames(FieldsInExpression(expr)));
   return VisitExpression(expr, InsertImplicitCastsImpl{schema});
+}
+
+Status VisitConjunctionMembers(const Expression& expr,
+                               const std::function<Status(const Expression&)>& visitor) {
+  if (expr.type() == ExpressionType::AND) {
+    const auto& and_ = checked_cast<const AndExpression&>(expr);
+    RETURN_NOT_OK(VisitConjunctionMembers(*and_.left_operand(), visitor));
+    RETURN_NOT_OK(VisitConjunctionMembers(*and_.right_operand(), visitor));
+    return Status::OK();
+  }
+
+  return visitor(expr);
 }
 
 std::vector<std::string> FieldsInExpression(const Expression& expr) {
@@ -1114,12 +1191,11 @@ struct TreeEvaluator::Impl {
   }
 
   Result<Datum> EvaluateBoolean(const BinaryExpression& expr,
-                                Status kernel(compute::FunctionContext* context,
-                                              const compute::Datum& left,
-                                              const compute::Datum& right,
-                                              compute::Datum* out)) const {
-    ARROW_ASSIGN_OR_RAISE(auto lhs, Evaluate(*expr.left_operand()));
-    ARROW_ASSIGN_OR_RAISE(auto rhs, Evaluate(*expr.right_operand()));
+                                Result<Datum> kernel(const Datum& left,
+                                                     const Datum& right,
+                                                     ExecContext* ctx)) const {
+    ARROW_ASSIGN_OR_RAISE(Datum lhs, Evaluate(*expr.left_operand()));
+    ARROW_ASSIGN_OR_RAISE(Datum rhs, Evaluate(*expr.right_operand()));
 
     if (lhs.is_scalar()) {
       ARROW_ASSIGN_OR_RAISE(
@@ -1135,13 +1211,11 @@ struct TreeEvaluator::Impl {
       rhs = Datum(std::move(rhs_array));
     }
 
-    Datum out;
-    RETURN_NOT_OK(kernel(&ctx_, lhs, rhs, &out));
-    return std::move(out);
+    return kernel(lhs, rhs, &ctx_);
   }
 
   Result<Datum> operator()(const NotExpression& expr) const {
-    ARROW_ASSIGN_OR_RAISE(auto to_invert, Evaluate(*expr.operand()));
+    ARROW_ASSIGN_OR_RAISE(Datum to_invert, Evaluate(*expr.operand()));
     if (IsNullDatum(to_invert)) {
       return NullDatum();
     }
@@ -1151,27 +1225,21 @@ struct TreeEvaluator::Impl {
           checked_cast<const BooleanScalar&>(*to_invert.scalar()).value;
       return Datum(std::make_shared<BooleanScalar>(!trivial_condition));
     }
-
-    DCHECK(to_invert.is_array());
-    Datum out;
-    RETURN_NOT_OK(arrow::compute::Invert(&ctx_, to_invert, &out));
-    return std::move(out);
+    return compute::Invert(to_invert, &ctx_);
   }
 
   Result<Datum> operator()(const InExpression& expr) const {
-    ARROW_ASSIGN_OR_RAISE(auto operand_values, Evaluate(*expr.operand()));
+    ARROW_ASSIGN_OR_RAISE(Datum operand_values, Evaluate(*expr.operand()));
     if (IsNullDatum(operand_values)) {
       return Datum(expr.set()->null_count() != 0);
     }
 
     DCHECK(operand_values.is_array());
-    Datum out;
-    RETURN_NOT_OK(arrow::compute::IsIn(&ctx_, operand_values, expr.set(), &out));
-    return std::move(out);
+    return compute::IsIn(operand_values, expr.set(), &ctx_);
   }
 
   Result<Datum> operator()(const IsValidExpression& expr) const {
-    ARROW_ASSIGN_OR_RAISE(auto operand_values, Evaluate(*expr.operand()));
+    ARROW_ASSIGN_OR_RAISE(Datum operand_values, Evaluate(*expr.operand()));
     if (IsNullDatum(operand_values)) {
       return Datum(false);
     }
@@ -1198,25 +1266,48 @@ struct TreeEvaluator::Impl {
     }
 
     DCHECK(to_cast.is_array());
-    Datum out;
-    RETURN_NOT_OK(arrow::compute::Cast(&ctx_, to_cast, to_type, expr.options(), &out));
-    return std::move(out);
+    return CastOrDictionaryEncode(to_cast, to_type, expr.options());
   }
 
   Result<Datum> operator()(const ComparisonExpression& expr) const {
-    ARROW_ASSIGN_OR_RAISE(auto lhs, Evaluate(*expr.left_operand()));
-    ARROW_ASSIGN_OR_RAISE(auto rhs, Evaluate(*expr.right_operand()));
+    ARROW_ASSIGN_OR_RAISE(Datum lhs, Evaluate(*expr.left_operand()));
+    ARROW_ASSIGN_OR_RAISE(Datum rhs, Evaluate(*expr.right_operand()));
 
     if (IsNullDatum(lhs) || IsNullDatum(rhs)) {
       return Datum(std::make_shared<BooleanScalar>());
     }
 
-    DCHECK(lhs.is_array());
+    if (lhs.type()->id() == Type::DICTIONARY && rhs.type()->id() == Type::DICTIONARY) {
+      if (lhs.is_array() && rhs.is_array()) {
+        // decode dictionary arrays
+        for (Datum* arg : {&lhs, &rhs}) {
+          auto dict = checked_pointer_cast<DictionaryArray>(arg->make_array());
+          ARROW_ASSIGN_OR_RAISE(*arg, compute::Take(dict->dictionary(), dict->indices(),
+                                                    compute::TakeOptions::Defaults()));
+        }
+      } else if (lhs.is_array() || rhs.is_array()) {
+        auto dict = checked_pointer_cast<DictionaryArray>(
+            (lhs.is_array() ? lhs : rhs).make_array());
 
-    Datum out;
-    RETURN_NOT_OK(arrow::compute::Compare(
-        &ctx_, lhs, rhs, arrow::compute::CompareOptions(expr.op()), &out));
-    return std::move(out);
+        ARROW_ASSIGN_OR_RAISE(auto scalar, checked_cast<const DictionaryScalar&>(
+                                               *(lhs.is_scalar() ? lhs : rhs).scalar())
+                                               .GetEncodedValue());
+        if (lhs.is_array()) {
+          lhs = dict->dictionary();
+          rhs = std::move(scalar);
+        } else {
+          lhs = std::move(scalar);
+          rhs = dict->dictionary();
+        }
+        ARROW_ASSIGN_OR_RAISE(
+            Datum out_dict,
+            compute::Compare(lhs, rhs, compute::CompareOptions(expr.op()), &ctx_));
+
+        return compute::Take(out_dict, dict->indices(), compute::TakeOptions::Defaults());
+      }
+    }
+
+    return compute::Compare(lhs, rhs, compute::CompareOptions(expr.op()), &ctx_);
   }
 
   Result<Datum> operator()(const Expression& expr) const {
@@ -1229,22 +1320,23 @@ struct TreeEvaluator::Impl {
 
   const TreeEvaluator* this_;
   const RecordBatch& batch_;
-  mutable compute::FunctionContext ctx_;
+  mutable compute::ExecContext ctx_;
 };
 
 Result<Datum> TreeEvaluator::Evaluate(const Expression& expr, const RecordBatch& batch,
                                       MemoryPool* pool) const {
-  return VisitExpression(expr, Impl{this, batch, compute::FunctionContext{pool}});
+  return VisitExpression(expr, Impl{this, batch, compute::ExecContext{pool}});
 }
 
 Result<std::shared_ptr<RecordBatch>> TreeEvaluator::Filter(
-    const compute::Datum& selection, const std::shared_ptr<RecordBatch>& batch,
+    const Datum& selection, const std::shared_ptr<RecordBatch>& batch,
     MemoryPool* pool) const {
   if (selection.is_array()) {
     auto selection_array = selection.make_array();
-    compute::Datum filtered;
-    compute::FunctionContext ctx{pool};
-    RETURN_NOT_OK(compute::Filter(&ctx, batch, selection_array, {}, &filtered));
+    compute::ExecContext ctx(pool);
+    ARROW_ASSIGN_OR_RAISE(Datum filtered,
+                          compute::Filter(batch, selection_array,
+                                          compute::FilterOptions::Defaults(), &ctx));
     return filtered.record_batch();
   }
 
@@ -1260,7 +1352,423 @@ Result<std::shared_ptr<RecordBatch>> TreeEvaluator::Filter(
   return batch->Slice(0, 0);
 }
 
-std::shared_ptr<ScalarExpression> scalar(bool value) { return scalar(MakeScalar(value)); }
+const std::shared_ptr<Expression>& scalar(bool value) {
+  static auto true_ = scalar(MakeScalar(true));
+  static auto false_ = scalar(MakeScalar(false));
+  return value ? true_ : false_;
+}
+
+// Serialization is accomplished by converting expressions to single element StructArrays
+// then writing that to an IPC file. The last field is always an int32 column containing
+// ExpressionType, the rest store the Expression's members.
+struct SerializeImpl {
+  Result<std::shared_ptr<StructArray>> ToArray(const Expression& expr) const {
+    return VisitExpression(expr, *this);
+  }
+
+  Result<std::shared_ptr<StructArray>> TaggedWithChildren(const Expression& expr,
+                                                          ArrayVector children) const {
+    children.emplace_back();
+    ARROW_ASSIGN_OR_RAISE(children.back(),
+                          MakeArrayFromScalar(Int32Scalar(expr.type()), 1));
+
+    return StructArray::Make(children, std::vector<std::string>(children.size(), ""));
+  }
+
+  Result<std::shared_ptr<StructArray>> operator()(const FieldExpression& expr) const {
+    // store the field's name in a StringArray
+    ARROW_ASSIGN_OR_RAISE(auto name, MakeArrayFromScalar(StringScalar(expr.name()), 1));
+    return TaggedWithChildren(expr, {name});
+  }
+
+  Result<std::shared_ptr<StructArray>> operator()(const ScalarExpression& expr) const {
+    // store the scalar's value in a single element Array
+    ARROW_ASSIGN_OR_RAISE(auto value, MakeArrayFromScalar(*expr.value(), 1));
+    return TaggedWithChildren(expr, {value});
+  }
+
+  Result<std::shared_ptr<StructArray>> operator()(const UnaryExpression& expr) const {
+    // recurse to store the operand in a single element StructArray
+    ARROW_ASSIGN_OR_RAISE(auto operand, ToArray(*expr.operand()));
+    return TaggedWithChildren(expr, {operand});
+  }
+
+  Result<std::shared_ptr<StructArray>> operator()(const CastExpression& expr) const {
+    // recurse to store the operand in a single element StructArray
+    ARROW_ASSIGN_OR_RAISE(auto operand, ToArray(*expr.operand()));
+
+    // store the cast target and a discriminant
+    std::shared_ptr<Array> is_like_expr, to;
+    if (const auto& to_type = expr.to_type()) {
+      ARROW_ASSIGN_OR_RAISE(is_like_expr, MakeArrayFromScalar(BooleanScalar(false), 1));
+      ARROW_ASSIGN_OR_RAISE(to, MakeArrayOfNull(to_type, 1));
+    }
+    if (const auto& like_expr = expr.like_expr()) {
+      ARROW_ASSIGN_OR_RAISE(is_like_expr, MakeArrayFromScalar(BooleanScalar(true), 1));
+      ARROW_ASSIGN_OR_RAISE(to, ToArray(*like_expr));
+    }
+
+    return TaggedWithChildren(expr, {operand, is_like_expr, to});
+  }
+
+  Result<std::shared_ptr<StructArray>> operator()(const BinaryExpression& expr) const {
+    // recurse to store the operands in single element StructArrays
+    ARROW_ASSIGN_OR_RAISE(auto left_operand, ToArray(*expr.left_operand()));
+    ARROW_ASSIGN_OR_RAISE(auto right_operand, ToArray(*expr.right_operand()));
+    return TaggedWithChildren(expr, {left_operand, right_operand});
+  }
+
+  Result<std::shared_ptr<StructArray>> operator()(
+      const ComparisonExpression& expr) const {
+    // recurse to store the operands in single element StructArrays
+    ARROW_ASSIGN_OR_RAISE(auto left_operand, ToArray(*expr.left_operand()));
+    ARROW_ASSIGN_OR_RAISE(auto right_operand, ToArray(*expr.right_operand()));
+    // store the CompareOperator in a single element Int32Array
+    ARROW_ASSIGN_OR_RAISE(auto op, MakeArrayFromScalar(Int32Scalar(expr.op()), 1));
+    return TaggedWithChildren(expr, {left_operand, right_operand, op});
+  }
+
+  Result<std::shared_ptr<StructArray>> operator()(const InExpression& expr) const {
+    // recurse to store the operand in a single element StructArray
+    ARROW_ASSIGN_OR_RAISE(auto operand, ToArray(*expr.operand()));
+
+    // store the set as a single element ListArray
+    auto set_type = list(expr.set()->type());
+
+    ARROW_ASSIGN_OR_RAISE(auto set_offsets, AllocateBuffer(sizeof(int32_t) * 2));
+    reinterpret_cast<int32_t*>(set_offsets->mutable_data())[0] = 0;
+    reinterpret_cast<int32_t*>(set_offsets->mutable_data())[1] =
+        static_cast<int32_t>(expr.set()->length());
+
+    auto set_values = expr.set();
+
+    auto set = std::make_shared<ListArray>(std::move(set_type), 1, std::move(set_offsets),
+                                           std::move(set_values));
+    return TaggedWithChildren(expr, {operand, set});
+  }
+
+  Result<std::shared_ptr<StructArray>> operator()(const Expression& expr) const {
+    return Status::NotImplemented("serialization of ", expr.ToString());
+  }
+
+  Result<std::shared_ptr<Buffer>> ToBuffer(const Expression& expr) const {
+    ARROW_ASSIGN_OR_RAISE(auto array, SerializeImpl{}.ToArray(expr));
+    ARROW_ASSIGN_OR_RAISE(auto batch, RecordBatch::FromStructArray(array));
+    ARROW_ASSIGN_OR_RAISE(auto stream, io::BufferOutputStream::Create());
+    ARROW_ASSIGN_OR_RAISE(auto writer, ipc::MakeFileWriter(stream, batch->schema()));
+    RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
+    RETURN_NOT_OK(writer->Close());
+    return stream->Finish();
+  }
+};
+
+Result<std::shared_ptr<Buffer>> Expression::Serialize() const {
+  return SerializeImpl{}.ToBuffer(*this);
+}
+
+struct DeserializeImpl {
+  Result<std::shared_ptr<Expression>> FromArray(const Array& array) const {
+    if (array.type_id() != Type::STRUCT || array.length() != 1) {
+      return Status::Invalid("can only deserialize expressions from unit-length",
+                             " StructArray, got ", array);
+    }
+    const auto& struct_array = checked_cast<const StructArray&>(array);
+
+    ARROW_ASSIGN_OR_RAISE(auto expression_type, GetExpressionType(struct_array));
+    switch (expression_type) {
+      case ExpressionType::FIELD: {
+        ARROW_ASSIGN_OR_RAISE(auto name, GetView<StringType>(struct_array, 0));
+        return field_ref(std::string(name));
+      }
+
+      case ExpressionType::SCALAR: {
+        ARROW_ASSIGN_OR_RAISE(auto value, struct_array.field(0)->GetScalar(0));
+        return scalar(std::move(value));
+      }
+
+      case ExpressionType::NOT: {
+        ARROW_ASSIGN_OR_RAISE(auto operand, FromArray(*struct_array.field(0)));
+        return not_(std::move(operand));
+      }
+
+      case ExpressionType::CAST: {
+        ARROW_ASSIGN_OR_RAISE(auto operand, FromArray(*struct_array.field(0)));
+        ARROW_ASSIGN_OR_RAISE(auto is_like_expr, GetView<BooleanType>(struct_array, 1));
+        if (is_like_expr) {
+          ARROW_ASSIGN_OR_RAISE(auto like_expr, FromArray(*struct_array.field(2)));
+          return operand->CastLike(std::move(like_expr)).Copy();
+        }
+        return operand->CastTo(struct_array.field(2)->type()).Copy();
+      }
+
+      case ExpressionType::AND: {
+        ARROW_ASSIGN_OR_RAISE(auto left_operand, FromArray(*struct_array.field(0)));
+        ARROW_ASSIGN_OR_RAISE(auto right_operand, FromArray(*struct_array.field(1)));
+        return and_(std::move(left_operand), std::move(right_operand));
+      }
+
+      case ExpressionType::OR: {
+        ARROW_ASSIGN_OR_RAISE(auto left_operand, FromArray(*struct_array.field(0)));
+        ARROW_ASSIGN_OR_RAISE(auto right_operand, FromArray(*struct_array.field(1)));
+        return or_(std::move(left_operand), std::move(right_operand));
+      }
+
+      case ExpressionType::COMPARISON: {
+        ARROW_ASSIGN_OR_RAISE(auto left_operand, FromArray(*struct_array.field(0)));
+        ARROW_ASSIGN_OR_RAISE(auto right_operand, FromArray(*struct_array.field(1)));
+        ARROW_ASSIGN_OR_RAISE(auto op, GetView<Int32Type>(struct_array, 2));
+        return std::make_shared<ComparisonExpression>(static_cast<CompareOperator>(op),
+                                                      std::move(left_operand),
+                                                      std::move(right_operand));
+      }
+
+      case ExpressionType::IS_VALID: {
+        ARROW_ASSIGN_OR_RAISE(auto operand, FromArray(*struct_array.field(0)));
+        return std::make_shared<IsValidExpression>(std::move(operand));
+      }
+
+      case ExpressionType::IN: {
+        ARROW_ASSIGN_OR_RAISE(auto operand, FromArray(*struct_array.field(0)));
+        if (struct_array.field(1)->type_id() != Type::LIST) {
+          return Status::TypeError("expected field 1 of ", struct_array,
+                                   " to have list type");
+        }
+        auto set = checked_cast<const ListArray&>(*struct_array.field(1)).values();
+        return std::make_shared<InExpression>(std::move(operand), std::move(set));
+      }
+
+      default:
+        break;
+    }
+
+    return Status::Invalid("non-deserializable ExpressionType ", expression_type);
+  }
+
+  template <typename T, typename A = typename TypeTraits<T>::ArrayType>
+  static Result<decltype(std::declval<A>().GetView(0))> GetView(const StructArray& array,
+                                                                int index) {
+    if (index >= array.num_fields()) {
+      return Status::IndexError("expected ", array, " to have a child at index ", index);
+    }
+
+    const auto& child = *array.field(index);
+    if (child.type_id() != T::type_id) {
+      return Status::TypeError("expected child ", index, " of ", array, " to have type ",
+                               T::type_id);
+    }
+
+    return checked_cast<const A&>(child).GetView(0);
+  }
+
+  static Result<ExpressionType::type> GetExpressionType(const StructArray& array) {
+    if (array.struct_type()->num_fields() < 1) {
+      return Status::Invalid("StructArray didn't contain ExpressionType member");
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto expression_type,
+                          GetView<Int32Type>(array, array.num_fields() - 1));
+    return static_cast<ExpressionType::type>(expression_type);
+  }
+
+  Result<std::shared_ptr<Expression>> FromBuffer(const Buffer& serialized) {
+    io::BufferReader stream(serialized);
+    ARROW_ASSIGN_OR_RAISE(auto reader, ipc::RecordBatchFileReader::Open(&stream));
+    ARROW_ASSIGN_OR_RAISE(auto batch, reader->ReadRecordBatch(0));
+    ARROW_ASSIGN_OR_RAISE(auto array, batch->ToStructArray());
+    return FromArray(*array);
+  }
+};
+
+Result<std::shared_ptr<Expression>> Expression::Deserialize(const Buffer& serialized) {
+  return DeserializeImpl{}.FromBuffer(serialized);
+}
+
+// Transform an array of counts to offsets which will divide a ListArray
+// into an equal number of slices with corresponding lengths.
+inline Result<std::shared_ptr<Array>> CountsToOffsets(
+    std::shared_ptr<Int64Array> counts) {
+  Int32Builder offset_builder;
+  RETURN_NOT_OK(offset_builder.Resize(counts->length() + 1));
+  offset_builder.UnsafeAppend(0);
+
+  for (int64_t i = 0; i < counts->length(); ++i) {
+    DCHECK_NE(counts->Value(i), 0);
+    auto next_offset = static_cast<int32_t>(offset_builder[i] + counts->Value(i));
+    offset_builder.UnsafeAppend(next_offset);
+  }
+
+  std::shared_ptr<Array> offsets;
+  RETURN_NOT_OK(offset_builder.Finish(&offsets));
+  return offsets;
+}
+
+// Helper for simultaneous dictionary encoding of multiple arrays.
+//
+// The fused dictionary is the Cartesian product of the individual dictionaries.
+// For example given two arrays A, B where A has unique values ["ex", "why"]
+// and B has unique values [0, 1] the fused dictionary is the set of tuples
+// [["ex", 0], ["ex", 1], ["why", 0], ["ex", 1]].
+//
+// TODO(bkietz) this capability belongs in an Action of the hash kernels, where
+// it can be used to group aggregates without materializing a grouped batch.
+// For the purposes of writing we need the materialized grouped batch anyway
+// since no Writers accept a selection vector.
+class StructDictionary {
+ public:
+  struct Encoded {
+    std::shared_ptr<Int32Array> indices;
+    std::shared_ptr<StructDictionary> dictionary;
+  };
+
+  static Result<Encoded> Encode(const ArrayVector& columns) {
+    Encoded out{nullptr, std::make_shared<StructDictionary>()};
+
+    for (const auto& column : columns) {
+      if (column->null_count() != 0) {
+        return Status::NotImplemented("Grouping on a field with nulls");
+      }
+
+      RETURN_NOT_OK(out.dictionary->AddOne(column, &out.indices));
+    }
+
+    return out;
+  }
+
+  Result<std::shared_ptr<StructArray>> Decode(std::shared_ptr<Int32Array> fused_indices,
+                                              FieldVector fields) {
+    std::vector<Int32Builder> builders(dictionaries_.size());
+    for (Int32Builder& b : builders) {
+      RETURN_NOT_OK(b.Resize(fused_indices->length()));
+    }
+
+    std::vector<int32_t> codes(dictionaries_.size());
+    for (int64_t i = 0; i < fused_indices->length(); ++i) {
+      Expand(fused_indices->Value(i), codes.data());
+
+      auto builder_it = builders.begin();
+      for (int32_t index : codes) {
+        builder_it++->UnsafeAppend(index);
+      }
+    }
+
+    ArrayVector columns(dictionaries_.size());
+    for (size_t i = 0; i < dictionaries_.size(); ++i) {
+      std::shared_ptr<ArrayData> indices;
+      RETURN_NOT_OK(builders[i].FinishInternal(&indices));
+
+      ARROW_ASSIGN_OR_RAISE(Datum column, compute::Take(dictionaries_[i], indices));
+      columns[i] = column.make_array();
+    }
+
+    return StructArray::Make(std::move(columns), std::move(fields));
+  }
+
+ private:
+  Status AddOne(Datum column, std::shared_ptr<Int32Array>* fused_indices) {
+    ArrayData* encoded;
+    if (column.type()->id() != Type::DICTIONARY) {
+      ARROW_ASSIGN_OR_RAISE(column, compute::DictionaryEncode(column));
+    }
+    encoded = column.mutable_array();
+
+    auto indices =
+        std::make_shared<Int32Array>(encoded->length, std::move(encoded->buffers[1]));
+
+    dictionaries_.push_back(MakeArray(std::move(encoded->dictionary)));
+    auto dictionary_size = static_cast<int32_t>(dictionaries_.back()->length());
+
+    if (*fused_indices == nullptr) {
+      *fused_indices = std::move(indices);
+      size_ = dictionary_size;
+      return Status::OK();
+    }
+
+    // It's useful to think about the case where each of dictionaries_ has size 10.
+    // In this case the decimal digit in the ones place is the code in dictionaries_[0],
+    // the tens place corresponds to dictionaries_[1], etc.
+    // The incumbent indices must be shifted to the hundreds place so as not to collide.
+    ARROW_ASSIGN_OR_RAISE(Datum new_fused_indices,
+                          compute::Multiply(indices, MakeScalar(size_)));
+
+    ARROW_ASSIGN_OR_RAISE(new_fused_indices,
+                          compute::Add(new_fused_indices, *fused_indices));
+
+    *fused_indices = checked_pointer_cast<Int32Array>(new_fused_indices.make_array());
+
+    // XXX should probably cap this at 2**15 or so
+    ARROW_CHECK(!internal::MultiplyWithOverflow(size_, dictionary_size, &size_));
+    return Status::OK();
+  }
+
+  // expand a fused code into component dict codes, order is in order of addition
+  void Expand(int32_t fused_code, int32_t* codes) {
+    for (size_t i = 0; i < dictionaries_.size(); ++i) {
+      auto dictionary_size = static_cast<int32_t>(dictionaries_[i]->length());
+      codes[i] = fused_code % dictionary_size;
+      fused_code /= dictionary_size;
+    }
+  }
+
+  int32_t size_;
+  ArrayVector dictionaries_;
+};
+
+Result<std::shared_ptr<StructArray>> MakeGroupings(const StructArray& by) {
+  if (by.num_fields() == 0) {
+    return Status::NotImplemented("Grouping with no criteria");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto fused, StructDictionary::Encode(by.fields()));
+
+  ARROW_ASSIGN_OR_RAISE(auto sort_indices, compute::SortToIndices(*fused.indices));
+  ARROW_ASSIGN_OR_RAISE(Datum sorted, compute::Take(fused.indices, *sort_indices));
+  fused.indices = checked_pointer_cast<Int32Array>(sorted.make_array());
+
+  ARROW_ASSIGN_OR_RAISE(auto fused_counts_and_values,
+                        compute::ValueCounts(fused.indices));
+  fused.indices.reset();
+
+  auto unique_fused_indices =
+      checked_pointer_cast<Int32Array>(fused_counts_and_values->GetFieldByName("values"));
+  ARROW_ASSIGN_OR_RAISE(
+      auto unique_rows,
+      fused.dictionary->Decode(std::move(unique_fused_indices), by.type()->fields()));
+
+  auto counts =
+      checked_pointer_cast<Int64Array>(fused_counts_and_values->GetFieldByName("counts"));
+  ARROW_ASSIGN_OR_RAISE(auto offsets, CountsToOffsets(std::move(counts)));
+
+  ARROW_ASSIGN_OR_RAISE(auto grouped_sort_indices,
+                        ListArray::FromArrays(*offsets, *sort_indices));
+
+  return StructArray::Make(
+      ArrayVector{std::move(unique_rows), std::move(grouped_sort_indices)},
+      std::vector<std::string>{"values", "groupings"});
+}
+
+Result<std::shared_ptr<ListArray>> ApplyGroupings(const ListArray& groupings,
+                                                  const Array& array) {
+  ARROW_ASSIGN_OR_RAISE(Datum sorted,
+                        compute::Take(array, groupings.data()->child_data[0]));
+
+  return std::make_shared<ListArray>(list(array.type()), groupings.length(),
+                                     groupings.value_offsets(), sorted.make_array());
+}
+
+Result<RecordBatchVector> ApplyGroupings(const ListArray& groupings,
+                                         const std::shared_ptr<RecordBatch>& batch) {
+  ARROW_ASSIGN_OR_RAISE(Datum sorted,
+                        compute::Take(batch, groupings.data()->child_data[0]));
+
+  const auto& sorted_batch = *sorted.record_batch();
+
+  RecordBatchVector out(static_cast<size_t>(groupings.length()));
+  for (size_t i = 0; i < out.size(); ++i) {
+    out[i] = sorted_batch.Slice(groupings.value_offset(i), groupings.value_length(i));
+  }
+
+  return out;
+}
 
 }  // namespace dataset
 }  // namespace arrow

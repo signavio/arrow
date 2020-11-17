@@ -35,6 +35,7 @@ class PrepareTest < Test::Unit::TestCase
         git("checkout", "-b", @release_branch, @current_commit)
         yield
       end
+      FileUtils.rm_rf(@test_git_repository)
     end
   end
 
@@ -227,6 +228,13 @@ class PrepareTest < Test::Unit::TestCase
                      ],
                    },
                    {
+                     path: "ruby/red-arrow-dataset/lib/arrow-dataset/version.rb",
+                     hunks: [
+                       ["-  VERSION = \"#{@snapshot_version}\"",
+                        "+  VERSION = \"#{@release_version}\""],
+                     ],
+                   },
+                   {
                      path: "ruby/red-arrow/lib/arrow/version.rb",
                      hunks: [
                        ["-  VERSION = \"#{@snapshot_version}\"",
@@ -259,6 +267,8 @@ class PrepareTest < Test::Unit::TestCase
                      hunks: [
                        ["-version = \"#{@snapshot_version}\"",
                         "+version = \"#{@release_version}\""],
+                       ["-arrow = { path = \"../arrow\", version = \"#{@snapshot_version}\" }",
+                        "+arrow = { path = \"../arrow\", version = \"#{@release_version}\" }"],
                      ],
                    },
                    {
@@ -269,14 +279,21 @@ class PrepareTest < Test::Unit::TestCase
                      ],
                    },
                    {
+                     path: "rust/benchmarks/Cargo.toml",
+                     hunks: [
+                       ["-version = \"#{@snapshot_version}\"",
+                        "+version = \"#{@release_version}\""],
+                     ],
+                   },
+                   {
                      path: "rust/datafusion/Cargo.toml",
                      hunks: [
                        ["-version = \"#{@snapshot_version}\"",
                         "+version = \"#{@release_version}\""],
-                       ["-arrow = { path = \"../arrow\", version = \"#{@snapshot_version}\" }",
-                        "-parquet = { path = \"../parquet\", version = \"#{@snapshot_version}\" }",
-                        "+arrow = { path = \"../arrow\", version = \"#{@release_version}\" }",
-                        "+parquet = { path = \"../parquet\", version = \"#{@release_version}\" }"],
+                       ["-arrow = { path = \"../arrow\", version = \"#{@snapshot_version}\", features = [\"prettyprint\"] }",
+                        "-parquet = { path = \"../parquet\", version = \"#{@snapshot_version}\", features = [\"arrow\"] }",
+                        "+arrow = { path = \"../arrow\", version = \"#{@release_version}\", features = [\"prettyprint\"] }",
+                        "+parquet = { path = \"../parquet\", version = \"#{@release_version}\", features = [\"arrow\"] }"],
                        ["-arrow-flight = { path = \"../arrow-flight\", version = \"#{@snapshot_version}\" }",
                         "+arrow-flight = { path = \"../arrow-flight\", version = \"#{@release_version}\" }"]
                      ],
@@ -289,10 +306,19 @@ class PrepareTest < Test::Unit::TestCase
                      ],
                    },
                    {
+                     path: "rust/integration-testing/Cargo.toml",
+                     hunks: [
+                       ["-version = \"#{@snapshot_version}\"",
+                        "+version = \"#{@release_version}\""],
+                     ],
+                   },
+                   {
                      path: "rust/parquet/Cargo.toml",
                      hunks: [
                        ["-version = \"#{@snapshot_version}\"",
                         "+version = \"#{@release_version}\""],
+                       ["-arrow = { path = \"../arrow\", version = \"#{@snapshot_version}\", optional = true }",
+                        "+arrow = { path = \"../arrow\", version = \"#{@release_version}\", optional = true }"],
                        ["-arrow = { path = \"../arrow\", version = \"#{@snapshot_version}\" }",
                         "+arrow = { path = \"../arrow\", version = \"#{@release_version}\" }"]
                      ],
@@ -304,6 +330,35 @@ class PrepareTest < Test::Unit::TestCase
                         "+parquet = \"#{@release_version}\""],
                        ["-See [crate documentation](https://docs.rs/crate/parquet/#{@snapshot_version}) on available API.",
                         "+See [crate documentation](https://docs.rs/crate/parquet/#{@release_version}) on available API."],
+                     ],
+                   },
+                   {
+                     path: "rust/parquet_derive/Cargo.toml",
+                     hunks: [
+                       ["-version = \"#{@snapshot_version}\"",
+                        "+version = \"#{@release_version}\""],
+                       ["-parquet = { path = \"../parquet\", version = \"#{@snapshot_version}\" }",
+                        "+parquet = { path = \"../parquet\", version = \"#{@release_version}\" }"],
+                     ],
+                   },
+                   {
+                     path: "rust/parquet_derive/README.md",
+                     hunks: [
+                       ["-parquet = \"#{@snapshot_version}\"",
+                        "-parquet_derive = \"#{@snapshot_version}\"",
+                        "+parquet = \"#{@release_version}\"",
+                        "+parquet_derive = \"#{@release_version}\""],
+                     ],
+                   },
+                   {
+                     path: "rust/parquet_derive_test/Cargo.toml",
+                     hunks: [
+                       ["-version = \"#{@snapshot_version}\"",
+                        "+version = \"#{@release_version}\"",
+                        "-parquet = { path = \"../parquet\", version = \"#{@snapshot_version}\" }",
+                        "-parquet_derive = { path = \"../parquet_derive\", version = \"#{@snapshot_version}\" }",
+                        "+parquet = { path = \"../parquet\", version = \"#{@release_version}\" }",
+                        "+parquet_derive = { path = \"../parquet_derive\", version = \"#{@release_version}\" }"],
                      ],
                    },
                  ],
@@ -411,6 +466,13 @@ class PrepareTest < Test::Unit::TestCase
                      ],
                    },
                    {
+                     path: "ruby/red-arrow-dataset/lib/arrow-dataset/version.rb",
+                     hunks: [
+                       ["-  VERSION = \"#{@release_version}\"",
+                        "+  VERSION = \"#{@next_snapshot_version}\""],
+                     ],
+                   },
+                   {
                      path: "ruby/red-arrow/lib/arrow/version.rb",
                      hunks: [
                        ["-  VERSION = \"#{@release_version}\"",
@@ -443,6 +505,8 @@ class PrepareTest < Test::Unit::TestCase
                      hunks: [
                        ["-version = \"#{@release_version}\"",
                         "+version = \"#{@next_snapshot_version}\""],
+                       ["-arrow = { path = \"../arrow\", version = \"#{@release_version}\" }",
+                        "+arrow = { path = \"../arrow\", version = \"#{@next_snapshot_version}\" }"],
                      ],
                    },
                    {
@@ -453,14 +517,21 @@ class PrepareTest < Test::Unit::TestCase
                      ],
                    },
                    {
+                     path: "rust/benchmarks/Cargo.toml",
+                     hunks: [
+                       ["-version = \"#{@release_version}\"",
+                        "+version = \"#{@next_snapshot_version}\""],
+                     ],
+                   },
+                   {
                      path: "rust/datafusion/Cargo.toml",
                      hunks: [
                        ["-version = \"#{@release_version}\"",
                         "+version = \"#{@next_snapshot_version}\""],
-                       ["-arrow = { path = \"../arrow\", version = \"#{@release_version}\" }",
-                        "-parquet = { path = \"../parquet\", version = \"#{@release_version}\" }",
-                        "+arrow = { path = \"../arrow\", version = \"#{@next_snapshot_version}\" }",
-                        "+parquet = { path = \"../parquet\", version = \"#{@next_snapshot_version}\" }"],
+                       ["-arrow = { path = \"../arrow\", version = \"#{@release_version}\", features = [\"prettyprint\"] }",
+                        "-parquet = { path = \"../parquet\", version = \"#{@release_version}\", features = [\"arrow\"] }",
+                        "+arrow = { path = \"../arrow\", version = \"#{@next_snapshot_version}\", features = [\"prettyprint\"] }",
+                        "+parquet = { path = \"../parquet\", version = \"#{@next_snapshot_version}\", features = [\"arrow\"] }"],
                        ["-arrow-flight = { path = \"../arrow-flight\", version = \"#{@release_version}\" }",
                         "+arrow-flight = { path = \"../arrow-flight\", version = \"#{@next_snapshot_version}\" }"]
                      ],
@@ -473,10 +544,19 @@ class PrepareTest < Test::Unit::TestCase
                      ],
                    },
                    {
+                     path: "rust/integration-testing/Cargo.toml",
+                     hunks: [
+                       ["-version = \"#{@release_version}\"",
+                        "+version = \"#{@next_snapshot_version}\""],
+                     ],
+                   },
+                   {
                      path: "rust/parquet/Cargo.toml",
                      hunks: [
                        ["-version = \"#{@release_version}\"",
                         "+version = \"#{@next_snapshot_version}\""],
+                       ["-arrow = { path = \"../arrow\", version = \"#{@release_version}\", optional = true }",
+                        "+arrow = { path = \"../arrow\", version = \"#{@next_snapshot_version}\", optional = true }"],
                        ["-arrow = { path = \"../arrow\", version = \"#{@release_version}\" }",
                         "+arrow = { path = \"../arrow\", version = \"#{@next_snapshot_version}\" }"]
                      ],
@@ -488,6 +568,35 @@ class PrepareTest < Test::Unit::TestCase
                         "+parquet = \"#{@next_snapshot_version}\""],
                        ["-See [crate documentation](https://docs.rs/crate/parquet/#{@release_version}) on available API.",
                         "+See [crate documentation](https://docs.rs/crate/parquet/#{@next_snapshot_version}) on available API."],
+                     ],
+                   },
+                   {
+                     path: "rust/parquet_derive/Cargo.toml",
+                     hunks: [
+                       ["-version = \"#{@release_version}\"",
+                        "+version = \"#{@next_snapshot_version}\""],
+                       ["-parquet = { path = \"../parquet\", version = \"#{@release_version}\" }",
+                        "+parquet = { path = \"../parquet\", version = \"#{@next_snapshot_version}\" }"],
+                     ],
+                   },
+                   {
+                     path: "rust/parquet_derive/README.md",
+                     hunks: [
+                       ["-parquet = \"#{@release_version}\"",
+                        "-parquet_derive = \"#{@release_version}\"",
+                        "+parquet = \"#{@next_snapshot_version}\"",
+                        "+parquet_derive = \"#{@next_snapshot_version}\""],
+                     ],
+                   },
+                   {
+                     path: "rust/parquet_derive_test/Cargo.toml",
+                     hunks: [
+                       ["-version = \"#{@release_version}\"",
+                        "+version = \"#{@next_snapshot_version}\"",
+                        "-parquet = { path = \"../parquet\", version = \"#{@release_version}\" }",
+                        "-parquet_derive = { path = \"../parquet_derive\", version = \"#{@release_version}\" }",
+                        "+parquet = { path = \"../parquet\", version = \"#{@next_snapshot_version}\" }",
+                        "+parquet_derive = { path = \"../parquet_derive\", version = \"#{@next_snapshot_version}\" }"],
                      ],
                    },
                  ],
@@ -530,8 +639,8 @@ class PrepareTest < Test::Unit::TestCase
       },
       {
         sampled_diff: [
-          "-      - libarrow-glib#{@so_version}-dbgsym_{no_rc_version}-1_[a-z0-9]+.deb",
-          "+      - libarrow-glib#{@next_so_version}-dbgsym_{no_rc_version}-1_[a-z0-9]+.deb",
+          "-      - libarrow-glib#{@so_version}-dbgsym_{no_rc_version}-1_[a-z0-9]+.d?deb",
+          "+      - libarrow-glib#{@next_so_version}-dbgsym_{no_rc_version}-1_[a-z0-9]+.d?deb",
         ],
         path: "dev/tasks/tasks.yml",
       },

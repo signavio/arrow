@@ -18,7 +18,43 @@
 cmake_minimum_required(VERSION 3.2)
 message(STATUS "Building using CMake version: ${CMAKE_VERSION}")
 
-set(ARROW_VERSION "1.0.0-SNAPSHOT")
+# Compiler id for Apple Clang is now AppleClang.
+cmake_policy(SET CMP0025 NEW)
+
+# IN_LIST if() operator
+if(POLICY CMP0057)
+  cmake_policy(SET CMP0057 NEW)
+endif()
+
+# Compatibility with CMake 3.1
+# Only interpret if() arguments as variables or keywords when unquoted.
+if(POLICY CMP0054)
+  # https://www.cmake.org/cmake/help/v3.1/policy/CMP0054.html
+  cmake_policy(SET CMP0054 NEW)
+endif()
+
+if(POLICY CMP0068)
+  # https://cmake.org/cmake/help/v3.9/policy/CMP0068.html
+  cmake_policy(SET CMP0068 NEW)
+endif()
+
+# Don't ignore <PackageName>_ROOT variables in find_package
+if(POLICY CMP0074)
+  # https://cmake.org/cmake/help/v3.12/policy/CMP0074.html
+  cmake_policy(SET CMP0074 NEW)
+endif()
+
+# Adapted from Apache Kudu: https://github.com/apache/kudu/commit/bd549e13743a51013585
+# Honor visibility properties for all target types. See
+# "cmake --help-policy CMP0063" for details.
+#
+# This policy was only added to cmake in version 3.3, so until the cmake in
+# thirdparty is updated, we must check if the policy exists before setting it.
+if(POLICY CMP0063)
+  cmake_policy(SET CMP0063 NEW)
+endif()
+
+set(ARROW_VERSION "3.0.0-SNAPSHOT")
 
 string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" ARROW_BASE_VERSION "${ARROW_VERSION}")
 
@@ -64,35 +100,21 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake_mo
 include(CMakePackageConfigHelpers)
 include(CMakeParseArguments)
 include(ExternalProject)
-include(FindPkgConfig)
+include(FindPackageHandleStandardArgs)
 
 include(GNUInstallDirs)
-
-cmake_policy(SET CMP0025 NEW)
-
-# Compatibility with CMake 3.1
-if(POLICY CMP0054)
-  # http://www.cmake.org/cmake/help/v3.1/policy/CMP0054.html
-  cmake_policy(SET CMP0054 NEW)
-endif()
-
-if(POLICY CMP0068)
-  # https://cmake.org/cmake/help/v3.9/policy/CMP0068.html
-  cmake_policy(SET CMP0068 NEW)
-endif()
-
-# don't ignore <PackageName>_ROOT variables in find_package
-if(POLICY CMP0074)
-  # https://cmake.org/cmake/help/v3.12/policy/CMP0074.html
-  cmake_policy(SET CMP0074 NEW)
-endif()
 
 set(BUILD_SUPPORT_DIR "${CMAKE_SOURCE_DIR}/build-support")
 
 set(ARROW_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
 set(ARROW_DOC_DIR "share/doc/${PROJECT_NAME}")
 
-set(ARROW_LLVM_VERSIONS "8" "7")
+set(ARROW_LLVM_VERSIONS
+    "11"
+    "10"
+    "9"
+    "8"
+    "7")
 list(GET ARROW_LLVM_VERSIONS 0 ARROW_LLVM_VERSION_PRIMARY)
 string(REGEX
        REPLACE "^([0-9]+)(\\..+)?" "\\1" ARROW_LLVM_VERSION_PRIMARY_MAJOR
@@ -129,6 +151,13 @@ if(APPLE)
                       OUTPUT_STRIP_TRAILING_WHITESPACE)
     endif()
   endif()
+endif()
+
+if(WIN32 AND NOT MINGW)
+  # This is used to handle builds using e.g. clang in an MSVC setting.
+  set(MSVC_TOOLCHAIN TRUE)
+else()
+  set(MSVC_TOOLCHAIN FALSE)
 endif()
 
 find_package(ClangTools)
@@ -298,9 +327,14 @@ if(ARROW_BUILD_BENCHMARKS
    OR ARROW_BUILD_INTEGRATION
    OR ARROW_FUZZING)
   set(ARROW_JSON ON)
+  set(ARROW_TESTING ON)
 endif()
 
-if(ARROW_CUDA OR ARROW_FLIGHT OR ARROW_PARQUET OR ARROW_BUILD_TESTS)
+if(ARROW_CUDA
+   OR ARROW_FLIGHT
+   OR ARROW_PARQUET
+   OR ARROW_BUILD_TESTS
+   OR ARROW_BUILD_BENCHMARKS)
   set(ARROW_IPC ON)
 endif()
 
@@ -322,7 +356,7 @@ if(ARROW_PYTHON)
   set(ARROW_JSON ON)
 endif()
 
-if(MSVC)
+if(MSVC_TOOLCHAIN)
   # ORC doesn't build on windows
   set(ARROW_ORC OFF)
   # Plasma using glog is not fully tested on windows.
@@ -336,6 +370,12 @@ endif()
 if(ARROW_ORC)
   set(ARROW_WITH_LZ4 ON)
   set(ARROW_WITH_SNAPPY ON)
+  set(ARROW_WITH_ZLIB ON)
+  set(ARROW_WITH_ZSTD ON)
+endif()
+
+# datetime code used by iOS requires zlib support
+if(IOS)
   set(ARROW_WITH_ZLIB ON)
 endif()
 
@@ -381,6 +421,10 @@ endif()
 
 if(ARROW_TEST_MEMCHECK)
   add_definitions(-DARROW_VALGRIND)
+endif()
+
+if(ARROW_USE_UBSAN)
+  add_definitions(-DARROW_UBSAN)
 endif()
 
 #
@@ -462,7 +506,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ARROW_CXXFLAGS}")
 
 # For any C code, use the same flags. These flags don't contain
 # C++ specific flags.
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${ARROW_CXX_FLAGS} ${CXX_COMMON_FLAGS}")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${CXX_COMMON_FLAGS} ${ARROW_CXXFLAGS}")
 
 # Remove --std=c++11 to avoid errors from C compilers
 string(REPLACE "-std=c++11" "" CMAKE_C_FLAGS ${CMAKE_C_FLAGS})
@@ -497,16 +541,6 @@ include_directories(src/generated)
 #
 # For generate_export_header() and add_compiler_export_flags().
 include(GenerateExportHeader)
-
-# Adapted from Apache Kudu: https://github.com/apache/kudu/commit/bd549e13743a51013585
-# Honor visibility properties for all target types. See
-# "cmake --help-policy CMP0063" for details.
-#
-# This policy was only added to cmake in version 3.3, so until the cmake in
-# thirdparty is updated, we must check if the policy exists before setting it.
-if(POLICY CMP0063)
-  cmake_policy(SET CMP0063 NEW)
-endif()
 
 if(PARQUET_BUILD_SHARED)
   if(POLICY CMP0063)
@@ -624,11 +658,6 @@ endif()
 # Linker and Dependencies
 #
 
-# TODO: Also rework how these libs work
-set(ARROW_LINK_LIBS)
-set(ARROW_SHARED_INSTALL_INTERFACE_LIBS)
-set(ARROW_STATIC_INSTALL_INTERFACE_LIBS)
-
 # Libraries to link statically with libarrow.so
 set(ARROW_LINK_LIBS)
 set(ARROW_STATIC_LINK_LIBS)
@@ -646,50 +675,75 @@ if(ARROW_WITH_BROTLI)
   set(ARROW_BROTLI_LIBS Brotli::brotlienc Brotli::brotlidec Brotli::brotlicommon)
   list(APPEND ARROW_LINK_LIBS ${ARROW_BROTLI_LIBS})
   list(APPEND ARROW_STATIC_LINK_LIBS ${ARROW_BROTLI_LIBS})
-  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ${ARROW_BROTLI_LIBS})
+  if(Brotli_SOURCE STREQUAL "SYSTEM")
+    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ${ARROW_BROTLI_LIBS})
+  endif()
 endif()
 
 if(ARROW_WITH_BZ2)
   list(APPEND ARROW_STATIC_LINK_LIBS BZip2::BZip2)
-  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS BZip2::BZip2)
+  if(BZip2_SOURCE STREQUAL "SYSTEM")
+    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS BZip2::BZip2)
+  endif()
 endif()
 
 if(ARROW_WITH_LZ4)
   list(APPEND ARROW_STATIC_LINK_LIBS LZ4::lz4)
-  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS LZ4::lz4)
+  if(Lz4_SOURCE STREQUAL "SYSTEM")
+    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS LZ4::lz4)
+  endif()
 endif()
 
 if(ARROW_WITH_SNAPPY)
   list(APPEND ARROW_STATIC_LINK_LIBS Snappy::snappy)
-  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS Snappy::snappy)
+  if(Snappy_SOURCE STREQUAL "SYSTEM")
+    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS Snappy::snappy)
+  endif()
 endif()
 
 if(ARROW_WITH_ZLIB)
   list(APPEND ARROW_STATIC_LINK_LIBS ZLIB::ZLIB)
-  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ZLIB::ZLIB)
+  if(ZLIB_SOURCE STREQUAL "SYSTEM")
+    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ZLIB::ZLIB)
+  endif()
 endif()
 
 if(ARROW_WITH_ZSTD)
-  list(APPEND ARROW_STATIC_LINK_LIBS ZSTD::zstd)
-  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ZSTD::zstd)
+  list(APPEND ARROW_STATIC_LINK_LIBS ${ARROW_ZSTD_LIBZSTD})
+  if(zstd_SOURCE STREQUAL "SYSTEM")
+    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ${ARROW_ZSTD_LIBZSTD})
+  endif()
 endif()
 
 if(ARROW_ORC)
-  list(APPEND ARROW_LINK_LIBS ${ARROW_PROTOBUF_LIBPROTOBUF} orc::liborc)
-  list(APPEND ARROW_STATIC_LINK_LIBS ${ARROW_PROTOBUF_LIBPROTOBUF} orc::liborc)
-  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ${ARROW_PROTOBUF_LIBPROTOBUF}
-              orc::liborc)
+  list(APPEND ARROW_LINK_LIBS orc::liborc ${ARROW_PROTOBUF_LIBPROTOBUF})
+  list(APPEND ARROW_STATIC_LINK_LIBS orc::liborc ${ARROW_PROTOBUF_LIBPROTOBUF})
+  if(ORC_SOURCE STREQUAL "SYSTEM")
+    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS orc::liborc
+                ${ARROW_PROTOBUF_LIBPROTOBUF})
+  endif()
 endif()
 
 if(ARROW_USE_GLOG)
   list(APPEND ARROW_LINK_LIBS glog::glog)
   list(APPEND ARROW_STATIC_LINK_LIBS glog::glog)
-  list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS glog::glog)
+  if(GLOG_SOURCE STREQUAL "SYSTEM")
+    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS glog::glog)
+  endif()
   add_definitions("-DARROW_USE_GLOG")
 endif()
 
 if(ARROW_S3)
   list(APPEND ARROW_LINK_LIBS ${AWSSDK_LINK_LIBRARIES})
+  list(APPEND ARROW_STATIC_LINK_LIBS ${AWSSDK_LINK_LIBRARIES})
+endif()
+
+if(ARROW_WITH_UTF8PROC)
+  list(APPEND ARROW_LINK_LIBS utf8proc::utf8proc)
+  list(APPEND ARROW_STATIC_LINK_LIBS utf8proc::utf8proc)
+  if(utf8proc_SOURCE STREQUAL "SYSTEM")
+    list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS utf8proc::utf8proc)
+  endif()
 endif()
 
 add_custom_target(arrow_dependencies)
@@ -704,6 +758,12 @@ add_dependencies(arrow_test_dependencies toolchain-tests)
 
 if(ARROW_STATIC_LINK_LIBS)
   add_dependencies(arrow_dependencies ${ARROW_STATIC_LINK_LIBS})
+  if(ARROW_ORC)
+    if(NOT MSVC_TOOLCHAIN)
+      list(APPEND ARROW_STATIC_LINK_LIBS ${CMAKE_DL_LIBS})
+      list(APPEND ARROW_STATIC_INSTALL_INTERFACE_LIBS ${CMAKE_DL_LIBS})
+    endif()
+  endif()
 endif()
 
 set(ARROW_SHARED_PRIVATE_LINK_LIBS ${ARROW_STATIC_LINK_LIBS})
@@ -713,7 +773,7 @@ if(((ARROW_FLIGHT OR ARROW_S3) AND (ARROW_BUILD_TESTS OR ARROW_BUILD_INTEGRATION
   list(APPEND ARROW_TEST_LINK_LIBS ${BOOST_FILESYSTEM_LIBRARY} ${BOOST_SYSTEM_LIBRARY})
 endif()
 
-if(NOT MSVC)
+if(NOT MSVC_TOOLCHAIN)
   list(APPEND ARROW_LINK_LIBS ${CMAKE_DL_LIBS})
   list(APPEND ARROW_SHARED_INSTALL_INTERFACE_LIBS ${CMAKE_DL_LIBS})
 endif()
@@ -778,18 +838,23 @@ if(ARROW_BUILD_BENCHMARKS)
   endif()
 endif()
 
-set(ARROW_SYSTEM_LINK_LIBS)
-
 if(ARROW_JEMALLOC)
   add_definitions(-DARROW_JEMALLOC)
   add_definitions(-DARROW_JEMALLOC_INCLUDE_DIR=${JEMALLOC_INCLUDE_DIR})
-  list(APPEND ARROW_SYSTEM_LINK_LIBS jemalloc::jemalloc)
+  list(APPEND ARROW_LINK_LIBS jemalloc::jemalloc)
+  list(APPEND ARROW_STATIC_LINK_LIBS jemalloc::jemalloc)
 endif()
 
 if(ARROW_MIMALLOC)
   add_definitions(-DARROW_MIMALLOC)
-  list(APPEND ARROW_SYSTEM_LINK_LIBS mimalloc::mimalloc)
+  list(APPEND ARROW_LINK_LIBS mimalloc::mimalloc)
+  list(APPEND ARROW_STATIC_LINK_LIBS mimalloc::mimalloc)
 endif()
+
+# ----------------------------------------------------------------------
+# Handle platform-related libraries like -pthread
+
+set(ARROW_SYSTEM_LINK_LIBS)
 
 if(THREADS_FOUND)
   list(APPEND ARROW_SYSTEM_LINK_LIBS Threads::Threads)
@@ -797,7 +862,7 @@ endif()
 
 if(WIN32)
   # Winsock
-  list(APPEND ARROW_SYSTEM_LINK_LIBS "Ws2_32.dll")
+  list(APPEND ARROW_SYSTEM_LINK_LIBS "ws2_32.dll")
 endif()
 
 if(NOT WIN32 AND NOT APPLE)
@@ -845,6 +910,11 @@ install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../LICENSE.txt
               ${CMAKE_CURRENT_SOURCE_DIR}/README.md
         DESTINATION "${ARROW_DOC_DIR}")
 
+#
+# Validate and print out Arrow configuration options
+#
+
+validate_config()
 config_summary_message()
 if(${ARROW_BUILD_CONFIG_SUMMARY_JSON})
   config_summary_json()

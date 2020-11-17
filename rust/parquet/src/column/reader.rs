@@ -190,15 +190,12 @@ impl<T: DataType> ColumnReaderImpl<T> {
                     (self.num_buffered_values - self.num_decoded_values) as usize,
                 );
 
-                // Adjust batch size by taking into account how much space is left in
-                // values slice or levels slices (if available)
-                adjusted_size = min(adjusted_size, values.len() - values_read);
-                if let Some(ref levels) = def_levels {
-                    adjusted_size = min(adjusted_size, levels.len() - levels_read);
-                }
-                if let Some(ref levels) = rep_levels {
-                    adjusted_size = min(adjusted_size, levels.len() - levels_read);
-                }
+                // Adjust batch size by taking into account how much data there
+                // to read. As batch_size is also smaller than value and level
+                // slices (if available), this ensures that available space is not
+                // exceeded.
+                adjusted_size = min(adjusted_size, batch_size - values_read);
+                adjusted_size = min(adjusted_size, batch_size - levels_read);
 
                 adjusted_size
             };
@@ -469,7 +466,7 @@ impl<T: DataType> ColumnReaderImpl<T> {
         let current_decoder = self
             .decoders
             .get_mut(&encoding)
-            .expect(format!("decoder for encoding {} should be set", encoding).as_str());
+            .unwrap_or_else(|| panic!("decoder for encoding {} should be set", encoding));
         current_decoder.get(buffer)
     }
 
@@ -565,7 +562,6 @@ mod tests {
             fn $test_func() {
                 let desc = Rc::new(ColumnDescriptor::new(
                     Rc::new($pty()),
-                    None,
                     $def_level,
                     $rep_level,
                     ColumnPath::new(Vec::new()),
@@ -905,48 +901,38 @@ mod tests {
 
     #[test]
     fn test_read_batch_values_only() {
-        test_read_batch_int32(16, &mut vec![0; 10], None, None); // < batch_size
-        test_read_batch_int32(16, &mut vec![0; 16], None, None); // == batch_size
-        test_read_batch_int32(16, &mut vec![0; 51], None, None); // > batch_size
+        test_read_batch_int32(16, &mut [0; 10], None, None); // < batch_size
+        test_read_batch_int32(16, &mut [0; 16], None, None); // == batch_size
+        test_read_batch_int32(16, &mut [0; 51], None, None); // > batch_size
     }
 
     #[test]
     fn test_read_batch_values_def_levels() {
-        test_read_batch_int32(16, &mut vec![0; 10], Some(&mut vec![0; 10]), None);
-        test_read_batch_int32(16, &mut vec![0; 16], Some(&mut vec![0; 16]), None);
-        test_read_batch_int32(16, &mut vec![0; 51], Some(&mut vec![0; 51]), None);
+        test_read_batch_int32(16, &mut [0; 10], Some(&mut [0; 10]), None);
+        test_read_batch_int32(16, &mut [0; 16], Some(&mut [0; 16]), None);
+        test_read_batch_int32(16, &mut [0; 51], Some(&mut [0; 51]), None);
     }
 
     #[test]
     fn test_read_batch_values_rep_levels() {
-        test_read_batch_int32(16, &mut vec![0; 10], None, Some(&mut vec![0; 10]));
-        test_read_batch_int32(16, &mut vec![0; 16], None, Some(&mut vec![0; 16]));
-        test_read_batch_int32(16, &mut vec![0; 51], None, Some(&mut vec![0; 51]));
+        test_read_batch_int32(16, &mut [0; 10], None, Some(&mut [0; 10]));
+        test_read_batch_int32(16, &mut [0; 16], None, Some(&mut [0; 16]));
+        test_read_batch_int32(16, &mut [0; 51], None, Some(&mut [0; 51]));
     }
 
     #[test]
     fn test_read_batch_different_buf_sizes() {
-        test_read_batch_int32(
-            16,
-            &mut vec![0; 8],
-            Some(&mut vec![0; 9]),
-            Some(&mut vec![0; 7]),
-        );
-        test_read_batch_int32(
-            16,
-            &mut vec![0; 1],
-            Some(&mut vec![0; 9]),
-            Some(&mut vec![0; 3]),
-        );
+        test_read_batch_int32(16, &mut [0; 8], Some(&mut [0; 9]), Some(&mut [0; 7]));
+        test_read_batch_int32(16, &mut [0; 1], Some(&mut [0; 9]), Some(&mut [0; 3]));
     }
 
     #[test]
     fn test_read_batch_values_def_rep_levels() {
         test_read_batch_int32(
             128,
-            &mut vec![0; 128],
-            Some(&mut vec![0; 128]),
-            Some(&mut vec![0; 128]),
+            &mut [0; 128],
+            Some(&mut [0; 128]),
+            Some(&mut [0; 128]),
         );
     }
 
@@ -961,7 +947,6 @@ mod tests {
         let primitive_type = get_test_int32_type();
         let desc = Rc::new(ColumnDescriptor::new(
             Rc::new(primitive_type),
-            None,
             1,
             1,
             ColumnPath::new(Vec::new()),
@@ -1079,7 +1064,6 @@ mod tests {
 
         let desc = Rc::new(ColumnDescriptor::new(
             Rc::new(primitive_type),
-            None,
             max_def_level,
             max_rep_level,
             ColumnPath::new(Vec::new()),

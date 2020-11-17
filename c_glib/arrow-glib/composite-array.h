@@ -47,6 +47,18 @@ GArrowListArray *garrow_list_array_new(GArrowDataType *data_type,
 GArrowDataType *garrow_list_array_get_value_type(GArrowListArray *array);
 GArrowArray *garrow_list_array_get_value(GArrowListArray *array,
                                          gint64 i);
+GARROW_AVAILABLE_IN_2_0
+GArrowArray *garrow_list_array_get_values(GArrowListArray *array);
+GARROW_AVAILABLE_IN_2_0
+gint32 garrow_list_array_get_value_offset(GArrowListArray *array,
+                                          gint64 i);
+GARROW_AVAILABLE_IN_2_0
+gint32 garrow_list_array_get_value_length(GArrowListArray *array,
+                                          gint64 i);
+GARROW_AVAILABLE_IN_2_0
+const gint32 *
+garrow_list_array_get_value_offsets(GArrowListArray *array,
+                                    gint64 *n_offsets);
 
 
 #define GARROW_TYPE_LARGE_LIST_ARRAY (garrow_large_list_array_get_type())
@@ -73,6 +85,18 @@ GArrowDataType *garrow_large_list_array_get_value_type(GArrowLargeListArray *arr
 GARROW_AVAILABLE_IN_0_16
 GArrowArray *garrow_large_list_array_get_value(GArrowLargeListArray *array,
                                                gint64 i);
+GARROW_AVAILABLE_IN_2_0
+GArrowArray *garrow_large_list_array_get_values(GArrowLargeListArray *array);
+GARROW_AVAILABLE_IN_2_0
+gint64 garrow_large_list_array_get_value_offset(GArrowLargeListArray *array,
+                                                gint64 i);
+GARROW_AVAILABLE_IN_2_0
+gint64 garrow_large_list_array_get_value_length(GArrowLargeListArray *array,
+                                                gint64 i);
+GARROW_AVAILABLE_IN_2_0
+const gint64 *
+garrow_large_list_array_get_value_offsets(GArrowLargeListArray *array,
+                                          gint64 *n_offsets);
 
 
 #define GARROW_TYPE_STRUCT_ARRAY (garrow_struct_array_get_type())
@@ -95,10 +119,7 @@ GArrowStructArray *garrow_struct_array_new(GArrowDataType *data_type,
 GArrowArray *garrow_struct_array_get_field(GArrowStructArray *array,
                                            gint i);
 
-#ifndef GARROW_DISABLE_DEPRECATED
-GARROW_DEPRECATED_IN_0_10_FOR(garrow_struct_array_flatten)
 GList *garrow_struct_array_get_fields(GArrowStructArray *array);
-#endif
 
 GARROW_AVAILABLE_IN_0_10
 GList *garrow_struct_array_flatten(GArrowStructArray *array, GError **error);
@@ -210,7 +231,10 @@ GArrowArray *
 garrow_dictionary_array_get_indices(GArrowDictionaryArray *array);
 GArrowArray *
 garrow_dictionary_array_get_dictionary(GArrowDictionaryArray *array);
+#ifndef GARROW_DISABLE_DEPRECATED
+GARROW_DEPRECATED_IN_1_0_FOR(garrow_array_get_value_data_type)
 GArrowDictionaryDataType *
 garrow_dictionary_array_get_dictionary_data_type(GArrowDictionaryArray *array);
+#endif
 
 G_END_DECLS

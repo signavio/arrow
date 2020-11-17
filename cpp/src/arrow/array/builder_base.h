@@ -19,26 +19,21 @@
 
 #include <algorithm>  // IWYU pragma: keep
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <memory>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "arrow/array/array_base.h"
+#include "arrow/array/array_primitive.h"
+#include "arrow/buffer.h"
 #include "arrow/buffer_builder.h"
 #include "arrow/status.h"
 #include "arrow/type.h"
-#include "arrow/type_traits.h"
 #include "arrow/util/macros.h"
-#include "arrow/util/type_traits.h"
 #include "arrow/util/visibility.h"
 
 namespace arrow {
-
-class Array;
-struct ArrayData;
-class MemoryPool;
 
 constexpr int64_t kMinBuilderCapacity = 1 << 5;
 constexpr int64_t kListMaximumElements = std::numeric_limits<int32_t>::max() - 1;
@@ -61,9 +56,11 @@ class ARROW_EXPORT ArrayBuilder {
   /// skip shared pointers and just return a raw pointer
   ArrayBuilder* child(int i) { return children_[i].get(); }
 
+  const std::shared_ptr<ArrayBuilder>& child_builder(int i) const { return children_[i]; }
+
   int num_children() const { return static_cast<int>(children_.size()); }
 
-  int64_t length() const { return length_; }
+  virtual int64_t length() const { return length_; }
   int64_t null_count() const { return null_count_; }
   int64_t capacity() const { return capacity_; }
 
@@ -100,8 +97,24 @@ class ARROW_EXPORT ArrayBuilder {
   /// Reset the builder.
   virtual void Reset();
 
+  /// \brief Append a null value to builder
   virtual Status AppendNull() = 0;
+  /// \brief Append a number of null values to builder
   virtual Status AppendNulls(int64_t length) = 0;
+
+  /// \brief Append a non-null value to builder
+  ///
+  /// The appended value is an implementation detail, but the corresponding
+  /// memory slot is guaranteed to be initialized.
+  /// This method is useful when appending a null value to a parent nested type.
+  virtual Status AppendEmptyValue() = 0;
+
+  /// \brief Append a number of non-null values to builder
+  ///
+  /// The appended values are an implementation detail, but the corresponding
+  /// memory slot is guaranteed to be initialized.
+  /// This method is useful when appending null values to a parent nested type.
+  virtual Status AppendEmptyValues(int64_t length) = 0;
 
   /// For cases where raw data was memcpy'd into the internal buffers, allows us
   /// to advance the length of the builder. It is your responsibility to use
@@ -122,6 +135,13 @@ class ARROW_EXPORT ArrayBuilder {
   /// \param[out] out the finalized Array object
   /// \return Status
   Status Finish(std::shared_ptr<Array>* out);
+
+  /// \brief Return result of builder as an Array object.
+  ///
+  /// The builder is reset except for DictionaryBuilder.
+  ///
+  /// \return The finalized Array object
+  Result<std::shared_ptr<Array>> Finish();
 
   /// \brief Return the type of the built Array
   virtual std::shared_ptr<DataType> type() const = 0;
@@ -204,6 +224,12 @@ class ARROW_EXPORT ArrayBuilder {
 
     return Status::OK();
   }
+
+  // Check for array type
+  Status CheckArrayType(const std::shared_ptr<DataType>& expected_type,
+                        const Array& array, const char* message);
+  Status CheckArrayType(Type::type expected_type, const Array& array,
+                        const char* message);
 
   MemoryPool* pool_;
 

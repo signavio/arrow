@@ -23,6 +23,7 @@
 #include <utility>
 
 #include "arrow/type_fwd.h"
+#include "arrow/util/string_builder.h"
 #include "parquet/platform.h"
 
 // PARQUET-1085
@@ -80,29 +81,31 @@ namespace parquet {
 class ParquetException : public std::exception {
  public:
   PARQUET_NORETURN static void EofException(const std::string& msg = "") {
-    std::stringstream ss;
-    ss << "Unexpected end of stream";
-    if (!msg.empty()) {
-      ss << ": " << msg;
+    static std::string prefix = "Unexpected end of stream";
+    if (msg.empty()) {
+      throw ParquetException(prefix);
     }
-    throw ParquetException(ss.str());
+    throw ParquetException(prefix, ": ", msg);
   }
 
   PARQUET_NORETURN static void NYI(const std::string& msg = "") {
-    std::stringstream ss;
-    ss << "Not yet implemented: " << msg << ".";
-    throw ParquetException(ss.str());
+    throw ParquetException("Not yet implemented: ", msg, ".");
   }
 
-  explicit ParquetException(const char* msg) : msg_(msg) {}
+  template <typename... Args>
+  explicit ParquetException(Args&&... args)
+      : msg_(::arrow::util::StringBuilder(std::forward<Args>(args)...)) {}
 
-  explicit ParquetException(const std::string& msg) : msg_(msg) {}
+  explicit ParquetException(std::string msg) : msg_(std::move(msg)) {}
 
-  explicit ParquetException(const char* msg, std::exception&) : msg_(msg) {}
+  explicit ParquetException(const char* msg, const std::exception&) : msg_(msg) {}
 
-  ~ParquetException() throw() override {}
+  ParquetException(const ParquetException&) = default;
+  ParquetException& operator=(const ParquetException&) = default;
+  ParquetException(ParquetException&&) = default;
+  ParquetException& operator=(ParquetException&&) = default;
 
-  const char* what() const throw() override { return msg_.c_str(); }
+  const char* what() const noexcept override { return msg_.c_str(); }
 
  private:
   std::string msg_;
@@ -122,14 +125,29 @@ class ParquetStatusException : public ParquetException {
 // This class exists for the purpose of detecting an invalid or corrupted file.
 class ParquetInvalidOrCorruptedFileException : public ParquetStatusException {
  public:
-  template <typename... Args>
-  explicit ParquetInvalidOrCorruptedFileException(Args&&... args)
-      : ParquetStatusException(::arrow::Status::Invalid(std::forward<Args>(args)...)) {}
+  ParquetInvalidOrCorruptedFileException(const ParquetInvalidOrCorruptedFileException&) =
+      default;
+
+  template <typename Arg,
+            typename std::enable_if<
+                !std::is_base_of<ParquetInvalidOrCorruptedFileException, Arg>::value,
+                int>::type = 0,
+            typename... Args>
+  explicit ParquetInvalidOrCorruptedFileException(Arg arg, Args&&... args)
+      : ParquetStatusException(::arrow::Status::Invalid(std::forward<Arg>(arg),
+                                                        std::forward<Args>(args)...)) {}
 };
 
 template <typename StatusReturnBlock>
 void ThrowNotOk(StatusReturnBlock&& b) {
   PARQUET_THROW_NOT_OK(b());
 }
+
+#define BEGIN_PARQUET_CATCH_EXCEPTIONS try {
+#define END_PARQUET_CATCH_EXCEPTIONS             \
+  }                                              \
+  catch (const ::parquet::ParquetException& e) { \
+    return ::arrow::Status::IOError(e.what());   \
+  }
 
 }  // namespace parquet

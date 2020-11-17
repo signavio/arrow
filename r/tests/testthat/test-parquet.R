@@ -79,6 +79,15 @@ test_that("write_parquet() handles various use_dictionary= specs", {
   expect_parquet_roundtrip(tab, use_dictionary = TRUE)
   expect_parquet_roundtrip(tab, use_dictionary = c(TRUE, FALSE, TRUE))
   expect_parquet_roundtrip(tab, use_dictionary = c(x1 = TRUE, x2 = TRUE))
+  expect_error(
+    write_parquet(tab, tempfile(), use_dictionary = c(TRUE, FALSE)),
+    "unsupported use_dictionary= specification"
+  )
+  expect_error(
+    write_parquet(tab, tempfile(), use_dictionary = 12),
+    "is.logical(use_dictionary) is not TRUE",
+    fixed = TRUE
+  )
 })
 
 test_that("write_parquet() handles various write_statistics= specs", {
@@ -87,6 +96,19 @@ test_that("write_parquet() handles various write_statistics= specs", {
   expect_parquet_roundtrip(tab, write_statistics = TRUE)
   expect_parquet_roundtrip(tab, write_statistics = c(TRUE, FALSE, TRUE))
   expect_parquet_roundtrip(tab, write_statistics = c(x1 = TRUE, x2 = TRUE))
+})
+
+test_that("write_parquet() can truncate timestamps", {
+  tab <- Table$create(x1 = as.POSIXct("2020/06/03 18:00:00", tz = "UTC"))
+  expect_type_equal(tab$x1, timestamp("us", "UTC"))
+
+  tf <- tempfile()
+  on.exit(unlink(tf))
+
+  write_parquet(tab, tf, coerce_timestamps = "ms", allow_truncated_timestamps = TRUE)
+  new <- read_parquet(tf, as_data_frame = FALSE)
+  expect_type_equal(new$x1, timestamp("ms", "UTC"))
+  expect_equivalent(as.data.frame(tab), as.data.frame(new))
 })
 
 test_that("make_valid_version()", {
@@ -154,4 +176,53 @@ test_that("write_parquet() returns its input", {
   on.exit(unlink(tf))
   df_out <- write_parquet(df, tf)
   expect_equivalent(df, df_out)
+})
+
+test_that("write_parquet() handles version argument", {
+  df <- tibble::tibble(x = 1:5)
+  tf <- tempfile()
+  on.exit(unlink(tf))
+
+  purrr::walk(list("1.0", "2.0", 1.0, 2.0, 1L, 2L), ~ {
+    write_parquet(df, tf, version = .x)
+    expect_identical(read_parquet(tf), df)
+  })
+  purrr::walk(list("3.0", 3.0, 3L, "A"), ~ {
+    expect_error(write_parquet(df, tf, version = .x))
+  })
+})
+
+test_that("ParquetFileWriter raises an error for non-OutputStream sink", {
+  sch = schema(a = float32())
+  # ARROW-9946
+  expect_error(
+    ParquetFileWriter$create(schema = sch, sink = tempfile()),
+    regex = "OutputStream"
+  )
+})
+
+test_that("ParquetFileReader $ReadRowGroup(s) methods", {
+  tab <- Table$create(x = 1:100)
+  tf <- tempfile(); on.exit(unlink(tf))
+  write_parquet(tab, tf, chunk_size = 10)
+
+  reader <- ParquetFileReader$create(tf)
+  expect_true(reader$ReadRowGroup(0) == Table$create(x = 1:10))
+  expect_true(reader$ReadRowGroup(9) == Table$create(x = 91:100))
+  expect_error(reader$ReadRowGroup(-1), "Some index in row_group_indices")
+  expect_error(reader$ReadRowGroup(111), "Some index in row_group_indices")
+  expect_error(reader$ReadRowGroup(c(1, 2)))
+  expect_error(reader$ReadRowGroup("a"))
+
+  expect_true(reader$ReadRowGroups(c(0, 1)) == Table$create(x = 1:20))
+  expect_error(reader$ReadRowGroups(c(0, 1, -2))) # although it gives a weird error
+  expect_error(reader$ReadRowGroups(c(0, 1, 31))) # ^^
+  expect_error(reader$ReadRowGroups(c("a", "b")))
+
+  ## -- with column_indices
+  expect_true(reader$ReadRowGroup(0, 0) == Table$create(x = 1:10))
+  expect_error(reader$ReadRowGroup(0, 1))
+
+  expect_true(reader$ReadRowGroups(c(0, 1), 0) == Table$create(x = 1:20))
+  expect_error(reader$ReadRowGroups(c(0, 1), 1))
 })

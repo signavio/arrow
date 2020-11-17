@@ -98,13 +98,14 @@
 #include "arrow/memory_pool.h"
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
+#include "arrow/util/bit_run_reader.h"
 #include "arrow/util/bit_util.h"
+#include "arrow/util/bitmap_visit.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/make_unique.h"
 #include "arrow/util/variant.h"
 #include "arrow/visitor_inline.h"
-
 #include "parquet/properties.h"
 
 namespace parquet {
@@ -463,8 +464,8 @@ class NullableNode {
 
   void SetRepLevelIfNull(int16_t rep_level) { rep_level_if_null_ = rep_level; }
 
-  ::arrow::internal::BitmapReader MakeReader(const ElementRange& range) {
-    return ::arrow::internal::BitmapReader(null_bitmap_, entry_offset_ + range.start,
+  ::arrow::internal::BitRunReader MakeReader(const ElementRange& range) {
+    return ::arrow::internal::BitRunReader(null_bitmap_, entry_offset_ + range.start,
                                            range.Size());
   }
 
@@ -477,25 +478,20 @@ class NullableNode {
       valid_bits_reader_ = MakeReader(*range);
     }
     child_range->start = range->start;
-    while (!range->Empty() && !valid_bits_reader_.IsSet()) {
-      ++range->start;
-      valid_bits_reader_.Next();
-    }
-    int64_t null_count = range->start - child_range->start;
-    if (null_count > 0) {
-      RETURN_IF_ERROR(FillRepLevels(null_count, rep_level_if_null_, context));
-      RETURN_IF_ERROR(context->AppendDefLevels(null_count, def_level_if_null_));
+    ::arrow::internal::BitRun run = valid_bits_reader_.NextRun();
+    if (!run.set) {
+      range->start += run.length;
+      RETURN_IF_ERROR(FillRepLevels(run.length, rep_level_if_null_, context));
+      RETURN_IF_ERROR(context->AppendDefLevels(run.length, def_level_if_null_));
+      run = valid_bits_reader_.NextRun();
     }
     if (range->Empty()) {
       new_range_ = true;
       return kDone;
     }
     child_range->end = child_range->start = range->start;
+    child_range->end += run.length;
 
-    while (child_range->end != range->end && valid_bits_reader_.IsSet()) {
-      ++child_range->end;
-      valid_bits_reader_.Next();
-    }
     DCHECK(!child_range->Empty());
     range->start += child_range->Size();
     new_range_ = false;
@@ -504,7 +500,7 @@ class NullableNode {
 
   const uint8_t* null_bitmap_;
   int64_t entry_offset_;
-  ::arrow::internal::BitmapReader valid_bits_reader_;
+  ::arrow::internal::BitRunReader valid_bits_reader_;
   int16_t def_level_if_null_;
   int16_t rep_level_if_null_;
 
@@ -528,7 +524,8 @@ struct PathInfo {
   std::shared_ptr<Array> primitive_array;
   int16_t max_def_level = 0;
   int16_t max_rep_level = 0;
-  bool has_dictionary;
+  bool has_dictionary = false;
+  bool leaf_is_nullable = false;
 };
 
 /// Contains logic for writing a single leaf node to parquet.
@@ -544,6 +541,7 @@ Status WritePath(ElementRange root_range, PathInfo* path_info,
   std::vector<ElementRange> stack(path_info->path.size());
   MultipathLevelBuilderResult builder_result;
   builder_result.leaf_array = path_info->primitive_array;
+  builder_result.leaf_is_nullable = path_info->leaf_is_nullable;
 
   if (path_info->max_def_level == 0) {
     // This case only occurs when there are no nullable or repeated
@@ -710,6 +708,7 @@ class PathBuilder {
   explicit PathBuilder(bool start_nullable) : nullable_in_parent_(start_nullable) {}
   template <typename T>
   void AddTerminalInfo(const T& array) {
+    info_.leaf_is_nullable = nullable_in_parent_;
     if (nullable_in_parent_) {
       info_.max_def_level++;
     }
@@ -757,7 +756,7 @@ class PathBuilder {
   Status Visit(const ::arrow::DictionaryArray& array) {
     // Only currently handle DictionaryArray where the dictionary is a
     // primitive type
-    if (array.dict_type()->value_type()->num_children() > 0) {
+    if (array.dict_type()->value_type()->num_fields() > 0) {
       return Status::NotImplemented(
           "Writing DictionaryArray with nested dictionary "
           "type not yet supported");
@@ -806,7 +805,7 @@ class PathBuilder {
     MaybeAddNullable(array);
     PathInfo info_backup = info_;
     for (int x = 0; x < array.num_fields(); x++) {
-      nullable_in_parent_ = array.type()->child(x)->nullable();
+      nullable_in_parent_ = array.type()->field(x)->nullable();
       RETURN_NOT_OK(VisitInline(*array.field(x)));
       info_ = info_backup;
     }
@@ -816,13 +815,17 @@ class PathBuilder {
   Status Visit(const ::arrow::FixedSizeListArray& array) {
     MaybeAddNullable(array);
     int32_t list_size = array.list_type()->list_size();
-    if (list_size == 0) {
-      info_.max_def_level++;
-    }
+    // Technically we could encode fixed size lists with two level encodings
+    // but since we always use 3 level encoding we increment def levels as
+    // well.
+    info_.max_def_level++;
     info_.max_rep_level++;
     info_.path.push_back(FixedSizeListNode(FixedSizedRangeSelector{list_size},
                                            info_.max_rep_level, info_.max_def_level));
     nullable_in_parent_ = array.list_type()->value_field()->nullable();
+    if (array.offset() > 0) {
+      return VisitInline(*array.values()->Slice(array.value_offset(0)));
+    }
     return VisitInline(*array.values());
   }
 

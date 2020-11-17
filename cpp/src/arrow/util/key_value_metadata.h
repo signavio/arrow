@@ -43,15 +43,21 @@ class ARROW_EXPORT KeyValueMetadata {
   void Append(const std::string& key, const std::string& value);
 
   Result<std::string> Get(const std::string& key) const;
-  Status Delete(const std::string& key);
-  Status Set(const std::string& key, const std::string& value);
   bool Contains(const std::string& key) const;
+  // Note that deleting may invalidate known indices
+  Status Delete(const std::string& key);
+  Status Delete(int64_t index);
+  Status DeleteMany(std::vector<int64_t> indices);
+  Status Set(const std::string& key, const std::string& value);
 
   void reserve(int64_t n);
-  int64_t size() const;
 
+  int64_t size() const;
   const std::string& key(int64_t i) const;
   const std::string& value(int64_t i) const;
+  const std::vector<std::string>& keys() const { return keys_; }
+  const std::vector<std::string>& values() const { return values_; }
+
   std::vector<std::pair<std::string, std::string>> sorted_pairs() const;
 
   /// \brief Perform linear search for key, returning -1 if not found

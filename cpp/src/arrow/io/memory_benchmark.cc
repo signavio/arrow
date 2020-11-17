@@ -22,8 +22,7 @@
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/util.h"
 #include "arrow/util/cpu_info.h"
-#include "arrow/util/neon_util.h"
-#include "arrow/util/sse_util.h"
+#include "arrow/util/simd.h"
 
 #include "benchmark/benchmark.h"
 
@@ -45,7 +44,7 @@ using BufferPtr = std::shared_ptr<Buffer>;
 
 #ifdef ARROW_HAVE_SSE4_2
 
-#ifdef ARROW_AVX512
+#ifdef ARROW_HAVE_AVX512
 
 using VectorType = __m512i;
 #define VectorSet _mm512_set1_epi32
@@ -59,7 +58,7 @@ using VectorType = __m512i;
 
 #else
 
-#ifdef ARROW_AVX2
+#ifdef ARROW_HAVE_AVX2
 
 using VectorType = __m256i;
 #define VectorSet _mm256_set1_epi32
@@ -71,7 +70,7 @@ using VectorType = __m256i;
   asm volatile("vmovntdqa %[src], %[dst]" : [ dst ] "=v"(DST) : [ src ] "m"(SRC) :)
 #define VectorStreamWrite _mm256_stream_si256
 
-#else  // ARROW_AVX2 not set
+#else  // ARROW_HAVE_AVX2 not set
 
 using VectorType = __m128i;
 #define VectorSet _mm_set1_epi32
@@ -83,8 +82,8 @@ using VectorType = __m128i;
   asm volatile("movntdqa %[src], %[dst]" : [ dst ] "=x"(DST) : [ src ] "m"(SRC) :)
 #define VectorStreamWrite _mm_stream_si128
 
-#endif  // ARROW_AVX2
-#endif  // ARROW_AVX512
+#endif  // ARROW_HAVE_AVX2
+#endif  // ARROW_HAVE_AVX512
 
 static void Read(void* src, void* dst, size_t size) {
   const auto simd = static_cast<VectorType*>(src);
@@ -295,12 +294,12 @@ static void ParallelMemoryCopy(benchmark::State& state) {  // NOLINT non-const r
   const int64_t buffer_size = kMemoryPerCore;
 
   auto src = *AllocateBuffer(buffer_size);
-  auto dst = *AllocateBuffer(buffer_size);
+  std::shared_ptr<Buffer> dst = *AllocateBuffer(buffer_size);
 
   random_bytes(buffer_size, 0, src->mutable_data());
 
   while (state.KeepRunning()) {
-    io::FixedSizeBufferWriter writer(std::move(dst));
+    io::FixedSizeBufferWriter writer(dst);
     writer.set_memcopy_threads(static_cast<int>(n_threads));
     ABORT_NOT_OK(writer.Write(src->data(), src->size()));
   }

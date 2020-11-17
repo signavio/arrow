@@ -17,8 +17,6 @@
 
 #include "arrow/dataset/dataset.h"
 
-#include <tuple>
-
 #include "arrow/dataset/dataset_internal.h"
 #include "arrow/dataset/discovery.h"
 #include "arrow/dataset/partition.h"
@@ -44,8 +42,7 @@ TEST_F(TestInMemoryFragment, Scan) {
   auto reader = ConstantArrayGenerator::Repeat(kNumberBatches, batch);
 
   // Creates a InMemoryFragment of the same repeated batch.
-  auto fragment =
-      InMemoryFragment({static_cast<size_t>(kNumberBatches), batch}, options_);
+  InMemoryFragment fragment({static_cast<size_t>(kNumberBatches), batch});
 
   AssertFragmentEquals(reader.get(), &fragment);
 }
@@ -214,6 +211,7 @@ TEST(TestProjector, CheckProjectable) {
   auto i8_req = field("i8", int8(), false);
   auto u16_req = field("u16", uint16(), false);
   auto str_req = field("str", utf8(), false);
+  auto str_nil = field("str", null());
 
   // trivial
   Assert({}).ProjectableTo({});
@@ -238,6 +236,8 @@ TEST(TestProjector, CheckProjectable) {
   Assert({i8}).NotProjectableTo({i8_req},
                                 "not nullable but is not required in origin schema");
   Assert({i8_req}).ProjectableTo({i8});
+  Assert({str_nil}).ProjectableTo({str});
+  Assert({str_nil}).NotProjectableTo({str_req});
 
   // change field type
   Assert({i8}).NotProjectableTo({field("i8", utf8())},
@@ -260,15 +260,18 @@ TEST(TestProjector, MismatchedType) {
 TEST(TestProjector, AugmentWithNull) {
   constexpr int64_t kBatchSize = 1024;
 
-  auto from_schema = schema({field("f64", float64()), field("b", boolean())});
+  auto from_schema =
+      schema({field("f64", float64()), field("b", boolean()), field("str", null())});
   auto batch = ConstantArrayGenerator::Zeroes(kBatchSize, from_schema);
-  auto to_schema = schema({field("i32", int32()), field("f64", float64())});
+  auto to_schema =
+      schema({field("i32", int32()), field("f64", float64()), field("str", utf8())});
 
   RecordBatchProjector projector(to_schema);
 
   ASSERT_OK_AND_ASSIGN(auto null_i32, MakeArrayOfNull(int32(), batch->num_rows()));
-  auto expected_batch =
-      RecordBatch::Make(to_schema, batch->num_rows(), {null_i32, batch->column(0)});
+  ASSERT_OK_AND_ASSIGN(auto null_str, MakeArrayOfNull(utf8(), batch->num_rows()));
+  auto expected_batch = RecordBatch::Make(to_schema, batch->num_rows(),
+                                          {null_i32, batch->column(0), null_str});
 
   ASSERT_OK_AND_ASSIGN(auto reconciled_batch, projector.Project(*batch));
   AssertBatchesEqual(*expected_batch, *reconciled_batch);
@@ -388,7 +391,7 @@ class TestEndToEnd : public TestUnionDataset {
 
     auto mock_fs = std::make_shared<fs::internal::MockFileSystem>(fs::kNoTime);
     for (const auto& f : files) {
-      ARROW_EXPECT_OK(mock_fs->CreateFile(f.first, f.second, /* recursive */ true));
+      ARROW_EXPECT_OK(mock_fs->CreateFile(f.first, f.second, /*recursive=*/true));
     }
 
     fs_ = mock_fs;
@@ -432,10 +435,10 @@ TEST_F(TestEndToEnd, EndToEndSingleDataset) {
   // FileSystemFactoryOptions configuration class. See the docstring for more
   // information.
   FileSystemFactoryOptions options;
-  options.ignore_prefixes = {"."};
+  options.selector_ignore_prefixes = {"."};
 
   // Partitions expressions can be discovered for Dataset and Fragments.
-  // This metadata is then used in conjuction with the query filter to apply
+  // This metadata is then used in conjunction with the query filter to apply
   // the pushdown predicate optimization.
   //
   // The DirectoryPartitioning is a partitioning where the path is split with
@@ -509,13 +512,10 @@ TEST_F(TestEndToEnd, EndToEndSingleDataset) {
   // In the simplest case, consumption is simply conversion to a Table.
   ASSERT_OK_AND_ASSIGN(auto table, scanner->ToTable());
 
-  using row_type = std::tuple<double, std::string, util::optional<std::string>>;
-  std::vector<row_type> rows{
-      row_type{152.25, "3", "CA"},
-      row_type{273.5, "3", "US"},
-  };
-  std::shared_ptr<Table> expected;
-  ASSERT_OK(stl::TableFromTupleRange(default_memory_pool(), rows, columns, &expected));
+  auto expected = TableFromJSON(scanner->schema(), {R"([
+    {"sales": 152.25, "model": "3", "country": "CA"},
+    {"sales": 273.5, "model": "3", "country": "US"}
+  ])"});
   AssertTablesEqual(*expected, *table, false, true);
 }
 
@@ -744,7 +744,7 @@ TEST_F(TestSchemaUnification, SelectPartitionColumnsFilterPhysicalColumn) {
 }
 
 TEST_F(TestSchemaUnification, SelectMixedColumnsAndFilter) {
-  // Selects mix of phyical/virtual with a different order and uses a filter on
+  // Selects mix of physical/virtual with a different order and uses a filter on
   // a physical column not selected.
   ASSERT_OK_AND_ASSIGN(auto scan_builder, dataset_->NewScan());
   ASSERT_OK(scan_builder->Filter("phy_2"_ >= 212));
@@ -761,10 +761,11 @@ TEST_F(TestSchemaUnification, SelectMixedColumnsAndFilter) {
 TEST(TestDictPartitionColumn, SelectPartitionColumnFilterPhysicalColumn) {
   auto partition_field = field("part", dictionary(int32(), utf8()));
   auto path = "/dataset/part=one/data.json";
+  auto dictionary = ArrayFromJSON(utf8(), R"(["one"])");
 
   auto mock_fs = std::make_shared<fs::internal::MockFileSystem>(fs::kNoTime);
   ARROW_EXPECT_OK(mock_fs->CreateFile(path, R"([ {"phy_1": 111, "phy_2": 211} ])",
-                                      /* recursive */ true));
+                                      /*recursive=*/true));
 
   auto physical_schema = SchemaFromNames({"phy_1", "phy_2"});
   auto format = std::make_shared<JSONRecordBatchFileFormat>(
@@ -772,7 +773,8 @@ TEST(TestDictPartitionColumn, SelectPartitionColumnFilterPhysicalColumn) {
 
   FileSystemFactoryOptions options;
   options.partition_base_dir = "/dataset";
-  options.partitioning = std::make_shared<HivePartitioning>(schema({partition_field}));
+  options.partitioning = std::make_shared<HivePartitioning>(schema({partition_field}),
+                                                            ArrayVector{dictionary});
 
   ASSERT_OK_AND_ASSIGN(auto factory,
                        FileSystemDatasetFactory::Make(mock_fs, {path}, format, options));

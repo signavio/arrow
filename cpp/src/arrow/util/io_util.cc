@@ -41,15 +41,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>  // IWYU pragma: keep
 
-// Defines that don't exist in MinGW
-#if defined(__MINGW32__)
-#define ARROW_WRITE_SHMODE S_IRUSR | S_IWUSR
-#elif defined(_MSC_VER)  // Visual Studio
-
-#else  // gcc / clang on POSIX platforms
-#define ARROW_WRITE_SHMODE S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH
-#endif
-
 // ----------------------------------------------------------------------
 // file compatibility stuff
 
@@ -837,8 +828,19 @@ Result<int> FileOpenReadable(const PlatformFilename& file_name) {
   int fd, errno_actual;
 #if defined(_WIN32)
   SetLastError(0);
-  errno_actual = _wsopen_s(&fd, file_name.ToNative().c_str(),
-                           _O_RDONLY | _O_BINARY | _O_NOINHERIT, _SH_DENYNO, _S_IREAD);
+  HANDLE file_handle = CreateFileW(file_name.ToNative().c_str(), GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+  DWORD last_error = GetLastError();
+  if (last_error == ERROR_SUCCESS) {
+    errno_actual = 0;
+    fd = _open_osfhandle(reinterpret_cast<intptr_t>(file_handle),
+                         _O_RDONLY | _O_BINARY | _O_NOINHERIT);
+  } else {
+    return IOErrorFromWinError(last_error, "Failed to open local file '",
+                               file_name.ToString(), "'");
+  }
 #else
   fd = open(file_name.ToNative().c_str(), O_RDONLY);
   errno_actual = errno;
@@ -868,23 +870,38 @@ Result<int> FileOpenWritable(const PlatformFilename& file_name, bool write_only,
 #if defined(_WIN32)
   SetLastError(0);
   int oflag = _O_CREAT | _O_BINARY | _O_NOINHERIT;
-  int pmode = _S_IREAD | _S_IWRITE;
+  DWORD desired_access = GENERIC_WRITE;
+  DWORD share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+  DWORD creation_disposition = OPEN_ALWAYS;
+
+  if (append) {
+    oflag |= _O_APPEND;
+  }
 
   if (truncate) {
     oflag |= _O_TRUNC;
-  }
-  if (append) {
-    oflag |= _O_APPEND;
+    creation_disposition = CREATE_ALWAYS;
   }
 
   if (write_only) {
     oflag |= _O_WRONLY;
   } else {
     oflag |= _O_RDWR;
+    desired_access |= GENERIC_READ;
   }
 
-  errno_actual = _wsopen_s(&fd, file_name.ToNative().c_str(), oflag, _SH_DENYNO, pmode);
+  HANDLE file_handle =
+      CreateFileW(file_name.ToNative().c_str(), desired_access, share_mode, NULL,
+                  creation_disposition, FILE_ATTRIBUTE_NORMAL, NULL);
 
+  DWORD last_error = GetLastError();
+  if (last_error == ERROR_SUCCESS || last_error == ERROR_ALREADY_EXISTS) {
+    errno_actual = 0;
+    fd = _open_osfhandle(reinterpret_cast<intptr_t>(file_handle), oflag);
+  } else {
+    return IOErrorFromWinError(last_error, "Failed to open local file '",
+                               file_name.ToString(), "'");
+  }
 #else
   int oflag = O_CREAT;
 
@@ -901,7 +918,7 @@ Result<int> FileOpenWritable(const PlatformFilename& file_name, bool write_only,
     oflag |= O_RDWR;
   }
 
-  fd = open(file_name.ToNative().c_str(), oflag, ARROW_WRITE_SHMODE);
+  fd = open(file_name.ToNative().c_str(), oflag, 0666);
   errno_actual = errno;
 #endif
 
@@ -951,6 +968,32 @@ static Status StatusFromMmapErrno(const char* prefix) {
   errno = __map_mman_error(GetLastError(), EPERM);
 #endif
   return IOErrorFromErrno(errno, prefix);
+}
+
+namespace {
+
+int64_t GetPageSizeInternal() {
+#if defined(__APPLE__)
+  return getpagesize();
+#elif defined(_WIN32)
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  return si.dwPageSize;
+#else
+  errno = 0;
+  const auto ret = sysconf(_SC_PAGESIZE);
+  if (ret == -1) {
+    ARROW_LOG(FATAL) << "sysconf(_SC_PAGESIZE) failed: " << ErrnoMessage(errno);
+  }
+  return static_cast<int64_t>(ret);
+#endif
+}
+
+}  // namespace
+
+int64_t GetPageSize() {
+  static const int64_t kPageSize = GetPageSizeInternal();  // cache it
+  return kPageSize;
 }
 
 //
@@ -1017,6 +1060,65 @@ Status MemoryMapRemap(void* addr, size_t old_size, size_t new_size, int fildes,
   }
   return Status::OK();
 #endif
+#endif
+}
+
+Status MemoryAdviseWillNeed(const std::vector<MemoryRegion>& regions) {
+  const auto page_size = static_cast<size_t>(GetPageSize());
+  DCHECK_GT(page_size, 0);
+  const size_t page_mask = ~(page_size - 1);
+  DCHECK_EQ(page_mask & page_size, page_size);
+
+  auto align_region = [=](const MemoryRegion& region) -> MemoryRegion {
+    const auto addr = reinterpret_cast<uintptr_t>(region.addr);
+    const auto aligned_addr = addr & page_mask;
+    DCHECK_LT(addr - aligned_addr, page_size);
+    return {reinterpret_cast<void*>(aligned_addr),
+            region.size + static_cast<size_t>(addr - aligned_addr)};
+  };
+
+#ifdef _WIN32
+  // PrefetchVirtualMemory() is available on Windows 8 or later
+  struct PrefetchEntry {  // Like WIN32_MEMORY_RANGE_ENTRY
+    void* VirtualAddress;
+    size_t NumberOfBytes;
+
+    PrefetchEntry(const MemoryRegion& region)  // NOLINT runtime/explicit
+        : VirtualAddress(region.addr), NumberOfBytes(region.size) {}
+  };
+  using PrefetchVirtualMemoryFunc = BOOL (*)(HANDLE, ULONG_PTR, PrefetchEntry*, ULONG);
+  static const auto prefetch_virtual_memory = reinterpret_cast<PrefetchVirtualMemoryFunc>(
+      GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory"));
+  if (prefetch_virtual_memory != nullptr) {
+    std::vector<PrefetchEntry> entries;
+    entries.reserve(regions.size());
+    for (const auto& region : regions) {
+      if (region.size != 0) {
+        entries.emplace_back(align_region(region));
+      }
+    }
+    if (!entries.empty() &&
+        !prefetch_virtual_memory(GetCurrentProcess(),
+                                 static_cast<ULONG_PTR>(entries.size()), entries.data(),
+                                 0)) {
+      return IOErrorFromWinError(GetLastError(), "PrefetchVirtualMemory failed");
+    }
+  }
+  return Status::OK();
+#else
+  for (const auto& region : regions) {
+    if (region.size != 0) {
+      const auto aligned = align_region(region);
+      int err = posix_madvise(aligned.addr, aligned.size, POSIX_MADV_WILLNEED);
+      // EBADF can be returned on Linux in the following cases:
+      // - the kernel version is older than 3.9
+      // - the kernel was compiled with CONFIG_SWAP disabled (ARROW-9577)
+      if (err != 0 && err != EBADF) {
+        return IOErrorFromErrno(err, "posix_madvise failed");
+      }
+    }
+  }
+  return Status::OK();
 #endif
 }
 
@@ -1365,14 +1467,8 @@ std::vector<NativePathString> GetPlatformTemporaryDirs() {
 
 std::string MakeRandomName(int num_chars) {
   static const std::string chars = "0123456789abcdefghijklmnopqrstuvwxyz";
-#ifdef ARROW_VALGRIND
-  // Valgrind can crash, hang or enter an infinite loop on std::random_device,
-  // use a PRNG instead.
-  static std::random_device::result_type seed = 42;
-  std::default_random_engine gen(seed++);
-#else
-  std::random_device gen;
-#endif
+  std::default_random_engine gen(
+      static_cast<std::default_random_engine::result_type>(GetRandomSeed()));
   std::uniform_int_distribution<int> dist(0, static_cast<int>(chars.length() - 1));
 
   std::string s;
@@ -1382,6 +1478,7 @@ std::string MakeRandomName(int num_chars) {
   }
   return s;
 }
+
 }  // namespace
 
 Result<std::unique_ptr<TemporaryDir>> TemporaryDir::Make(const std::string& prefix) {
@@ -1489,6 +1586,35 @@ Result<SignalHandler> SetSignalHandler(int signum, const SignalHandler& handler)
   return SignalHandler(cb);
 #endif
   return Status::OK();
+}
+
+namespace {
+
+std::mt19937_64 GetSeedGenerator() {
+  // Initialize Mersenne Twister PRNG with a true random seed.
+#ifdef ARROW_VALGRIND
+  // Valgrind can crash, hang or enter an infinite loop on std::random_device,
+  // use a crude initializer instead.
+  // Make sure to mix in process id to avoid clashes when parallel testing.
+  const uint8_t dummy = 0;
+  ARROW_UNUSED(dummy);
+  std::mt19937_64 seed_gen(reinterpret_cast<uintptr_t>(&dummy) ^
+                           static_cast<uintptr_t>(getpid()));
+#else
+  std::random_device true_random;
+  std::mt19937_64 seed_gen(static_cast<uint64_t>(true_random()) ^
+                           (static_cast<uint64_t>(true_random()) << 32));
+#endif
+  return seed_gen;
+}
+
+}  // namespace
+
+int64_t GetRandomSeed() {
+  // The process-global seed generator to aims to avoid calling std::random_device
+  // unless truly necessary (it can block on some systems, see ARROW-10287).
+  static auto seed_gen = GetSeedGenerator();
+  return static_cast<int64_t>(seed_gen());
 }
 
 }  // namespace internal

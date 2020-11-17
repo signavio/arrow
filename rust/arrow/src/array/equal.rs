@@ -18,6 +18,10 @@
 use super::*;
 use crate::datatypes::*;
 use crate::util::bit_util;
+use array::{
+    Array, BinaryOffsetSizeTrait, GenericBinaryArray, GenericListArray,
+    GenericStringArray, ListArrayOps, OffsetSizeTrait, StringOffsetSizeTrait,
+};
 use hex::FromHex;
 use serde_json::value::Value::{Null as JNull, Object, String as JString};
 use serde_json::Value;
@@ -39,9 +43,13 @@ pub trait ArrayEqual {
 }
 
 impl<T: ArrowPrimitiveType> ArrayEqual for PrimitiveArray<T> {
-    default fn equals(&self, other: &dyn Array) -> bool {
+    fn equals(&self, other: &dyn Array) -> bool {
         if !base_equal(&self.data(), &other.data()) {
             return false;
+        }
+
+        if T::DATA_TYPE == DataType::Boolean {
+            return bool_equal(self, other);
         }
 
         let value_buf = self.data_ref().buffers()[0].clone();
@@ -78,7 +86,7 @@ impl<T: ArrowPrimitiveType> ArrayEqual for PrimitiveArray<T> {
         true
     }
 
-    default fn range_equals(
+    fn range_equals(
         &self,
         other: &dyn Array,
         start_idx: usize,
@@ -102,28 +110,20 @@ impl<T: ArrowPrimitiveType> ArrayEqual for PrimitiveArray<T> {
     }
 }
 
-impl ArrayEqual for BooleanArray {
-    fn equals(&self, other: &dyn Array) -> bool {
-        if !base_equal(&self.data(), &other.data()) {
+fn bool_equal(lhs: &Array, rhs: &Array) -> bool {
+    let values = lhs.data_ref().buffers()[0].data();
+    let other_values = rhs.data_ref().buffers()[0].data();
+
+    // TODO: we can do this more efficiently if all values are not-null
+    for i in 0..lhs.len() {
+        if lhs.is_valid(i)
+            && bit_util::get_bit(values, i + lhs.offset())
+                != bit_util::get_bit(other_values, i + rhs.offset())
+        {
             return false;
         }
-
-        let values = self.data_ref().buffers()[0].data();
-        let other_values = other.data_ref().buffers()[0].data();
-
-        // TODO: we can do this more efficiently if all values are not-null
-        for i in 0..self.len() {
-            if self.is_valid(i) {
-                if bit_util::get_bit(values, i + self.offset())
-                    != bit_util::get_bit(other_values, i + other.offset())
-                {
-                    return false;
-                }
-            }
-        }
-
-        true
     }
+    true
 }
 
 impl<T: ArrowNumericType> PartialEq for PrimitiveArray<T> {
@@ -138,19 +138,34 @@ impl PartialEq for BooleanArray {
     }
 }
 
-impl PartialEq for StringArray {
+impl<OffsetSize: StringOffsetSizeTrait> PartialEq for GenericStringArray<OffsetSize> {
     fn eq(&self, other: &Self) -> bool {
         self.equals(other)
     }
 }
 
-impl ArrayEqual for ListArray {
+impl<OffsetSize: BinaryOffsetSizeTrait> PartialEq for GenericBinaryArray<OffsetSize> {
+    fn eq(&self, other: &Self) -> bool {
+        self.equals(other)
+    }
+}
+
+impl PartialEq for FixedSizeBinaryArray {
+    fn eq(&self, other: &Self) -> bool {
+        self.equals(other)
+    }
+}
+
+impl<OffsetSize: OffsetSizeTrait> ArrayEqual for GenericListArray<OffsetSize> {
     fn equals(&self, other: &dyn Array) -> bool {
         if !base_equal(&self.data(), &other.data()) {
             return false;
         }
 
-        let other = other.as_any().downcast_ref::<ListArray>().unwrap();
+        let other = other
+            .as_any()
+            .downcast_ref::<GenericListArray<OffsetSize>>()
+            .unwrap();
 
         if !value_offset_equal(self, other) {
             return false;
@@ -158,9 +173,9 @@ impl ArrayEqual for ListArray {
 
         if !self.values().range_equals(
             &*other.values(),
-            self.value_offset(0) as usize,
-            self.value_offset(self.len()) as usize,
-            other.value_offset(0) as usize,
+            self.value_offset(0).to_usize().unwrap(),
+            self.value_offset(self.len()).to_usize().unwrap(),
+            other.value_offset(0).to_usize().unwrap(),
         ) {
             return false;
         }
@@ -176,7 +191,11 @@ impl ArrayEqual for ListArray {
         other_start_idx: usize,
     ) -> bool {
         assert!(other_start_idx + (end_idx - start_idx) <= other.len());
-        let other = other.as_any().downcast_ref::<ListArray>().unwrap();
+
+        let other = other
+            .as_any()
+            .downcast_ref::<GenericListArray<OffsetSize>>()
+            .unwrap();
 
         let mut j = other_start_idx;
         for i in start_idx..end_idx {
@@ -191,17 +210,17 @@ impl ArrayEqual for ListArray {
                 continue;
             }
 
-            let start_offset = self.value_offset(i) as usize;
-            let end_offset = self.value_offset(i + 1) as usize;
-            let other_start_offset = other.value_offset(j) as usize;
-            let other_end_offset = other.value_offset(j + 1) as usize;
+            let start_offset = self.value_offset(i).to_usize().unwrap();
+            let end_offset = self.value_offset(i + 1).to_usize().unwrap();
+            let other_start_offset = other.value_offset(j).to_usize().unwrap();
+            let other_end_offset = other.value_offset(j + 1).to_usize().unwrap();
 
             if end_offset - start_offset != other_end_offset - other_start_offset {
                 return false;
             }
 
             if !self.values().range_equals(
-                &*other.values(),
+                other,
                 start_offset,
                 end_offset,
                 other_start_offset,
@@ -221,7 +240,7 @@ impl<T: ArrowPrimitiveType> ArrayEqual for DictionaryArray<T> {
         self.range_equals(other, 0, self.len(), 0)
     }
 
-    default fn range_equals(
+    fn range_equals(
         &self,
         other: &dyn Array,
         start_idx: usize,
@@ -310,13 +329,16 @@ impl ArrayEqual for FixedSizeListArray {
     }
 }
 
-impl ArrayEqual for BinaryArray {
+impl<OffsetSize: BinaryOffsetSizeTrait> ArrayEqual for GenericBinaryArray<OffsetSize> {
     fn equals(&self, other: &dyn Array) -> bool {
         if !base_equal(&self.data(), &other.data()) {
             return false;
         }
 
-        let other = other.as_any().downcast_ref::<BinaryArray>().unwrap();
+        let other = other
+            .as_any()
+            .downcast_ref::<GenericBinaryArray<OffsetSize>>()
+            .unwrap();
 
         if !value_offset_equal(self, other) {
             return false;
@@ -332,12 +354,14 @@ impl ArrayEqual for BinaryArray {
         if self.null_count() == 0 {
             // No offset in both - just do memcmp
             if self.offset() == 0 && other.offset() == 0 {
-                let len = self.value_offset(self.len()) as usize;
+                let len = self.value_offset(self.len()).to_usize().unwrap();
                 return value_data[..len] == other_value_data[..len];
             } else {
-                let start = self.value_offset(0) as usize;
-                let other_start = other.value_offset(0) as usize;
-                let len = (self.value_offset(self.len()) - self.value_offset(0)) as usize;
+                let start = self.value_offset(0).to_usize().unwrap();
+                let other_start = other.value_offset(0).to_usize().unwrap();
+                let len = (self.value_offset(self.len()) - self.value_offset(0))
+                    .to_usize()
+                    .unwrap();
                 return value_data[start..(start + len)]
                     == other_value_data[other_start..(other_start + len)];
             }
@@ -347,9 +371,9 @@ impl ArrayEqual for BinaryArray {
                     continue;
                 }
 
-                let start = self.value_offset(i) as usize;
-                let other_start = other.value_offset(i) as usize;
-                let len = self.value_length(i) as usize;
+                let start = self.value_offset(i).to_usize().unwrap();
+                let other_start = other.value_offset(i).to_usize().unwrap();
+                let len = self.value_length(i).to_usize().unwrap();
                 if value_data[start..(start + len)]
                     != other_value_data[other_start..(other_start + len)]
                 {
@@ -369,7 +393,10 @@ impl ArrayEqual for BinaryArray {
         other_start_idx: usize,
     ) -> bool {
         assert!(other_start_idx + (end_idx - start_idx) <= other.len());
-        let other = other.as_any().downcast_ref::<BinaryArray>().unwrap();
+        let other = other
+            .as_any()
+            .downcast_ref::<GenericBinaryArray<OffsetSize>>()
+            .unwrap();
 
         let mut j = other_start_idx;
         for i in start_idx..end_idx {
@@ -384,10 +411,10 @@ impl ArrayEqual for BinaryArray {
                 continue;
             }
 
-            let start_offset = self.value_offset(i) as usize;
-            let end_offset = self.value_offset(i + 1) as usize;
-            let other_start_offset = other.value_offset(j) as usize;
-            let other_end_offset = other.value_offset(j + 1) as usize;
+            let start_offset = self.value_offset(i).to_usize().unwrap();
+            let end_offset = self.value_offset(i + 1).to_usize().unwrap();
+            let other_start_offset = other.value_offset(j).to_usize().unwrap();
+            let other_end_offset = other.value_offset(j + 1).to_usize().unwrap();
 
             if end_offset - start_offset != other_end_offset - other_start_offset {
                 return false;
@@ -414,13 +441,16 @@ impl ArrayEqual for BinaryArray {
     }
 }
 
-impl ArrayEqual for StringArray {
+impl<OffsetSize: StringOffsetSizeTrait> ArrayEqual for GenericStringArray<OffsetSize> {
     fn equals(&self, other: &dyn Array) -> bool {
         if !base_equal(&self.data(), &other.data()) {
             return false;
         }
 
-        let other = other.as_any().downcast_ref::<StringArray>().unwrap();
+        let other = other
+            .as_any()
+            .downcast_ref::<GenericStringArray<OffsetSize>>()
+            .unwrap();
 
         if !value_offset_equal(self, other) {
             return false;
@@ -436,12 +466,14 @@ impl ArrayEqual for StringArray {
         if self.null_count() == 0 {
             // No offset in both - just do memcmp
             if self.offset() == 0 && other.offset() == 0 {
-                let len = self.value_offset(self.len()) as usize;
+                let len = self.value_offset(self.len()).to_usize().unwrap();
                 return value_data[..len] == other_value_data[..len];
             } else {
-                let start = self.value_offset(0) as usize;
-                let other_start = other.value_offset(0) as usize;
-                let len = (self.value_offset(self.len()) - self.value_offset(0)) as usize;
+                let start = self.value_offset(0).to_usize().unwrap();
+                let other_start = other.value_offset(0).to_usize().unwrap();
+                let len = (self.value_offset(self.len()) - self.value_offset(0))
+                    .to_usize()
+                    .unwrap();
                 return value_data[start..(start + len)]
                     == other_value_data[other_start..(other_start + len)];
             }
@@ -451,9 +483,9 @@ impl ArrayEqual for StringArray {
                     continue;
                 }
 
-                let start = self.value_offset(i) as usize;
-                let other_start = other.value_offset(i) as usize;
-                let len = self.value_length(i) as usize;
+                let start = self.value_offset(i).to_usize().unwrap();
+                let other_start = other.value_offset(i).to_usize().unwrap();
+                let len = self.value_length(i).to_usize().unwrap();
                 if value_data[start..(start + len)]
                     != other_value_data[other_start..(other_start + len)]
                 {
@@ -473,7 +505,10 @@ impl ArrayEqual for StringArray {
         other_start_idx: usize,
     ) -> bool {
         assert!(other_start_idx + (end_idx - start_idx) <= other.len());
-        let other = other.as_any().downcast_ref::<StringArray>().unwrap();
+        let other = other
+            .as_any()
+            .downcast_ref::<GenericStringArray<OffsetSize>>()
+            .unwrap();
 
         let mut j = other_start_idx;
         for i in start_idx..end_idx {
@@ -488,10 +523,10 @@ impl ArrayEqual for StringArray {
                 continue;
             }
 
-            let start_offset = self.value_offset(i) as usize;
-            let end_offset = self.value_offset(i + 1) as usize;
-            let other_start_offset = other.value_offset(j) as usize;
-            let other_end_offset = other.value_offset(j + 1) as usize;
+            let start_offset = self.value_offset(i).to_usize().unwrap();
+            let end_offset = self.value_offset(i + 1).to_usize().unwrap();
+            let other_start_offset = other.value_offset(j).to_usize().unwrap();
+            let other_end_offset = other.value_offset(j + 1).to_usize().unwrap();
 
             if end_offset - start_offset != other_end_offset - other_start_offset {
                 return false;
@@ -529,7 +564,12 @@ impl ArrayEqual for FixedSizeBinaryArray {
             .downcast_ref::<FixedSizeBinaryArray>()
             .unwrap();
 
-        if !value_offset_equal(self, other) {
+        let this = self
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap();
+
+        if !value_offset_equal(this, other) {
             return false;
         }
 
@@ -692,6 +732,53 @@ impl ArrayEqual for StructArray {
     }
 }
 
+impl ArrayEqual for UnionArray {
+    fn equals(&self, _other: &dyn Array) -> bool {
+        unimplemented!(
+            "Added to allow UnionArray to implement the Array trait: see ARROW-8576"
+        )
+    }
+
+    fn range_equals(
+        &self,
+        _other: &dyn Array,
+        _start_idx: usize,
+        _end_idx: usize,
+        _other_start_idx: usize,
+    ) -> bool {
+        unimplemented!(
+            "Added to allow UnionArray to implement the Array trait: see ARROW-8576"
+        )
+    }
+}
+
+impl ArrayEqual for NullArray {
+    fn equals(&self, other: &dyn Array) -> bool {
+        if other.data_type() != &DataType::Null {
+            return false;
+        }
+
+        if self.len() != other.len() {
+            return false;
+        }
+        if self.null_count() != other.null_count() {
+            return false;
+        }
+
+        true
+    }
+
+    fn range_equals(
+        &self,
+        _other: &dyn Array,
+        _start_idx: usize,
+        _end_idx: usize,
+        _other_start_idx: usize,
+    ) -> bool {
+        unimplemented!("Range comparison for null array not yet supported")
+    }
+}
+
 // Compare if the common basic fields between the two arrays are equal
 fn base_equal(this: &ArrayDataRef, other: &ArrayDataRef) -> bool {
     if this.data_type() != other.data_type() {
@@ -720,7 +807,10 @@ fn base_equal(this: &ArrayDataRef, other: &ArrayDataRef) -> bool {
 }
 
 // Compare if the value offsets are equal between the two list arrays
-fn value_offset_equal<T: Array + ListArrayOps>(this: &T, other: &T) -> bool {
+fn value_offset_equal<K: OffsetSizeTrait, T: Array + ListArrayOps<K>>(
+    this: &T,
+    other: &T,
+) -> bool {
     // Check if offsets differ
     if this.offset() == 0 && other.offset() == 0 {
         let offset_data = &this.data_ref().buffers()[0];
@@ -730,7 +820,7 @@ fn value_offset_equal<T: Array + ListArrayOps>(this: &T, other: &T) -> bool {
     }
 
     // The expensive case
-    for i in 0..this.len() + 1 {
+    for i in 0..=this.len() {
         if this.value_offset_at(i) - this.value_offset_at(0)
             != other.value_offset_at(i) - other.value_offset_at(0)
         {
@@ -761,12 +851,10 @@ impl<T: ArrowPrimitiveType> JsonEqual for PrimitiveArray<T> {
             return false;
         }
 
-        let result = (0..self.len()).all(|i| match json[i] {
+        (0..self.len()).all(|i| match json[i] {
             Value::Null => self.is_null(i),
             v => self.is_valid(i) && Some(v) == self.value(i).into_json_value().as_ref(),
-        });
-
-        result
+        })
     }
 }
 
@@ -788,23 +876,21 @@ impl<T: ArrowPrimitiveType> PartialEq<PrimitiveArray<T>> for Value {
     }
 }
 
-impl JsonEqual for ListArray {
+impl<OffsetSize: OffsetSizeTrait> JsonEqual for GenericListArray<OffsetSize> {
     fn equals_json(&self, json: &[&Value]) -> bool {
         if self.len() != json.len() {
             return false;
         }
 
-        let result = (0..self.len()).all(|i| match json[i] {
+        (0..self.len()).all(|i| match json[i] {
             Value::Array(v) => self.is_valid(i) && self.value(i).equals_json_values(v),
-            Value::Null => self.is_null(i) || self.value_length(i) == 0,
+            Value::Null => self.is_null(i) || self.value_length(i).is_zero(),
             _ => false,
-        });
-
-        result
+        })
     }
 }
 
-impl PartialEq<Value> for ListArray {
+impl<OffsetSize: OffsetSizeTrait> PartialEq<Value> for GenericListArray<OffsetSize> {
     fn eq(&self, json: &Value) -> bool {
         match json {
             Value::Array(json_array) => self.equals_json_values(json_array),
@@ -813,8 +899,8 @@ impl PartialEq<Value> for ListArray {
     }
 }
 
-impl PartialEq<ListArray> for Value {
-    fn eq(&self, arrow: &ListArray) -> bool {
+impl<OffsetSize: OffsetSizeTrait> PartialEq<GenericListArray<OffsetSize>> for Value {
+    fn eq(&self, arrow: &GenericListArray<OffsetSize>) -> bool {
         match self {
             Value::Array(json_array) => arrow.equals_json_values(json_array),
             _ => false,
@@ -858,13 +944,11 @@ impl JsonEqual for FixedSizeListArray {
             return false;
         }
 
-        let result = (0..self.len()).all(|i| match json[i] {
+        (0..self.len()).all(|i| match json[i] {
             Value::Array(v) => self.is_valid(i) && self.value(i).equals_json_values(v),
             Value::Null => self.is_null(i) || self.value_length() == 0,
             _ => false,
-        });
-
-        result
+        })
     }
 }
 
@@ -916,7 +1000,7 @@ impl JsonEqual for StructArray {
             }
         }
 
-        return true;
+        true
     }
 }
 
@@ -938,7 +1022,7 @@ impl PartialEq<StructArray> for Value {
     }
 }
 
-impl JsonEqual for BinaryArray {
+impl<OffsetSize: BinaryOffsetSizeTrait> JsonEqual for GenericBinaryArray<OffsetSize> {
     fn equals_json(&self, json: &[&Value]) -> bool {
         if self.len() != json.len() {
             return false;
@@ -958,7 +1042,9 @@ impl JsonEqual for BinaryArray {
     }
 }
 
-impl PartialEq<Value> for BinaryArray {
+impl<OffsetSize: BinaryOffsetSizeTrait> PartialEq<Value>
+    for GenericBinaryArray<OffsetSize>
+{
     fn eq(&self, json: &Value) -> bool {
         match json {
             Value::Array(json_array) => self.equals_json_values(&json_array),
@@ -967,8 +1053,10 @@ impl PartialEq<Value> for BinaryArray {
     }
 }
 
-impl PartialEq<BinaryArray> for Value {
-    fn eq(&self, arrow: &BinaryArray) -> bool {
+impl<OffsetSize: BinaryOffsetSizeTrait> PartialEq<GenericBinaryArray<OffsetSize>>
+    for Value
+{
+    fn eq(&self, arrow: &GenericBinaryArray<OffsetSize>) -> bool {
         match self {
             Value::Array(json_array) => arrow.equals_json_values(&json_array),
             _ => false,
@@ -976,7 +1064,7 @@ impl PartialEq<BinaryArray> for Value {
     }
 }
 
-impl JsonEqual for StringArray {
+impl<OffsetSize: StringOffsetSizeTrait> JsonEqual for GenericStringArray<OffsetSize> {
     fn equals_json(&self, json: &[&Value]) -> bool {
         if self.len() != json.len() {
             return false;
@@ -990,7 +1078,9 @@ impl JsonEqual for StringArray {
     }
 }
 
-impl PartialEq<Value> for StringArray {
+impl<OffsetSize: StringOffsetSizeTrait> PartialEq<Value>
+    for GenericStringArray<OffsetSize>
+{
     fn eq(&self, json: &Value) -> bool {
         match json {
             Value::Array(json_array) => self.equals_json_values(&json_array),
@@ -999,8 +1089,10 @@ impl PartialEq<Value> for StringArray {
     }
 }
 
-impl PartialEq<StringArray> for Value {
-    fn eq(&self, arrow: &StringArray) -> bool {
+impl<OffsetSize: StringOffsetSizeTrait> PartialEq<GenericStringArray<OffsetSize>>
+    for Value
+{
+    fn eq(&self, arrow: &GenericStringArray<OffsetSize>) -> bool {
         match self {
             Value::Array(json_array) => arrow.equals_json_values(&json_array),
             _ => false,
@@ -1046,13 +1138,49 @@ impl PartialEq<FixedSizeBinaryArray> for Value {
     }
 }
 
+impl JsonEqual for UnionArray {
+    fn equals_json(&self, _json: &[&Value]) -> bool {
+        unimplemented!(
+            "Added to allow UnionArray to implement the Array trait: see ARROW-8547"
+        )
+    }
+}
+
+impl JsonEqual for NullArray {
+    fn equals_json(&self, json: &[&Value]) -> bool {
+        if self.len() != json.len() {
+            return false;
+        }
+
+        // all JSON values must be nulls
+        json.iter().all(|&v| v == &JNull)
+    }
+}
+
+impl PartialEq<NullArray> for Value {
+    fn eq(&self, arrow: &NullArray) -> bool {
+        match self {
+            Value::Array(json_array) => arrow.equals_json_values(&json_array),
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq<Value> for NullArray {
+    fn eq(&self, json: &Value) -> bool {
+        match json {
+            Value::Array(json_array) => self.equals_json_values(&json_array),
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::convert::TryFrom;
-
     use crate::error::Result;
+    use std::{convert::TryFrom, sync::Arc};
 
     #[test]
     fn test_primitive_equal() {
@@ -1289,62 +1417,57 @@ mod tests {
         // assert!(b_slice.equals(&*a_slice));
     }
 
-    #[test]
-    fn test_string_equal() {
-        let a = StringArray::from(vec!["hello", "world"]);
-        let b = StringArray::from(vec!["hello", "world"]);
+    fn test_generic_string_equal<OffsetSize: StringOffsetSizeTrait>() {
+        let a = GenericStringArray::<OffsetSize>::from_vec(vec!["hello", "world"]);
+        let b = GenericStringArray::<OffsetSize>::from_vec(vec!["hello", "world"]);
         assert!(a.equals(&b));
         assert!(b.equals(&a));
 
-        let b = StringArray::from(vec!["hello", "arrow"]);
+        let b = GenericStringArray::<OffsetSize>::from_vec(vec!["hello", "arrow"]);
         assert!(!a.equals(&b));
         assert!(!b.equals(&a));
 
         // Test the case where null_count > 0
 
-        let a = StringArray::try_from(vec![
+        let a = GenericStringArray::<OffsetSize>::from_opt_vec(vec![
             Some("hello"),
             None,
             None,
             Some("world"),
             None,
             None,
-        ])
-        .unwrap();
+        ]);
 
-        let b = StringArray::try_from(vec![
+        let b = GenericStringArray::<OffsetSize>::from_opt_vec(vec![
             Some("hello"),
             None,
             None,
             Some("world"),
             None,
             None,
-        ])
-        .unwrap();
+        ]);
         assert!(a.equals(&b));
         assert!(b.equals(&a));
 
-        let b = StringArray::try_from(vec![
+        let b = GenericStringArray::<OffsetSize>::from_opt_vec(vec![
             Some("hello"),
             Some("foo"),
             None,
             Some("world"),
             None,
             None,
-        ])
-        .unwrap();
+        ]);
         assert!(!a.equals(&b));
         assert!(!b.equals(&a));
 
-        let b = StringArray::try_from(vec![
+        let b = GenericStringArray::<OffsetSize>::from_opt_vec(vec![
             Some("hello"),
             None,
             None,
             Some("arrow"),
             None,
             None,
-        ])
-        .unwrap();
+        ]);
         assert!(!a.equals(&b));
         assert!(!b.equals(&a));
 
@@ -1367,36 +1490,64 @@ mod tests {
     }
 
     #[test]
+    fn test_string_equal() {
+        test_generic_string_equal::<i32>()
+    }
+
+    #[test]
+    fn test_large_string_equal() {
+        test_generic_string_equal::<i64>()
+    }
+
+    #[test]
     fn test_struct_equal() {
-        let string_builder = StringBuilder::new(5);
-        let int_builder = Int32Builder::new(5);
+        let strings: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("joe"),
+            None,
+            None,
+            Some("mark"),
+            Some("doe"),
+        ]));
+        let ints: ArrayRef = Arc::new(Int32Array::from(vec![
+            Some(1),
+            Some(2),
+            None,
+            Some(4),
+            Some(5),
+        ]));
 
-        let mut fields = Vec::new();
-        let mut field_builders = Vec::new();
-        fields.push(Field::new("f1", DataType::Utf8, false));
-        field_builders.push(Box::new(string_builder) as Box<ArrayBuilder>);
-        fields.push(Field::new("f2", DataType::Int32, false));
-        field_builders.push(Box::new(int_builder) as Box<ArrayBuilder>);
+        let a =
+            StructArray::try_from(vec![("f1", strings.clone()), ("f2", ints.clone())])
+                .unwrap();
 
-        let mut builder = StructBuilder::new(fields, field_builders);
-
-        let a = create_struct_array(
-            &mut builder,
-            &[Some("joe"), None, None, Some("mark"), Some("doe")],
-            &[Some(1), Some(2), None, Some(4), Some(5)],
-            &[true, true, false, true, true],
-        )
-        .unwrap();
-        let b = create_struct_array(
-            &mut builder,
-            &[Some("joe"), None, None, Some("mark"), Some("doe")],
-            &[Some(1), Some(2), None, Some(4), Some(5)],
-            &[true, true, false, true, true],
-        )
-        .unwrap();
+        let b = StructArray::try_from(vec![("f1", strings), ("f2", ints)]).unwrap();
 
         assert!(a.equals(&b));
         assert!(b.equals(&a));
+    }
+
+    #[test]
+    fn test_null_equal() {
+        let a = NullArray::new(12);
+        let b = NullArray::new(12);
+        assert!(a.equals(&b));
+        assert!(b.equals(&a));
+
+        let b = NullArray::new(10);
+        assert!(!a.equals(&b));
+        assert!(!b.equals(&a));
+
+        // Test the case where offset != 0
+
+        let a_slice = a.slice(2, 3);
+        let b_slice = b.slice(1, 3);
+        assert!(a_slice.equals(&*b_slice));
+        assert!(b_slice.equals(&*a_slice));
+
+        let a_slice = a.slice(5, 4);
+        let b_slice = b.slice(3, 3);
+        assert!(!a_slice.equals(&*b_slice));
+        assert!(!b_slice.equals(&*a_slice));
     }
 
     fn create_list_array<'a, U: AsRef<[i32]>, T: AsRef<[Option<U>]>>(
@@ -1607,15 +1758,8 @@ mod tests {
     #[test]
     fn test_string_json_equal() {
         // Test the equal case
-        let arrow_array = StringArray::try_from(vec![
-            Some("hello"),
-            None,
-            None,
-            Some("world"),
-            None,
-            None,
-        ])
-        .unwrap();
+        let arrow_array =
+            StringArray::from(vec![Some("hello"), None, None, Some("world"), None, None]);
         let json_array: Value = serde_json::from_str(
             r#"
             [
@@ -1633,15 +1777,8 @@ mod tests {
         assert!(json_array.eq(&arrow_array));
 
         // Test unequal case
-        let arrow_array = StringArray::try_from(vec![
-            Some("hello"),
-            None,
-            None,
-            Some("world"),
-            None,
-            None,
-        ])
-        .unwrap();
+        let arrow_array =
+            StringArray::from(vec![Some("hello"), None, None, Some("world"), None, None]);
         let json_array: Value = serde_json::from_str(
             r#"
             [
@@ -1660,8 +1797,7 @@ mod tests {
 
         // Test unequal length case
         let arrow_array =
-            StringArray::try_from(vec![Some("hello"), None, None, Some("world"), None])
-                .unwrap();
+            StringArray::from(vec![Some("hello"), None, None, Some("world"), None]);
         let json_array: Value = serde_json::from_str(
             r#"
             [
@@ -1680,8 +1816,7 @@ mod tests {
 
         // Test incorrect type case
         let arrow_array =
-            StringArray::try_from(vec![Some("hello"), None, None, Some("world"), None])
-                .unwrap();
+            StringArray::from(vec![Some("hello"), None, None, Some("world"), None]);
         let json_array: Value = serde_json::from_str(
             r#"
             {
@@ -1695,8 +1830,7 @@ mod tests {
 
         // Test incorrect value type case
         let arrow_array =
-            StringArray::try_from(vec![Some("hello"), None, None, Some("world"), None])
-                .unwrap();
+            StringArray::from(vec![Some("hello"), None, None, Some("world"), None]);
         let json_array: Value = serde_json::from_str(
             r#"
             [
@@ -1717,16 +1851,14 @@ mod tests {
     #[test]
     fn test_binary_json_equal() {
         // Test the equal case
-        let arrow_array = StringArray::try_from(vec![
-            Some("hello"),
-            None,
-            None,
-            Some("world"),
-            None,
-            None,
-        ])
-        .unwrap();
-        let arrow_array = BinaryArray::from(arrow_array.data());
+        let mut builder = BinaryBuilder::new(6);
+        builder.append_value(b"hello").unwrap();
+        builder.append_null().unwrap();
+        builder.append_null().unwrap();
+        builder.append_value(b"world").unwrap();
+        builder.append_null().unwrap();
+        builder.append_null().unwrap();
+        let arrow_array = builder.finish();
         let json_array: Value = serde_json::from_str(
             r#"
             [
@@ -1744,15 +1876,8 @@ mod tests {
         assert!(json_array.eq(&arrow_array));
 
         // Test unequal case
-        let arrow_array = StringArray::try_from(vec![
-            Some("hello"),
-            None,
-            None,
-            Some("world"),
-            None,
-            None,
-        ])
-        .unwrap();
+        let arrow_array =
+            StringArray::from(vec![Some("hello"), None, None, Some("world"), None, None]);
         let json_array: Value = serde_json::from_str(
             r#"
             [
@@ -1771,8 +1896,7 @@ mod tests {
 
         // Test unequal length case
         let arrow_array =
-            StringArray::try_from(vec![Some("hello"), None, None, Some("world"), None])
-                .unwrap();
+            StringArray::from(vec![Some("hello"), None, None, Some("world"), None]);
         let json_array: Value = serde_json::from_str(
             r#"
             [
@@ -1791,8 +1915,7 @@ mod tests {
 
         // Test incorrect type case
         let arrow_array =
-            StringArray::try_from(vec![Some("hello"), None, None, Some("world"), None])
-                .unwrap();
+            StringArray::from(vec![Some("hello"), None, None, Some("world"), None]);
         let json_array: Value = serde_json::from_str(
             r#"
             {
@@ -1806,8 +1929,7 @@ mod tests {
 
         // Test incorrect value type case
         let arrow_array =
-            StringArray::try_from(vec![Some("hello"), None, None, Some("world"), None])
-                .unwrap();
+            StringArray::from(vec![Some("hello"), None, None, Some("world"), None]);
         let json_array: Value = serde_json::from_str(
             r#"
             [
@@ -1908,26 +2030,24 @@ mod tests {
 
     #[test]
     fn test_struct_json_equal() {
-        // Test equal case
-        let string_builder = StringBuilder::new(5);
-        let int_builder = Int32Builder::new(5);
+        let strings: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("joe"),
+            None,
+            None,
+            Some("mark"),
+            Some("doe"),
+        ]));
+        let ints: ArrayRef = Arc::new(Int32Array::from(vec![
+            Some(1),
+            Some(2),
+            None,
+            Some(4),
+            Some(5),
+        ]));
 
-        let mut fields = Vec::new();
-        let mut field_builders = Vec::new();
-        fields.push(Field::new("f1", DataType::Utf8, false));
-        field_builders.push(Box::new(string_builder) as Box<ArrayBuilder>);
-        fields.push(Field::new("f2", DataType::Int32, false));
-        field_builders.push(Box::new(int_builder) as Box<ArrayBuilder>);
-
-        let mut builder = StructBuilder::new(fields, field_builders);
-
-        let arrow_array = create_struct_array(
-            &mut builder,
-            &[Some("joe"), None, None, Some("mark"), Some("doe")],
-            &[Some(1), Some(2), None, Some(4), Some(5)],
-            &[true, true, false, true, true],
-        )
-        .unwrap();
+        let arrow_array =
+            StructArray::try_from(vec![("f1", strings.clone()), ("f2", ints.clone())])
+                .unwrap();
 
         let json_array: Value = serde_json::from_str(
             r#"
@@ -2013,39 +2133,32 @@ mod tests {
         assert!(json_array.ne(&arrow_array));
     }
 
-    fn create_struct_array<
-        'a,
-        T: AsRef<[Option<&'a str>]>,
-        U: AsRef<[Option<i32>]>,
-        V: AsRef<[bool]>,
-    >(
-        builder: &'a mut StructBuilder,
-        first: T,
-        second: U,
-        is_valid: V,
-    ) -> Result<StructArray> {
-        let string_builder = builder.field_builder::<StringBuilder>(0).unwrap();
-        for v in first.as_ref() {
-            if let Some(s) = v {
-                string_builder.append_value(s)?;
-            } else {
-                string_builder.append_null()?;
-            }
-        }
+    #[test]
+    fn test_null_json_equal() {
+        // Test equaled array
+        let arrow_array = NullArray::new(4);
+        let json_array: Value = serde_json::from_str(
+            r#"
+            [
+                null, null, null, null
+            ]
+        "#,
+        )
+        .unwrap();
+        assert!(arrow_array.eq(&json_array));
+        assert!(json_array.eq(&arrow_array));
 
-        let int_builder = builder.field_builder::<Int32Builder>(1).unwrap();
-        for v in second.as_ref() {
-            if let Some(i) = v {
-                int_builder.append_value(*i)?;
-            } else {
-                int_builder.append_null()?;
-            }
-        }
-
-        for v in is_valid.as_ref() {
-            builder.append(*v)?
-        }
-
-        Ok(builder.finish())
+        // Test unequaled array
+        let arrow_array = NullArray::new(2);
+        let json_array: Value = serde_json::from_str(
+            r#"
+            [
+                null, null, null
+            ]
+        "#,
+        )
+        .unwrap();
+        assert!(arrow_array.ne(&json_array));
+        assert!(json_array.ne(&arrow_array));
     }
 }

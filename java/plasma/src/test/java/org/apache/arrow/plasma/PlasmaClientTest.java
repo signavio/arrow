@@ -26,6 +26,7 @@ import java.util.stream.Collectors;
 
 import org.apache.arrow.plasma.exceptions.DuplicateObjectException;
 import org.apache.arrow.plasma.exceptions.PlasmaClientException;
+import org.apache.arrow.plasma.exceptions.PlasmaOutOfMemoryException;
 import org.junit.Assert;
 
 public class PlasmaClientTest {
@@ -125,15 +126,15 @@ public class PlasmaClientTest {
     System.out.println("Start test.");
     int timeoutMs = 3000;
     byte[] id1 = new byte[20];
-    Arrays.fill(id1, (byte)1);
+    Arrays.fill(id1, (byte) 1);
     byte[] value1 = new byte[20];
-    Arrays.fill(value1, (byte)11);
+    Arrays.fill(value1, (byte) 11);
     pLink.put(id1, value1, null);
 
     byte[] id2 = new byte[20];
-    Arrays.fill(id2, (byte)2);
+    Arrays.fill(id2, (byte) 2);
     byte[] value2 = new byte[20];
-    Arrays.fill(value2, (byte)12);
+    Arrays.fill(value2, (byte) 12);
     pLink.put(id2, value2, null);
     System.out.println("Plasma java client put test success.");
     byte[] getValue1 = pLink.get(id1, timeoutMs, false);
@@ -160,16 +161,16 @@ public class PlasmaClientTest {
     boolean exist = pLink.contains(id2);
     assert exist;
     byte[] id3 = new byte[20];
-    Arrays.fill(id3, (byte)3);
+    Arrays.fill(id3, (byte) 3);
     boolean notExist = pLink.contains(id3);
     assert !notExist;
     System.out.println("Plasma java client contains test success.");
 
     byte[] id4 = new byte[20];
-    Arrays.fill(id4, (byte)4);
+    Arrays.fill(id4, (byte) 4);
     byte[] value4 = new byte[20];
     byte[] meta4 = "META4".getBytes();
-    Arrays.fill(value4, (byte)14);
+    Arrays.fill(value4, (byte) 14);
     pLink.put(id4, value4, meta4);
 
     List<byte[]> existIds = Arrays.asList(id1, id2, id3, id4);
@@ -187,10 +188,10 @@ public class PlasmaClientTest {
     System.out.println("Plasma java client list test success.");
 
     byte[] id5 = new byte[20];
-    Arrays.fill(id5, (byte)5);
+    Arrays.fill(id5, (byte) 5);
     byte[] value5 = new byte[20];
     byte[] meta5 = "META5".getBytes();
-    Arrays.fill(value5, (byte)15);
+    Arrays.fill(value5, (byte) 15);
     pLink.put(id5, value5, meta5);
 
     byte[] getMeta4 = pLink.get(id4, timeoutMs, true);
@@ -235,7 +236,7 @@ public class PlasmaClientTest {
 
     try {
       byte[] idNone = new byte[20];
-      Arrays.fill(idNone, (byte)987);
+      Arrays.fill(idNone, (byte) 987);
       pLink.get(idNone, timeoutMs, false);
       Assert.fail("Fail to throw PlasmaClientException when get an object " +
                   "when object store shutdown.");
@@ -254,9 +255,9 @@ public class PlasmaClientTest {
 
   public void doByteBufferTest() {
     System.out.println("Start ByteBuffer test.");
-    PlasmaClient client = (PlasmaClient)pLink;
+    PlasmaClient client = (PlasmaClient) pLink;
     byte[] id = new byte[20];
-    Arrays.fill(id, (byte)10);
+    Arrays.fill(id, (byte) 10);
     ByteBuffer buf = client.create(id, 100, null);
     assert buf.isDirect();
     for (int i = 0; i < 10; i++) {
@@ -277,6 +278,20 @@ public class PlasmaClientTest {
     client.release(id);
   }
 
+  public void doPlasmaOutOfMemoryExceptionTest() {
+    System.out.println("Start PlasmaOutOfMemoryException test.");
+    PlasmaClient client = (PlasmaClient) pLink;
+    byte[] objectId = new byte[20];
+    Arrays.fill(objectId, (byte) 1);
+    try {
+      ByteBuffer byteBuffer = client.create(objectId, 200000000, null);
+      Assert.fail("Fail to create an object, The plasma store ran out of memory.");
+    } catch (PlasmaOutOfMemoryException e) {
+      System.out.println(String.format("Expected PlasmaOutOfMemoryException: %s", e));
+      System.out.println("PlasmaOutOfMemoryException test success.");
+    }
+  }
+
   private byte[] getArrayFilledWithValue(int arrayLength, byte val) {
     byte[] arr = new byte[arrayLength];
     Arrays.fill(arr, val);
@@ -290,9 +305,9 @@ public class PlasmaClientTest {
   public static void main(String[] args) throws Exception {
 
     PlasmaClientTest plasmaClientTest = new PlasmaClientTest();
+    plasmaClientTest.doPlasmaOutOfMemoryExceptionTest();
     plasmaClientTest.doByteBufferTest();
     plasmaClientTest.doTest();
-
   }
 
 }

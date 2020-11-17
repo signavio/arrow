@@ -29,25 +29,42 @@ namespace Aws {
 namespace Auth {
 
 class AWSCredentialsProvider;
+class STSAssumeRoleCredentialsProvider;
 
 }  // namespace Auth
+namespace STS {
+class STSClient;
+}
 }  // namespace Aws
 
 namespace arrow {
 namespace fs {
 
-extern ARROW_EXPORT const char* kS3DefaultRegion;
-
 /// Options for the S3FileSystem implementation.
 struct ARROW_EXPORT S3Options {
-  /// AWS region to connect to (default "us-east-1")
-  std::string region = kS3DefaultRegion;
+  /// AWS region to connect to.
+  ///
+  /// If unset, the AWS SDK will choose a default value.  The exact algorithm
+  /// depends on the SDK version.  Before 1.8, the default is hardcoded
+  /// to "us-east-1".  Since 1.8, several heuristics are used to determine
+  /// the region (environment variables, configuration profile, EC2 metadata
+  /// server).
+  std::string region;
 
   /// If non-empty, override region with a connect string such as "localhost:9000"
   // XXX perhaps instead take a URL like "http://localhost:9000"?
   std::string endpoint_override;
   /// S3 connection transport, default "https"
   std::string scheme = "https";
+
+  /// ARN of role to assume
+  std::string role_arn;
+  /// Optional identifier for an assumed role session.
+  std::string session_name;
+  /// Optional external idenitifer to pass to STS when assuming a role
+  std::string external_id;
+  /// Frequency (in seconds) to refresh temporary credentials from assumed role
+  int load_frequency;
 
   /// AWS credentials provider
   std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider;
@@ -58,11 +75,22 @@ struct ARROW_EXPORT S3Options {
   /// Configure with the default AWS credentials provider chain.
   void ConfigureDefaultCredentials();
 
+  /// Configure with anonymous credentials.  This will only let you access public buckets.
+  void ConfigureAnonymousCredentials();
+
   /// Configure with explicit access and secret key.
-  void ConfigureAccessKey(const std::string& access_key, const std::string& secret_key);
+  void ConfigureAccessKey(const std::string& access_key, const std::string& secret_key,
+                          const std::string& session_token = "");
+
+  /// Configure with credentials from an assumed role.
+  void ConfigureAssumeRoleCredentials(
+      const std::string& role_arn, const std::string& session_name = "",
+      const std::string& external_id = "", int load_frequency = 900,
+      const std::shared_ptr<Aws::STS::STSClient>& stsClient = NULLPTR);
 
   std::string GetAccessKey() const;
   std::string GetSecretKey() const;
+  std::string GetSessionToken() const;
 
   bool Equals(const S3Options& other) const;
 
@@ -71,9 +99,25 @@ struct ARROW_EXPORT S3Options {
   /// This is recommended if you use the standard AWS environment variables
   /// and/or configuration file.
   static S3Options Defaults();
-  /// \brief Initialize with explicit access and secret key
+
+  /// \brief Initialize with anonymous credentials.
+  ///
+  /// This will only let you access public buckets.
+  static S3Options Anonymous();
+
+  /// \brief Initialize with explicit access and secret key.
+  ///
+  /// Optionally, a session token may also be provided for temporary credentials
+  /// (from STS).
   static S3Options FromAccessKey(const std::string& access_key,
-                                 const std::string& secret_key);
+                                 const std::string& secret_key,
+                                 const std::string& session_token = "");
+
+  /// \brief Initialize from an assumed role.
+  static S3Options FromAssumeRole(
+      const std::string& role_arn, const std::string& session_name = "",
+      const std::string& external_id = "", int load_frequency = 900,
+      const std::shared_ptr<Aws::STS::STSClient>& stsClient = NULLPTR);
 
   static Result<S3Options> FromUri(const ::arrow::internal::Uri& uri,
                                    std::string* out_path = NULLPTR);
@@ -91,7 +135,11 @@ class ARROW_EXPORT S3FileSystem : public FileSystem {
   ~S3FileSystem() override;
 
   std::string type_name() const override { return "s3"; }
+
+  /// Return the original S3 options when constructing the filesystem
   S3Options options() const;
+  /// Return the actual region this filesystem connects to
+  std::string region() const;
 
   bool Equals(const FileSystem& other) const override;
 
@@ -105,6 +153,7 @@ class ARROW_EXPORT S3FileSystem : public FileSystem {
 
   Status DeleteDir(const std::string& path) override;
   Status DeleteDirContents(const std::string& path) override;
+  Status DeleteRootDirContents() override;
 
   Status DeleteFile(const std::string& path) override;
 
@@ -119,12 +168,23 @@ class ARROW_EXPORT S3FileSystem : public FileSystem {
   /// a custom readahead strategy to avoid idle waits.
   Result<std::shared_ptr<io::InputStream>> OpenInputStream(
       const std::string& path) override;
+  /// Create a sequential input stream for reading from a S3 object.
+  ///
+  /// This override avoids a HEAD request by assuming the FileInfo
+  /// contains correct information.
+  Result<std::shared_ptr<io::InputStream>> OpenInputStream(const FileInfo& info) override;
 
   /// Create a random access file for reading from a S3 object.
   ///
   /// See OpenInputStream for performance notes.
   Result<std::shared_ptr<io::RandomAccessFile>> OpenInputFile(
       const std::string& path) override;
+  /// Create a random access file for reading from a S3 object.
+  ///
+  /// This override avoids a HEAD request by assuming the FileInfo
+  /// contains correct information.
+  Result<std::shared_ptr<io::RandomAccessFile>> OpenInputFile(
+      const FileInfo& info) override;
 
   /// Create a sequential output stream for writing to a S3 object.
   ///
@@ -167,6 +227,9 @@ Status EnsureS3Initialized();
 /// Shutdown the S3 APIs.
 ARROW_EXPORT
 Status FinalizeS3();
+
+ARROW_EXPORT
+Result<std::string> ResolveBucketRegion(const std::string& bucket);
 
 }  // namespace fs
 }  // namespace arrow

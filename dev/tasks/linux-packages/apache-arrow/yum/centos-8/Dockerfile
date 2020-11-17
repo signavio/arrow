@@ -32,6 +32,7 @@ RUN \
     bzip2-devel \
     clang \
     cmake \
+    curl-devel \
     flex \
     gcc-c++ \
     gflags-devel \
@@ -58,5 +59,6 @@ RUN \
     rpmdevtools \
     snappy-devel \
     tar \
+    # utf8proc-devel \
     zlib-devel && \
   dnf clean ${quiet} all

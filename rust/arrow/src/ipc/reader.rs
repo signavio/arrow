@@ -31,12 +31,12 @@ use crate::datatypes::{DataType, Field, IntervalUnit, Schema, SchemaRef};
 use crate::error::{ArrowError, Result};
 use crate::ipc;
 use crate::record_batch::{RecordBatch, RecordBatchReader};
+
+use ipc::CONTINUATION_MARKER;
 use DataType::*;
 
-const CONTINUATION_MARKER: u32 = 0xffff_ffff;
-
 /// Read a buffer based on offset and length
-fn read_buffer(buf: &ipc::Buffer, a_data: &Vec<u8>) -> Buffer {
+fn read_buffer(buf: &ipc::Buffer, a_data: &[u8]) -> Buffer {
     let start_offset = buf.offset() as usize;
     let end_offset = start_offset + buf.length() as usize;
     let buf_data = &a_data[start_offset..end_offset];
@@ -55,15 +55,15 @@ fn read_buffer(buf: &ipc::Buffer, a_data: &Vec<u8>) -> Buffer {
 fn create_array(
     nodes: &[ipc::FieldNode],
     data_type: &DataType,
-    data: &Vec<u8>,
+    data: &[u8],
     buffers: &[ipc::Buffer],
-    dictionaries: &Vec<Option<ArrayRef>>,
+    dictionaries: &[Option<ArrayRef>],
     mut node_index: usize,
     mut buffer_index: usize,
 ) -> (ArrayRef, usize, usize) {
     use DataType::*;
     let array = match data_type {
-        Utf8 | Binary => {
+        Utf8 | Binary | LargeBinary | LargeUtf8 => {
             let array = create_primitive_array(
                 &nodes[node_index],
                 data_type,
@@ -72,8 +72,8 @@ fn create_array(
                     .map(|buf| read_buffer(buf, data))
                     .collect(),
             );
-            node_index = node_index + 1;
-            buffer_index = buffer_index + 3;
+            node_index += 1;
+            buffer_index += 3;
             array
         }
         FixedSizeBinary(_) => {
@@ -85,18 +85,18 @@ fn create_array(
                     .map(|buf| read_buffer(buf, data))
                     .collect(),
             );
-            node_index = node_index + 1;
-            buffer_index = buffer_index + 2;
+            node_index += 1;
+            buffer_index += 2;
             array
         }
-        List(ref list_data_type) => {
+        List(ref list_data_type) | LargeList(ref list_data_type) => {
             let list_node = &nodes[node_index];
             let list_buffers: Vec<Buffer> = buffers[buffer_index..buffer_index + 2]
                 .iter()
                 .map(|buf| read_buffer(buf, data))
                 .collect();
-            node_index = node_index + 1;
-            buffer_index = buffer_index + 2;
+            node_index += 1;
+            buffer_index += 2;
             let triple = create_array(
                 nodes,
                 list_data_type,
@@ -113,12 +113,12 @@ fn create_array(
         }
         FixedSizeList(ref list_data_type, _) => {
             let list_node = &nodes[node_index];
-            let list_buffers: Vec<Buffer> = buffers[buffer_index..buffer_index + 1]
+            let list_buffers: Vec<Buffer> = buffers[buffer_index..=buffer_index]
                 .iter()
                 .map(|buf| read_buffer(buf, data))
                 .collect();
-            node_index = node_index + 1;
-            buffer_index = buffer_index + 1;
+            node_index += 1;
+            buffer_index += 1;
             let triple = create_array(
                 nodes,
                 list_data_type,
@@ -136,8 +136,8 @@ fn create_array(
         Struct(struct_fields) => {
             let struct_node = &nodes[node_index];
             let null_buffer: Buffer = read_buffer(&buffers[buffer_index], data);
-            node_index = node_index + 1;
-            buffer_index = buffer_index + 1;
+            node_index += 1;
+            buffer_index += 1;
 
             // read the arrays for each field
             let mut struct_arrays = vec![];
@@ -178,8 +178,8 @@ fn create_array(
                 .map(|buf| read_buffer(buf, data))
                 .collect();
             let value_array = dictionaries[node_index].clone().unwrap();
-            node_index = node_index + 1;
-            buffer_index = buffer_index + 2;
+            node_index += 1;
+            buffer_index += 2;
 
             create_dictionary_array(
                 index_node,
@@ -187,6 +187,16 @@ fn create_array(
                 &index_buffers[..],
                 value_array,
             )
+        }
+        Null => {
+            let length = nodes[node_index].length() as usize;
+            let data = ArrayData::builder(data_type.clone())
+                .len(length)
+                .offset(0)
+                .build();
+            node_index += 1;
+            // no buffer increases
+            make_array(data)
         }
         _ => {
             let array = create_primitive_array(
@@ -197,8 +207,8 @@ fn create_array(
                     .map(|buf| read_buffer(buf, data))
                     .collect(),
             );
-            node_index = node_index + 1;
-            buffer_index = buffer_index + 2;
+            node_index += 1;
+            buffer_index += 2;
             array
         }
     };
@@ -215,7 +225,7 @@ fn create_primitive_array(
     let length = field_node.length() as usize;
     let null_count = field_node.null_count() as usize;
     let array_data = match data_type {
-        Utf8 | Binary => {
+        Utf8 | Binary | LargeBinary | LargeUtf8 => {
             // read 3 buffers
             let mut builder = ArrayData::builder(data_type.clone())
                 .len(length)
@@ -250,7 +260,7 @@ fn create_primitive_array(
         | Time32(_)
         | Date32(_)
         | Interval(IntervalUnit::YearMonth) => {
-            if buffers[1].len() / 8 == length {
+            if buffers[1].len() / 8 == length && length != 1 {
                 // interpret as a signed i64, and cast appropriately
                 let mut builder = ArrayData::builder(DataType::Int64)
                     .len(length)
@@ -279,7 +289,7 @@ fn create_primitive_array(
             }
         }
         Float32 => {
-            if buffers[1].len() / 8 == length {
+            if buffers[1].len() / 8 == length && length != 1 {
                 // interpret as a f64, and cast appropriately
                 let mut builder = ArrayData::builder(DataType::Float64)
                     .len(length)
@@ -327,7 +337,7 @@ fn create_primitive_array(
             }
             builder.build()
         }
-        t @ _ => panic!("Data type {:?} either unsupported or not primitive", t),
+        t => panic!("Data type {:?} either unsupported or not primitive", t),
     };
 
     make_array(array_data)
@@ -341,7 +351,7 @@ fn create_list_array(
     buffers: &[Buffer],
     child_array: ArrayRef,
 ) -> ArrayRef {
-    if let &DataType::List(_) = data_type {
+    if let DataType::List(_) = *data_type {
         let null_count = field_node.null_count() as usize;
         let mut builder = ArrayData::builder(data_type.clone())
             .len(field_node.length() as usize)
@@ -354,7 +364,7 @@ fn create_list_array(
                 .null_bit_buffer(buffers[0].clone())
         }
         make_array(builder.build())
-    } else if let &DataType::FixedSizeList(_, _) = data_type {
+    } else if let DataType::FixedSizeList(_, _) = *data_type {
         let null_count = field_node.null_count() as usize;
         let mut builder = ArrayData::builder(data_type.clone())
             .len(field_node.length() as usize)
@@ -380,7 +390,7 @@ fn create_dictionary_array(
     buffers: &[Buffer],
     value_array: ArrayRef,
 ) -> ArrayRef {
-    if let &DataType::Dictionary(_, _) = data_type {
+    if let DataType::Dictionary(_, _) = *data_type {
         let null_count = field_node.null_count() as usize;
         let mut builder = ArrayData::builder(data_type.clone())
             .len(field_node.length() as usize)
@@ -399,18 +409,18 @@ fn create_dictionary_array(
 }
 
 /// Creates a record batch from binary data using the `ipc::RecordBatch` indexes and the `Schema`
-pub(crate) fn read_record_batch(
-    buf: &Vec<u8>,
+pub fn read_record_batch(
+    buf: &[u8],
     batch: ipc::RecordBatch,
-    schema: Arc<Schema>,
-    dictionaries: &Vec<Option<ArrayRef>>,
-) -> Result<Option<RecordBatch>> {
-    let buffers = batch.buffers().ok_or(ArrowError::IoError(
-        "Unable to get buffers from IPC RecordBatch".to_string(),
-    ))?;
-    let field_nodes = batch.nodes().ok_or(ArrowError::IoError(
-        "Unable to get field nodes from IPC RecordBatch".to_string(),
-    ))?;
+    schema: SchemaRef,
+    dictionaries: &[Option<ArrayRef>],
+) -> Result<RecordBatch> {
+    let buffers = batch.buffers().ok_or_else(|| {
+        ArrowError::IoError("Unable to get buffers from IPC RecordBatch".to_string())
+    })?;
+    let field_nodes = batch.nodes().ok_or_else(|| {
+        ArrowError::IoError("Unable to get field nodes from IPC RecordBatch".to_string())
+    })?;
     // keep track of buffer and node index, the functions that create arrays mutate these
     let mut buffer_index = 0;
     let mut node_index = 0;
@@ -432,7 +442,70 @@ pub(crate) fn read_record_batch(
         arrays.push(triple.0);
     }
 
-    RecordBatch::try_new(schema.clone(), arrays).map(|batch| Some(batch))
+    RecordBatch::try_new(schema, arrays)
+}
+
+/// Read the dictionary from the buffer and provided metadata,
+/// updating the `dictionaries_by_field` with the resulting dictionary
+fn read_dictionary(
+    buf: &[u8],
+    batch: ipc::DictionaryBatch,
+    ipc_schema: &ipc::Schema,
+    schema: &Schema,
+    dictionaries_by_field: &mut [Option<ArrayRef>],
+) -> Result<()> {
+    if batch.isDelta() {
+        return Err(ArrowError::IoError(
+            "delta dictionary batches not supported".to_string(),
+        ));
+    }
+
+    let id = batch.id();
+
+    // As the dictionary batch does not contain the type of the
+    // values array, we need to retrieve this from the schema.
+    let first_field = find_dictionary_field(ipc_schema, id).ok_or_else(|| {
+        ArrowError::InvalidArgumentError("dictionary id not found in schema".to_string())
+    })?;
+
+    // Get an array representing this dictionary's values.
+    let dictionary_values: ArrayRef = match schema.field(first_field).data_type() {
+        DataType::Dictionary(_, ref value_type) => {
+            // Make a fake schema for the dictionary batch.
+            let schema = Schema {
+                fields: vec![Field::new("", value_type.as_ref().clone(), false)],
+                metadata: HashMap::new(),
+            };
+            // Read a single column
+            let record_batch = read_record_batch(
+                &buf,
+                batch.data().unwrap(),
+                Arc::new(schema),
+                &dictionaries_by_field,
+            )?;
+            Some(record_batch.column(0).clone())
+        }
+        _ => None,
+    }
+    .ok_or_else(|| {
+        ArrowError::InvalidArgumentError("dictionary id not found in schema".to_string())
+    })?;
+
+    // for all fields with this dictionary id, update the dictionaries vector
+    // in the reader. Note that a dictionary batch may be shared between many fields.
+    // We don't currently record the isOrdered field. This could be general
+    // attributes of arrays.
+    let fields = ipc_schema.fields().unwrap();
+    for (i, field) in fields.iter().enumerate() {
+        if let Some(dictionary) = field.dictionary() {
+            if dictionary.id() == id {
+                // Add (possibly multiple) array refs to the dictionaries array.
+                dictionaries_by_field[i] = Some(dictionary_values.clone());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // Linear search for the first dictionary field with a dictionary id.
@@ -455,7 +528,7 @@ pub struct FileReader<R: Read + Seek> {
     reader: BufReader<R>,
 
     /// The schema that is read from the file header
-    schema: Arc<Schema>,
+    schema: SchemaRef,
 
     /// The blocks in the file
     ///
@@ -472,6 +545,9 @@ pub struct FileReader<R: Read + Seek> {
     ///
     /// Dictionaries may be appended to in the streaming format.
     dictionaries_by_field: Vec<Option<ArrayRef>>,
+
+    /// Metadata version
+    metadata_version: ipc::MetadataVersion,
 }
 
 impl<R: Read + Seek> FileReader<R> {
@@ -496,12 +572,11 @@ impl<R: Read + Seek> FileReader<R> {
                 "Arrow file does not contain correct footer".to_string(),
             ));
         }
-
-        // what does the footer contain?
+        // read footer length
         let mut footer_size: [u8; 4] = [0; 4];
         reader.seek(SeekFrom::End(-10))?;
         reader.read_exact(&mut footer_size)?;
-        let footer_len = u32::from_le_bytes(footer_size);
+        let footer_len = i32::from_le_bytes(footer_size);
 
         // read footer
         let mut footer_data = vec![0; footer_len as usize];
@@ -509,9 +584,11 @@ impl<R: Read + Seek> FileReader<R> {
         reader.read_exact(&mut footer_data)?;
         let footer = ipc::get_root_as_footer(&footer_data[..]);
 
-        let blocks = footer.recordBatches().ok_or(ArrowError::IoError(
-            "Unable to get record batches from IPC Footer".to_string(),
-        ))?;
+        let blocks = footer.recordBatches().ok_or_else(|| {
+            ArrowError::IoError(
+                "Unable to get record batches from IPC Footer".to_string(),
+            )
+        })?;
 
         let total_blocks = blocks.len();
 
@@ -522,6 +599,7 @@ impl<R: Read + Seek> FileReader<R> {
         let mut dictionaries_by_field = vec![None; schema.fields().len()];
         for block in footer.dictionaries().unwrap() {
             // read length from end of offset
+            // TODO: ARROW-9848: dictionary metadata has not been tested
             let meta_len = block.metaDataLength() - 4;
 
             let mut block_data = vec![0; meta_len as usize];
@@ -541,61 +619,19 @@ impl<R: Read + Seek> FileReader<R> {
                     ))?;
                     reader.read_exact(&mut buf)?;
 
-                    if batch.isDelta() {
-                        panic!("delta dictionary batches not supported");
-                    }
-
-                    let id = batch.id();
-
-                    // As the dictionary batch does not contain the type of the
-                    // values array, we need to retieve this from the schema.
-                    let first_field = find_dictionary_field(&ipc_schema, id)
-                        .expect("dictionary id not found in shchema");
-
-                    // Get an array representing this dictionary's values.
-                    let dictionary_values: ArrayRef =
-                        match schema.field(first_field).data_type() {
-                            DataType::Dictionary(_, ref value_type) => {
-                                // Make a fake schema for the dictionary batch.
-                                let schema = Schema {
-                                    fields: vec![Field::new(
-                                        "",
-                                        value_type.as_ref().clone(),
-                                        false,
-                                    )],
-                                    metadata: HashMap::new(),
-                                };
-                                // Read a single column
-                                let record_batch = read_record_batch(
-                                    &buf,
-                                    batch.data().unwrap(),
-                                    Arc::new(schema),
-                                    &dictionaries_by_field,
-                                )?
-                                .unwrap();
-                                Some(record_batch.column(0).clone())
-                            }
-                            _ => None,
-                        }
-                        .expect("dictionary id not found in schema");
-
-                    // for all fields with this dictionary id, update the dictionaries vector
-                    // in the reader. Note that a dictionary batch may be shared between many fields.
-                    // We don't currently record the isOrdered field. This could be general
-                    // attributes of arrays.
-                    let fields = ipc_schema.fields().unwrap();
-                    for i in 0..fields.len() {
-                        let field: ipc::Field = fields.get(i);
-                        if let Some(dictionary) = field.dictionary() {
-                            if dictionary.id() == id {
-                                // Add (possibly multiple) array refs to the dictionaries array.
-                                dictionaries_by_field[i] =
-                                    Some(dictionary_values.clone());
-                            }
-                        }
-                    }
+                    read_dictionary(
+                        &buf,
+                        batch,
+                        &ipc_schema,
+                        &schema,
+                        &mut dictionaries_by_field,
+                    )?;
                 }
-                _ => panic!("Expecting DictionaryBatch in dictionary blocks."),
+                _ => {
+                    return Err(ArrowError::IoError(
+                        "Expecting DictionaryBatch in dictionary blocks.".to_string(),
+                    ))
+                }
             };
         }
 
@@ -606,6 +642,7 @@ impl<R: Read + Seek> FileReader<R> {
             current_block: 0,
             total_blocks,
             dictionaries_by_field,
+            metadata_version: footer.version(),
         })
     }
 
@@ -617,60 +654,6 @@ impl<R: Read + Seek> FileReader<R> {
     /// Return the schema of the file
     pub fn schema(&self) -> SchemaRef {
         self.schema.clone()
-    }
-
-    /// Read the next record batch
-    pub fn next(&mut self) -> Result<Option<RecordBatch>> {
-        // get current block
-        if self.current_block < self.total_blocks {
-            let block = self.blocks[self.current_block];
-            self.current_block = self.current_block + 1;
-
-            // read length from end of offset
-            let meta_len = block.metaDataLength() - 4;
-
-            let mut block_data = vec![0; meta_len as usize];
-            self.reader
-                .seek(SeekFrom::Start(block.offset() as u64 + 4))?;
-            self.reader.read_exact(&mut block_data)?;
-
-            let message = ipc::get_root_as_message(&block_data[..]);
-
-            match message.header_type() {
-                ipc::MessageHeader::Schema => {
-                    return Err(ArrowError::IoError(
-                        "Not expecting a schema when messages are read".to_string(),
-                    ));
-                }
-                ipc::MessageHeader::RecordBatch => {
-                    let batch =
-                        message.header_as_record_batch().ok_or(ArrowError::IoError(
-                            "Unable to read IPC message as record batch".to_string(),
-                        ))?;
-                    // read the block that makes up the record batch into a buffer
-                    let mut buf = vec![0; block.bodyLength() as usize];
-                    self.reader.seek(SeekFrom::Start(
-                        block.offset() as u64 + block.metaDataLength() as u64,
-                    ))?;
-                    self.reader.read_exact(&mut buf)?;
-
-                    read_record_batch(
-                        &buf,
-                        batch,
-                        self.schema(),
-                        &self.dictionaries_by_field,
-                    )
-                }
-                _ => {
-                    return Err(ArrowError::IoError(
-                        "Reading types other than record batches not yet supported"
-                            .to_string(),
-                    ));
-                }
-            }
-        } else {
-            Ok(None)
-        }
     }
 
     /// Read a specific record batch
@@ -687,15 +670,85 @@ impl<R: Read + Seek> FileReader<R> {
             Ok(())
         }
     }
+
+    fn maybe_next(&mut self) -> Result<Option<RecordBatch>> {
+        let block = self.blocks[self.current_block];
+        self.current_block += 1;
+
+        // read length
+        self.reader.seek(SeekFrom::Start(block.offset() as u64))?;
+        let mut meta_buf = [0; 4];
+        self.reader.read_exact(&mut meta_buf)?;
+        if meta_buf == CONTINUATION_MARKER {
+            // continuation marker encountered, read message next
+            self.reader.read_exact(&mut meta_buf)?;
+        }
+        let meta_len = i32::from_le_bytes(meta_buf);
+
+        let mut block_data = vec![0; meta_len as usize];
+        self.reader.read_exact(&mut block_data)?;
+
+        let message = ipc::get_root_as_message(&block_data[..]);
+
+        // some old test data's footer metadata is not set, so we account for that
+        if self.metadata_version != ipc::MetadataVersion::V1
+            && message.version() != self.metadata_version
+        {
+            return Err(ArrowError::IoError(
+                "Could not read IPC message as metadata versions mismatch".to_string(),
+            ));
+        }
+
+        match message.header_type() {
+            ipc::MessageHeader::Schema => Err(ArrowError::IoError(
+                "Not expecting a schema when messages are read".to_string(),
+            )),
+            ipc::MessageHeader::RecordBatch => {
+                let batch = message.header_as_record_batch().ok_or_else(|| {
+                    ArrowError::IoError(
+                        "Unable to read IPC message as record batch".to_string(),
+                    )
+                })?;
+                // read the block that makes up the record batch into a buffer
+                let mut buf = vec![0; block.bodyLength() as usize];
+                self.reader.seek(SeekFrom::Start(
+                    block.offset() as u64 + block.metaDataLength() as u64,
+                ))?;
+                self.reader.read_exact(&mut buf)?;
+
+                read_record_batch(
+                    &buf,
+                    batch,
+                    self.schema(),
+                    &self.dictionaries_by_field,
+                ).map(Some)
+            }
+            ipc::MessageHeader::NONE => {
+                Ok(None)
+            }
+            t => Err(ArrowError::IoError(format!(
+                "Reading types other than record batches not yet supported, unable to read {:?}", t
+            ))),
+        }
+    }
+}
+
+impl<R: Read + Seek> Iterator for FileReader<R> {
+    type Item = Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // get current block
+        if self.current_block < self.total_blocks {
+            self.maybe_next().transpose()
+        } else {
+            None
+        }
+    }
 }
 
 impl<R: Read + Seek> RecordBatchReader for FileReader<R> {
-    fn schema(&mut self) -> SchemaRef {
+    fn schema(&self) -> SchemaRef {
         self.schema.clone()
-    }
-
-    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
-        self.next()
     }
 }
 
@@ -703,17 +756,24 @@ impl<R: Read + Seek> RecordBatchReader for FileReader<R> {
 pub struct StreamReader<R: Read> {
     /// Buffered stream reader
     reader: BufReader<R>,
+
     /// The schema that is read from the stream's first message
-    schema: Arc<Schema>,
-    /// An indicator of whether the strewam is complete.
+    schema: SchemaRef,
+
+    /// The bytes of the IPC schema that is read from the stream's first message
     ///
-    /// This value is set to `true` the first time the reader's `next()` returns `None`.
-    finished: bool,
+    /// This is kept in order to interpret dictionary data
+    ipc_schema: Vec<u8>,
 
     /// Optional dictionaries for each schema field.
     ///
     /// Dictionaries may be appended to in the streaming format.
     dictionaries_by_field: Vec<Option<ArrayRef>>,
+
+    /// An indicator of whether the stream is complete.
+    ///
+    /// This value is set to `true` the first time the reader's `next()` returns `None`.
+    finished: bool,
 }
 
 impl<R: Read> StreamReader<R> {
@@ -728,27 +788,22 @@ impl<R: Read> StreamReader<R> {
         let mut meta_size: [u8; 4] = [0; 4];
         reader.read_exact(&mut meta_size)?;
         let meta_len = {
-            let meta_len = u32::from_le_bytes(meta_size);
-
             // If a continuation marker is encountered, skip over it and read
             // the size from the next four bytes.
-            if meta_len == CONTINUATION_MARKER {
+            if meta_size == CONTINUATION_MARKER {
                 reader.read_exact(&mut meta_size)?;
-                u32::from_le_bytes(meta_size)
-            } else {
-                meta_len
             }
+            i32::from_le_bytes(meta_size)
         };
 
         let mut meta_buffer = vec![0; meta_len as usize];
         reader.read_exact(&mut meta_buffer)?;
 
-        let vecs = &meta_buffer.to_vec();
-        let message = ipc::get_root_as_message(vecs);
+        let message = ipc::get_root_as_message(meta_buffer.as_slice());
         // message header is a Schema, so read it
-        let ipc_schema: ipc::Schema = message.header_as_schema().ok_or(
-            ArrowError::IoError("Unable to read IPC message as schema".to_string()),
-        )?;
+        let ipc_schema: ipc::Schema = message.header_as_schema().ok_or_else(|| {
+            ArrowError::IoError("Unable to read IPC message as schema".to_string())
+        })?;
         let schema = ipc::convert::fb_to_schema(ipc_schema);
 
         // Create an array of optional dictionary value arrays, one per field.
@@ -757,6 +812,7 @@ impl<R: Read> StreamReader<R> {
         Ok(Self {
             reader,
             schema: Arc::new(schema),
+            ipc_schema: meta_buffer,
             finished: false,
             dictionaries_by_field,
         })
@@ -767,25 +823,40 @@ impl<R: Read> StreamReader<R> {
         self.schema.clone()
     }
 
-    /// Read the next record batch
-    pub fn next(&mut self) -> Result<Option<RecordBatch>> {
+    /// Check if the stream is finished
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
+    fn maybe_next(&mut self) -> Result<Option<RecordBatch>> {
         if self.finished {
             return Ok(None);
         }
         // determine metadata length
         let mut meta_size: [u8; 4] = [0; 4];
-        self.reader.read_exact(&mut meta_size)?;
-        let meta_len = {
-            let meta_len = u32::from_le_bytes(meta_size);
 
+        match self.reader.read_exact(&mut meta_size) {
+            Ok(()) => (),
+            Err(e) => {
+                return if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    // Handle EOF without the "0xFFFFFFFF 0x00000000"
+                    // valid according to:
+                    // https://arrow.apache.org/docs/format/Columnar.html#ipc-streaming-format
+                    self.finished = true;
+                    Ok(None)
+                } else {
+                    Err(ArrowError::from(e))
+                };
+            }
+        }
+
+        let meta_len = {
             // If a continuation marker is encountered, skip over it and read
             // the size from the next four bytes.
-            if meta_len == CONTINUATION_MARKER {
+            if meta_size == CONTINUATION_MARKER {
                 self.reader.read_exact(&mut meta_size)?;
-                u32::from_le_bytes(meta_size)
-            } else {
-                meta_len
             }
+            i32::from_le_bytes(meta_size)
         };
 
         if meta_len == 0 {
@@ -801,44 +872,66 @@ impl<R: Read> StreamReader<R> {
         let message = ipc::get_root_as_message(vecs);
 
         match message.header_type() {
-            ipc::MessageHeader::Schema => {
-                return Err(ArrowError::IoError(
-                    "Not expecting a schema when messages are read".to_string(),
-                ));
-            }
+            ipc::MessageHeader::Schema => Err(ArrowError::IoError(
+                "Not expecting a schema when messages are read".to_string(),
+            )),
             ipc::MessageHeader::RecordBatch => {
-                let batch =
-                    message.header_as_record_batch().ok_or(ArrowError::IoError(
+                let batch = message.header_as_record_batch().ok_or_else(|| {
+                    ArrowError::IoError(
                         "Unable to read IPC message as record batch".to_string(),
-                    ))?;
+                    )
+                })?;
                 // read the block that makes up the record batch into a buffer
                 let mut buf = vec![0; message.bodyLength() as usize];
                 self.reader.read_exact(&mut buf)?;
 
-                read_record_batch(&buf, batch, self.schema(), &self.dictionaries_by_field)
+                read_record_batch(&buf, batch, self.schema(), &self.dictionaries_by_field).map(Some)
             }
-            _ => {
-                return Err(ArrowError::IoError(
-                    "Reading types other than record batches not yet supported"
-                        .to_string(),
-                ));
+            ipc::MessageHeader::DictionaryBatch => {
+                let batch = message.header_as_dictionary_batch().ok_or_else(|| {
+                    ArrowError::IoError(
+                        "Unable to read IPC message as dictionary batch".to_string(),
+                    )
+                })?;
+                // read the block that makes up the dictionary batch into a buffer
+                let mut buf = vec![0; message.bodyLength() as usize];
+                self.reader.read_exact(&mut buf)?;
+
+                let ipc_schema = ipc::get_root_as_message(&self.ipc_schema).header_as_schema()
+                .ok_or_else(|| {
+                    ArrowError::IoError(
+                        "Unable to read schema from stored message header".to_string(),
+                    )
+                })?;
+
+                read_dictionary(
+                    &buf, batch, &ipc_schema, &self.schema, &mut self.dictionaries_by_field
+                )?;
+
+                // read the next message until we encounter a RecordBatch
+                self.maybe_next()
             }
+            ipc::MessageHeader::NONE => {
+                Ok(None)
+            }
+            t => Err(ArrowError::IoError(
+                format!("Reading types other than record batches not yet supported, unable to read {:?} ", t)
+            )),
         }
     }
+}
 
-    /// Check if the stream is finished
-    pub fn is_finished(&self) -> bool {
-        self.finished
+impl<R: Read> Iterator for StreamReader<R> {
+    type Item = Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.maybe_next().transpose()
     }
 }
 
 impl<R: Read> RecordBatchReader for StreamReader<R> {
-    fn schema(&mut self) -> SchemaRef {
+    fn schema(&self) -> SchemaRef {
         self.schema.clone()
-    }
-
-    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
-        self.next()
     }
 }
 
@@ -887,7 +980,7 @@ mod tests {
         let paths = vec![
             "generated_interval",
             "generated_datetime",
-            // "generated_dictionary",
+            "generated_dictionary",
             "generated_nested",
             "generated_primitive_no_batches",
             "generated_primitive_zerolength",
@@ -906,10 +999,59 @@ mod tests {
             let arrow_json = read_gzip_json(path);
             assert!(arrow_json.equals_reader(&mut reader));
             // the next batch must be empty
-            assert!(reader.next().unwrap().is_none());
+            assert!(reader.next().is_none());
             // the stream must indicate that it's finished
             assert!(reader.is_finished());
         });
+    }
+
+    #[test]
+    fn test_arrow_single_float_row() {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Float32, false),
+            Field::new("b", DataType::Float32, false),
+            Field::new("c", DataType::Int32, false),
+            Field::new("d", DataType::Int32, false),
+        ]);
+        let arrays = vec![
+            Arc::new(Float32Array::from(vec![1.23])) as ArrayRef,
+            Arc::new(Float32Array::from(vec![-6.50])) as ArrayRef,
+            Arc::new(Int32Array::from(vec![2])) as ArrayRef,
+            Arc::new(Int32Array::from(vec![1])) as ArrayRef,
+        ];
+        let batch = RecordBatch::try_new(Arc::new(schema.clone()), arrays).unwrap();
+        // create stream writer
+        let file = File::create("target/debug/testdata/float.stream").unwrap();
+        let mut stream_writer =
+            crate::ipc::writer::StreamWriter::try_new(file, &schema).unwrap();
+        stream_writer.write(&batch).unwrap();
+        stream_writer.finish().unwrap();
+
+        // read stream back
+        let file = File::open("target/debug/testdata/float.stream").unwrap();
+        let reader = StreamReader::try_new(file).unwrap();
+
+        reader.for_each(|batch| {
+            let batch = batch.unwrap();
+            assert!(
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .unwrap()
+                    .value(0)
+                    != 0.0
+            );
+            assert!(
+                batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .unwrap()
+                    .value(0)
+                    != 0.0
+            );
+        })
     }
 
     /// Read gzipped JSON file

@@ -52,6 +52,11 @@ except ImportError:
     sparse = None
 
 
+# ignore all serialization deprecation warnings in this file, we test that the
+# warnings are actually raised in test_serialization_deprecated.py
+pytestmark = pytest.mark.filterwarnings("ignore:'pyarrow:DeprecationWarning")
+
+
 def assert_equal(obj1, obj2):
     if torch is not None and torch.is_tensor(obj1) and torch.is_tensor(obj2):
         if obj1.is_sparse:
@@ -125,13 +130,16 @@ def assert_equal(obj1, obj2):
     elif isinstance(obj1, pa.SparseCSCMatrix) and \
             isinstance(obj2, pa.SparseCSCMatrix):
         assert obj1.equals(obj2)
+    elif isinstance(obj1, pa.SparseCSFTensor) and \
+            isinstance(obj2, pa.SparseCSFTensor):
+        assert obj1.equals(obj2)
     elif isinstance(obj1, pa.RecordBatch) and isinstance(obj2, pa.RecordBatch):
         assert obj1.equals(obj2)
     elif isinstance(obj1, pa.Table) and isinstance(obj2, pa.Table):
         assert obj1.equals(obj2)
     else:
         assert type(obj1) == type(obj2) and obj1 == obj2, \
-                "Objects {} and {} are different.".format(obj1, obj2)
+            "Objects {} and {} are different.".format(obj1, obj2)
 
 
 PRIMITIVE_OBJECTS = [
@@ -157,7 +165,6 @@ PRIMITIVE_OBJECTS = [
 index_types = ('i1', 'i2', 'i4', 'i8', 'u1', 'u2', 'u4', 'u8')
 tensor_types = ('i1', 'i2', 'i4', 'i8', 'u1', 'u2', 'u4', 'u8',
                 'f2', 'f4', 'f8')
-
 
 PRIMITIVE_OBJECTS += [0, np.array([["hi", "hi"], [1.3, 1]])]
 
@@ -231,7 +238,8 @@ CUSTOM_OBJECTS = [Exception("Test object."), CustomError(), Point(11, y=22),
 
 
 def make_serialization_context():
-    context = pa.default_serialization_context()
+    with pytest.warns(DeprecationWarning):
+        context = pa.default_serialization_context()
 
     context.register_type(Foo, "Foo")
     context.register_type(Bar, "Bar")
@@ -727,6 +735,77 @@ def test_scipy_sparse_csc_matrix_serialization():
     assert np.array_equal(sparse_array.toarray(), result.toarray())
 
 
+@pytest.mark.parametrize('tensor_type', tensor_types)
+@pytest.mark.parametrize('index_type', index_types)
+def test_sparse_csf_tensor_serialization(index_type, tensor_type):
+    tensor_dtype = np.dtype(tensor_type)
+    index_dtype = np.dtype(index_type)
+    data = np.array([[1, 2, 3, 4, 5, 6, 7, 8]]).T.astype(tensor_dtype)
+    indptr = [
+        np.array([0, 2, 3]),
+        np.array([0, 1, 3, 4]),
+        np.array([0, 2, 4, 5, 8]),
+    ]
+    indices = [
+        np.array([0, 1]),
+        np.array([0, 1, 1]),
+        np.array([0, 0, 1, 1]),
+        np.array([1, 2, 0, 2, 0, 0, 1, 2]),
+    ]
+    indptr = [x.astype(index_dtype) for x in indptr]
+    indices = [x.astype(index_dtype) for x in indices]
+    shape = (2, 3, 4, 5)
+    axis_order = (0, 1, 2, 3)
+    dim_names = ("a", "b", "c", "d")
+
+    for ndim in [2, 3, 4]:
+        sparse_tensor = pa.SparseCSFTensor.from_numpy(data, indptr[:ndim - 1],
+                                                      indices[:ndim],
+                                                      shape[:ndim],
+                                                      axis_order[:ndim],
+                                                      dim_names[:ndim])
+
+        context = pa.default_serialization_context()
+        serialized = pa.serialize(sparse_tensor, context=context).to_buffer()
+        result = pa.deserialize(serialized)
+        assert_equal(result, sparse_tensor)
+        assert isinstance(result, pa.SparseCSFTensor)
+
+
+@pytest.mark.parametrize('tensor_type', tensor_types)
+@pytest.mark.parametrize('index_type', index_types)
+def test_sparse_csf_tensor_components_serialization(large_buffer,
+                                                    index_type, tensor_type):
+    tensor_dtype = np.dtype(tensor_type)
+    index_dtype = np.dtype(index_type)
+    data = np.array([[1, 2, 3, 4, 5, 6, 7, 8]]).T.astype(tensor_dtype)
+    indptr = [
+        np.array([0, 2, 3]),
+        np.array([0, 1, 3, 4]),
+        np.array([0, 2, 4, 5, 8]),
+    ]
+    indices = [
+        np.array([0, 1]),
+        np.array([0, 1, 1]),
+        np.array([0, 0, 1, 1]),
+        np.array([1, 2, 0, 2, 0, 0, 1, 2]),
+    ]
+    indptr = [x.astype(index_dtype) for x in indptr]
+    indices = [x.astype(index_dtype) for x in indices]
+    shape = (2, 3, 4, 5)
+    axis_order = (0, 1, 2, 3)
+    dim_names = ("a", "b", "c", "d")
+
+    for ndim in [2, 3, 4]:
+        sparse_tensor = pa.SparseCSFTensor.from_numpy(data, indptr[:ndim - 1],
+                                                      indices[:ndim],
+                                                      shape[:ndim],
+                                                      axis_order[:ndim],
+                                                      dim_names[:ndim])
+
+        serialization_roundtrip(sparse_tensor, large_buffer)
+
+
 @pytest.mark.filterwarnings(
     "ignore:the matrix subclass:PendingDeprecationWarning")
 def test_numpy_matrix_serialization(tmpdir):
@@ -759,7 +838,7 @@ def test_pyarrow_objects_serialization(large_buffer):
     # or it will affect 'test_total_bytes_allocated'.
     pyarrow_objects = [
         pa.array([1, 2, 3, 4]), pa.array(['1', 'never U+1F631', '',
-                                         "233 * U+1F600"]),
+                                          "233 * U+1F600"]),
         pa.array([1, None, 2, 3]),
         pa.Tensor.from_numpy(np.random.rand(2, 3, 4)),
         pa.RecordBatch.from_arrays(
@@ -768,7 +847,7 @@ def test_pyarrow_objects_serialization(large_buffer):
             ['a', 'b']),
         pa.Table.from_arrays([pa.array([1, None, 2, 3]),
                               pa.array(['1', 'never U+1F631', '',
-                                       "233 * u1F600"])],
+                                        "233 * u1F600"])],
                              ['a', 'b'])
     ]
     for obj in pyarrow_objects:
@@ -929,7 +1008,9 @@ def test_serialize_to_components_invalid_cases():
 
     components = {
         'num_tensors': 0,
-        'num_sparse_tensors': {'coo': 0, 'csr': 0, 'csc': 0},
+        'num_sparse_tensors': {
+            'coo': 0, 'csr': 0, 'csc': 0, 'csf': 0, 'ndim_csf': 0
+        },
         'num_ndarrays': 0,
         'num_buffers': 1,
         'data': [buf]
@@ -940,7 +1021,9 @@ def test_serialize_to_components_invalid_cases():
 
     components = {
         'num_tensors': 0,
-        'num_sparse_tensors': {'coo': 0, 'csr': 0, 'csc': 0},
+        'num_sparse_tensors': {
+            'coo': 0, 'csr': 0, 'csc': 0, 'csf': 0, 'ndim_csf': 0
+        },
         'num_ndarrays': 1,
         'num_buffers': 0,
         'data': [buf, buf]

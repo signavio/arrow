@@ -24,6 +24,9 @@
 Reading and writing Parquet files
 =================================
 
+.. seealso::
+   :ref:`Parquet reader and writer API reference <cpp-api-parquet>`.
+
 The Parquet C++ library is part of the Apache Arrow project and benefits
 from tight integration with Arrow C++.
 
@@ -150,7 +153,7 @@ StreamWriter
 
 The :class:`StreamWriter` allows for Parquet files to be written using
 standard C++ output operators.  This type-safe approach also ensures
-that rows are written without ommitting fields and allows for new row
+that rows are written without omitting fields and allows for new row
 groups to be created automatically (after certain volume of data) or
 explicitly by using the :type:`EndRowGroup` stream modifier.
 

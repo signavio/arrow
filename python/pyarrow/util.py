@@ -24,6 +24,11 @@ import socket
 import warnings
 
 
+_DEPR_MSG = (
+    "pyarrow.{} is deprecated as of {}, please use pyarrow.{} instead."
+)
+
+
 def implements(f):
     def decorator(g):
         g.__doc__ = f.__doc__
@@ -32,13 +37,29 @@ def implements(f):
 
 
 def _deprecate_api(old_name, new_name, api, next_version):
-    msg = ('pyarrow.{} is deprecated as of {}, please use pyarrow.{} instead'
-           .format(old_name, next_version, new_name))
+    msg = _DEPR_MSG.format(old_name, next_version, new_name)
 
     def wrapper(*args, **kwargs):
         warnings.warn(msg, FutureWarning)
         return api(*args, **kwargs)
     return wrapper
+
+
+def _deprecate_class(old_name, new_class, next_version,
+                     instancecheck=True):
+    """
+    Raise warning if a deprecated class is used in an isinstance check.
+    """
+    class _DeprecatedMeta(type):
+        def __instancecheck__(self, other):
+            warnings.warn(
+                _DEPR_MSG.format(old_name, next_version, new_class.__name__),
+                FutureWarning,
+                stacklevel=2
+            )
+            return isinstance(other, new_class)
+
+    return _DeprecatedMeta(old_name, (new_class,), {})
 
 
 def _is_path_like(path):
@@ -116,3 +137,8 @@ def find_free_port():
         sock.bind(('', 0))
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return sock.getsockname()[1]
+
+
+def guid():
+    from uuid import uuid4
+    return uuid4().hex

@@ -19,15 +19,15 @@
 
 #include <memory>
 
-#include "arrow/array/builder_adaptive.h"   // IWYU pragma: export
-#include "arrow/array/builder_base.h"       // IWYU pragma: export
-#include "arrow/array/builder_binary.h"     // IWYU pragma: export
-#include "arrow/array/builder_decimal.h"    // IWYU pragma: export
-#include "arrow/array/builder_dict.h"       // IWYU pragma: export
-#include "arrow/array/builder_nested.h"     // IWYU pragma: export
-#include "arrow/array/builder_primitive.h"  // IWYU pragma: export
-#include "arrow/array/builder_time.h"       // IWYU pragma: export
-#include "arrow/array/builder_union.h"      // IWYU pragma: export
+#include "arrow/array/builder_adaptive.h"   // IWYU pragma: keep
+#include "arrow/array/builder_base.h"       // IWYU pragma: keep
+#include "arrow/array/builder_binary.h"     // IWYU pragma: keep
+#include "arrow/array/builder_decimal.h"    // IWYU pragma: keep
+#include "arrow/array/builder_dict.h"       // IWYU pragma: keep
+#include "arrow/array/builder_nested.h"     // IWYU pragma: keep
+#include "arrow/array/builder_primitive.h"  // IWYU pragma: keep
+#include "arrow/array/builder_time.h"       // IWYU pragma: keep
+#include "arrow/array/builder_union.h"      // IWYU pragma: keep
 #include "arrow/status.h"
 #include "arrow/util/visibility.h"
 
@@ -39,7 +39,7 @@ class MemoryPool;
 /// \brief Construct an empty ArrayBuilder corresponding to the data
 /// type
 /// \param[in] pool the MemoryPool to use for allocations
-/// \param[in] type an instance of DictionaryType
+/// \param[in] type the data type to create the builder for
 /// \param[out] out the created ArrayBuilder
 ARROW_EXPORT
 Status MakeBuilder(MemoryPool* pool, const std::shared_ptr<DataType>& type,
@@ -48,7 +48,7 @@ Status MakeBuilder(MemoryPool* pool, const std::shared_ptr<DataType>& type,
 /// \brief Construct an empty DictionaryBuilder initialized optionally
 /// with a pre-existing dictionary
 /// \param[in] pool the MemoryPool to use for allocations
-/// \param[in] type an instance of DictionaryType
+/// \param[in] type the dictionary type to create the builder for
 /// \param[in] dictionary the initial dictionary, if any. May be nullptr
 /// \param[out] out the created ArrayBuilder
 ARROW_EXPORT

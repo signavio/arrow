@@ -15,10 +15,12 @@
 .. specific language governing permissions and limitations
 .. under the License.
 
+.. _flight-rpc:
+
 Arrow Flight RPC
 ================
 
-Arrow Flight is a RPC framework for high-performance data services
+Arrow Flight is an RPC framework for high-performance data services
 based on Arrow data, and is built on top of gRPC_ and the :doc:`IPC
 format <IPC>`.
 

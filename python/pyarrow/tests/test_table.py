@@ -16,13 +16,14 @@
 # under the License.
 
 from collections import OrderedDict
+from collections.abc import Iterable
 import pickle
 import sys
+import weakref
 
 import numpy as np
 import pytest
 import pyarrow as pa
-from pyarrow import compat
 
 
 def test_chunked_array_basics():
@@ -50,10 +51,85 @@ def test_chunked_array_basics():
     assert sys.getsizeof(data) >= object.__sizeof__(data) + data.nbytes
     data.validate()
 
+    wr = weakref.ref(data)
+    assert wr() is not None
+    del data
+    assert wr() is None
+
+
+def test_chunked_array_construction():
+    arr = pa.chunked_array([
+        [1, 2, 3],
+        [4, 5, 6],
+        [7, 8, 9],
+    ])
+    assert arr.type == pa.int64()
+    assert len(arr) == 9
+    assert len(arr.chunks) == 3
+
+    arr = pa.chunked_array([
+        [1, 2, 3],
+        [4., 5., 6.],
+        [7, 8, 9],
+    ])
+    assert arr.type == pa.int64()
+    assert len(arr) == 9
+    assert len(arr.chunks) == 3
+
+    arr = pa.chunked_array([
+        [1, 2, 3],
+        [4., 5., 6.],
+        [7, 8, 9],
+    ], type=pa.int8())
+    assert arr.type == pa.int8()
+    assert len(arr) == 9
+    assert len(arr.chunks) == 3
+
+    arr = pa.chunked_array([
+        [1, 2, 3],
+        []
+    ])
+    assert arr.type == pa.int64()
+    assert len(arr) == 3
+    assert len(arr.chunks) == 2
+
+    msg = (
+        "When passing an empty collection of arrays you must also pass the "
+        "data type"
+    )
+    with pytest.raises(ValueError, match=msg):
+        assert pa.chunked_array([])
+
+    assert pa.chunked_array([], type=pa.string()).type == pa.string()
+    assert pa.chunked_array([[]]).type == pa.null()
+    assert pa.chunked_array([[]], type=pa.string()).type == pa.string()
+
+
+def test_chunked_array_to_numpy():
+    data = pa.chunked_array([
+        [1, 2, 3],
+        [4, 5, 6],
+        []
+    ])
+    arr1 = np.asarray(data)
+    arr2 = data.to_numpy()
+
+    assert isinstance(arr2, np.ndarray)
+    assert arr2.shape == (6,)
+    assert np.array_equal(arr1, arr2)
+
 
 def test_chunked_array_mismatch_types():
-    with pytest.raises(pa.ArrowInvalid):
-        pa.chunked_array([pa.array([1, 2]), pa.array(['foo', 'bar'])])
+    with pytest.raises(TypeError):
+        # Given array types are different
+        pa.chunked_array([
+            pa.array([1, 2, 3]),
+            pa.array([1., 2., 3.])
+        ])
+
+    with pytest.raises(TypeError):
+        # Given array type is different from explicit type argument
+        pa.chunked_array([pa.array([1, 2, 3])], type=pa.float64())
 
 
 def test_chunked_array_str():
@@ -89,6 +165,8 @@ def test_chunked_array_getitem():
         data[6]
     with pytest.raises(IndexError):
         data[-7]
+    # Ensure this works with numpy scalars
+    assert data[np.int32(1)].as_py() == 2
 
     data_slice = data[2:4]
     assert data_slice.to_pylist() == [3, 4]
@@ -101,6 +179,30 @@ def test_chunked_array_getitem():
     assert data_slice.to_pylist() == []
 
 
+def test_chunked_array_slice():
+    data = [
+        pa.array([1, 2, 3]),
+        pa.array([4, 5, 6])
+    ]
+    data = pa.chunked_array(data)
+
+    data_slice = data.slice(len(data))
+    assert data_slice.type == data.type
+    assert data_slice.to_pylist() == []
+
+    data_slice = data.slice(len(data) + 10)
+    assert data_slice.type == data.type
+    assert data_slice.to_pylist() == []
+
+    table = pa.Table.from_arrays([data], names=["a"])
+    table_slice = table.slice(len(table))
+    assert len(table_slice) == 0
+
+    table = pa.Table.from_arrays([data], names=["a"])
+    table_slice = table.slice(len(table) + 10)
+    assert len(table_slice) == 0
+
+
 def test_chunked_array_iter():
     data = [
         pa.array([0]),
@@ -111,9 +213,9 @@ def test_chunked_array_iter():
     arr = pa.chunked_array(data)
 
     for i, j in zip(range(10), arr):
-        assert i == j
+        assert i == j.as_py()
 
-    assert isinstance(arr, compat.Iterable)
+    assert isinstance(arr, Iterable)
 
 
 def test_chunked_array_equals():
@@ -338,6 +440,11 @@ c1: int32
 -- schema metadata --
 foo: 'bar'"""
 
+    wr = weakref.ref(batch)
+    assert wr() is not None
+    del batch
+    assert wr() is None
+
 
 def test_recordbatch_equals():
     data1 = [
@@ -361,6 +468,10 @@ def test_recordbatch_equals():
                                  metadata={'key': 'value'})
     assert batch_meta.equals(batch)
     assert not batch_meta.equals(batch, check_metadata=True)
+
+    # ARROW-8889
+    assert not batch.equals(None)
+    assert batch != "foo"
 
 
 def test_recordbatch_take():
@@ -639,6 +750,11 @@ def test_table_basics():
     assert table == pa.table(columns, names=table.column_names)
     assert table != pa.table(columns[1:], names=table.column_names[1:])
     assert table != columns
+
+    wr = weakref.ref(table)
+    assert wr() is not None
+    del table
+    assert wr() is None
 
 
 def test_table_from_arrays_preserves_column_metadata():
@@ -1058,8 +1174,7 @@ def test_table_unsafe_casting():
         pa.field('d', pa.string())
     ])
 
-    with pytest.raises(pa.ArrowInvalid,
-                       match='Floating point value truncated'):
+    with pytest.raises(pa.ArrowInvalid, match='truncated'):
         table.cast(target_schema)
 
     casted_table = table.cast(target_schema, safe=False)
@@ -1373,3 +1488,91 @@ def test_table_function_unicode_schema():
     result = pa.table(d, schema=schema)
     assert result[0].chunk(0).equals(pa.array([1, 2, 3], type='int32'))
     assert result[1].chunk(0).equals(pa.array(['a', 'b', 'c'], type='string'))
+
+
+def test_table_take_vanilla_functionality():
+    table = pa.table(
+        [pa.array([1, 2, 3, None, 5]),
+         pa.array(['a', 'b', 'c', 'd', 'e'])],
+        ['f1', 'f2'])
+
+    assert table.take(pa.array([2, 3])).equals(table.slice(2, 2))
+
+
+def test_table_take_null_index():
+    table = pa.table(
+        [pa.array([1, 2, 3, None, 5]),
+         pa.array(['a', 'b', 'c', 'd', 'e'])],
+        ['f1', 'f2'])
+
+    result_with_null_index = pa.table(
+        [pa.array([1, None]),
+         pa.array(['a', None])],
+        ['f1', 'f2'])
+
+    assert table.take(pa.array([0, None])).equals(result_with_null_index)
+
+
+def test_table_take_non_consecutive():
+    table = pa.table(
+        [pa.array([1, 2, 3, None, 5]),
+         pa.array(['a', 'b', 'c', 'd', 'e'])],
+        ['f1', 'f2'])
+
+    result_non_consecutive = pa.table(
+        [pa.array([2, None]),
+         pa.array(['b', 'd'])],
+        ['f1', 'f2'])
+
+    assert table.take(pa.array([1, 3])).equals(result_non_consecutive)
+
+
+def test_table_select():
+    a1 = pa.array([1, 2, 3, None, 5])
+    a2 = pa.array(['a', 'b', 'c', 'd', 'e'])
+    a3 = pa.array([[1, 2], [3, 4], [5, 6], None, [9, 10]])
+    table = pa.table([a1, a2, a3], ['f1', 'f2', 'f3'])
+
+    # selecting with string names
+    result = table.select(['f1'])
+    expected = pa.table([a1], ['f1'])
+    assert result.equals(expected)
+
+    result = table.select(['f3', 'f2'])
+    expected = pa.table([a3, a2], ['f3', 'f2'])
+    assert result.equals(expected)
+
+    # selecting with integer indices
+    result = table.select([0])
+    expected = pa.table([a1], ['f1'])
+    assert result.equals(expected)
+
+    result = table.select([2, 1])
+    expected = pa.table([a3, a2], ['f3', 'f2'])
+    assert result.equals(expected)
+
+    # preserve metadata
+    table2 = table.replace_schema_metadata({"a": "test"})
+    result = table2.select(["f1", "f2"])
+    assert b"a" in result.schema.metadata
+
+    # selecting non-existing column raises
+    with pytest.raises(KeyError, match='Field "f5" does not exist'):
+        table.select(['f5'])
+
+    with pytest.raises(IndexError, match="index out of bounds"):
+        table.select([5])
+
+    # duplicate selection gives duplicated names in resulting table
+    result = table.select(['f2', 'f2'])
+    expected = pa.table([a2, a2], ['f2', 'f2'])
+    assert result.equals(expected)
+
+    # selection duplicated column raises
+    table = pa.table([a1, a2, a3], ['f1', 'f2', 'f1'])
+    with pytest.raises(KeyError, match='Field "f1" exists 2 times'):
+        table.select(['f1'])
+
+    result = table.select(['f2'])
+    expected = pa.table([a2], ['f2'])
+    assert result.equals(expected)

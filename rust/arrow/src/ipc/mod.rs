@@ -15,10 +15,18 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// TODO: (vcq): Protobuf codegen is not generating Debug impls.
+#![allow(missing_debug_implementations)]
+
 pub mod convert;
 pub mod reader;
 pub mod writer;
 
+#[allow(clippy::redundant_closure)]
+#[allow(clippy::needless_lifetimes)]
+#[allow(clippy::extra_unused_lifetimes)]
+#[allow(clippy::redundant_static_lifetimes)]
+#[allow(clippy::redundant_field_names)]
 pub mod gen;
 
 pub use self::gen::File::*;
@@ -28,3 +36,4 @@ pub use self::gen::SparseTensor::*;
 pub use self::gen::Tensor::*;
 
 static ARROW_MAGIC: [u8; 6] = [b'A', b'R', b'R', b'O', b'W', b'1'];
+static CONTINUATION_MARKER: [u8; 4] = [0xff; 4];

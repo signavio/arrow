@@ -17,13 +17,23 @@
 
 package org.apache.arrow.vector.util;
 
+import static org.apache.arrow.vector.validate.ValidateUtil.validateOrThrow;
+
 import org.apache.arrow.util.Preconditions;
+import org.apache.arrow.vector.BaseFixedWidthVector;
 import org.apache.arrow.vector.ValueVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.validate.ValidateVectorBufferVisitor;
+import org.apache.arrow.vector.validate.ValidateVectorDataVisitor;
+import org.apache.arrow.vector.validate.ValidateVectorTypeVisitor;
 
 /**
  * Utility methods for {@link ValueVector}.
  */
 public class ValueVectorUtility {
+
+  private ValueVectorUtility() {
+  }
 
   /**
    * Get the toString() representation of vector suitable for debugging.
@@ -81,5 +91,82 @@ public class ValueVectorUtility {
     }
 
     return sb.toString();
+  }
+
+  /**
+   * Utility to validate vector in O(1) time.
+   */
+  public static void validate(ValueVector vector) {
+    Preconditions.checkNotNull(vector);
+
+    ValidateVectorTypeVisitor typeVisitor = new ValidateVectorTypeVisitor();
+    vector.accept(typeVisitor, null);
+
+    ValidateVectorBufferVisitor bufferVisitor = new ValidateVectorBufferVisitor();
+    vector.accept(bufferVisitor, null);
+  }
+
+  /**
+   * Utility to validate vector in O(n) time, where n is the value count.
+   */
+  public static void validateFull(ValueVector vector) {
+    validate(vector);
+
+    ValidateVectorDataVisitor dataVisitor = new ValidateVectorDataVisitor();
+    vector.accept(dataVisitor, null);
+  }
+
+  /**
+   * Utility to validate vector schema root in O(1) time.
+   */
+  public static void validate(VectorSchemaRoot root) {
+    Preconditions.checkNotNull(root);
+    int valueCount = root.getRowCount();
+    validateOrThrow(valueCount >= 0, "The row count of vector schema root %s is negative.", valueCount);
+    for (ValueVector childVec : root.getFieldVectors()) {
+      validateOrThrow(valueCount == childVec.getValueCount(),
+          "Child vector and vector schema root have different value counts. " +
+              "Child vector value count %s, vector schema root value count %s", childVec.getValueCount(), valueCount);
+      validate(childVec);
+    }
+  }
+
+  /**
+   * Utility to validate vector in O(n) time, where n is the value count.
+   */
+  public static void validateFull(VectorSchemaRoot root) {
+    Preconditions.checkNotNull(root);
+    int valueCount = root.getRowCount();
+    validateOrThrow(valueCount >= 0, "The row count of vector schema root %s is negative.", valueCount);
+    for (ValueVector childVec : root.getFieldVectors()) {
+      validateOrThrow(valueCount == childVec.getValueCount(),
+          "Child vector and vector schema root have different value counts. " +
+              "Child vector value count %s, vector schema root value count %s", childVec.getValueCount(), valueCount);
+      validateFull(childVec);
+    }
+  }
+
+  /**
+   * Pre allocate memory for BaseFixedWidthVector.
+   */
+  public static void preAllocate(VectorSchemaRoot root, int targetSize) {
+    for (ValueVector vector : root.getFieldVectors()) {
+      if (vector instanceof BaseFixedWidthVector) {
+        ((BaseFixedWidthVector) vector).allocateNew(targetSize);
+      }
+    }
+  }
+
+  /**
+   * Ensure capacity for BaseFixedWidthVector.
+   */
+  public static void ensureCapacity(VectorSchemaRoot root, int targetCapacity) {
+    for (ValueVector vector : root.getFieldVectors()) {
+      if (vector instanceof BaseFixedWidthVector) {
+        while (vector.getValueCapacity() < targetCapacity) {
+          vector.reAlloc();
+        }
+      }
+    }
   }
 }

@@ -44,7 +44,7 @@ using ::arrow::internal::PlatformFilename;
 using internal::json::ArrayFromJSON;
 
 Result<std::shared_ptr<RecordBatch>> MakeExtensionBatch() {
-  auto array = ExampleUUID();
+  auto array = ExampleUuid();
   auto md = key_value_metadata({"key1", "key2"}, {"value1", ""});
   auto schema = ::arrow::schema({field("f0", array->type())}, md);
   return RecordBatch::Make(schema, array->length(), {array});
@@ -99,9 +99,9 @@ Result<std::shared_ptr<Buffer>> SerializeRecordBatch(
   ARROW_ASSIGN_OR_RAISE(auto sink, io::BufferOutputStream::Create(1024));
   std::shared_ptr<RecordBatchWriter> writer;
   if (is_stream_format) {
-    ARROW_ASSIGN_OR_RAISE(writer, NewStreamWriter(sink.get(), batch->schema()));
+    ARROW_ASSIGN_OR_RAISE(writer, MakeStreamWriter(sink, batch->schema()));
   } else {
-    ARROW_ASSIGN_OR_RAISE(writer, NewFileWriter(sink.get(), batch->schema()));
+    ARROW_ASSIGN_OR_RAISE(writer, MakeFileWriter(sink, batch->schema()));
   }
   RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
   RETURN_NOT_OK(writer->Close());

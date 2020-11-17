@@ -529,11 +529,10 @@ garrow_table_replace_column(GArrowTable *table,
  * @table: A #GArrowTable.
  * @error: (nullable): Return location for a #GError or %NULL.
  *
- * Returns: (nullable) (transfer full):
+ * Returns: (nullable):
  *   The formatted table content or %NULL on error.
  *
- *   The returned string should be freed when with g_free() when no
- *   longer needed.
+ *   It should be freed with g_free() when no longer needed.
  *
  * Since: 0.12.0
  */
@@ -541,13 +540,7 @@ gchar *
 garrow_table_to_string(GArrowTable *table, GError **error)
 {
   const auto arrow_table = garrow_table_get_raw(table);
-  std::stringstream sink;
-  auto status = arrow::PrettyPrint(*arrow_table, 0, &sink);
-  if (garrow_error_check(error, status, "[table][to-string]")) {
-    return g_strdup(sink.str().c_str());
-  } else {
-    return NULL;
-  }
+  return g_strdup(arrow_table->ToString().c_str());
 }
 
 /**

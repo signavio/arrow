@@ -22,10 +22,63 @@
 #include <type_traits>
 #include <vector>
 
-#include "arrow/type_fwd.h"
+#include "arrow/type.h"
 #include "arrow/util/bit_util.h"
 
 namespace arrow {
+
+//
+// Per-type id type lookup
+//
+
+template <Type::type id>
+struct TypeIdTraits {};
+
+#define TYPE_ID_TRAIT(_id, _typeclass) \
+  template <>                          \
+  struct TypeIdTraits<Type::_id> {     \
+    using Type = _typeclass;           \
+  };
+
+TYPE_ID_TRAIT(NA, NullType)
+TYPE_ID_TRAIT(BOOL, BooleanType)
+TYPE_ID_TRAIT(INT8, Int8Type)
+TYPE_ID_TRAIT(INT16, Int16Type)
+TYPE_ID_TRAIT(INT32, Int32Type)
+TYPE_ID_TRAIT(INT64, Int64Type)
+TYPE_ID_TRAIT(UINT8, UInt8Type)
+TYPE_ID_TRAIT(UINT16, UInt16Type)
+TYPE_ID_TRAIT(UINT32, UInt32Type)
+TYPE_ID_TRAIT(UINT64, UInt64Type)
+TYPE_ID_TRAIT(HALF_FLOAT, HalfFloatType)
+TYPE_ID_TRAIT(FLOAT, FloatType)
+TYPE_ID_TRAIT(DOUBLE, DoubleType)
+TYPE_ID_TRAIT(STRING, StringType)
+TYPE_ID_TRAIT(BINARY, BinaryType)
+TYPE_ID_TRAIT(LARGE_STRING, LargeStringType)
+TYPE_ID_TRAIT(LARGE_BINARY, LargeBinaryType)
+TYPE_ID_TRAIT(FIXED_SIZE_BINARY, FixedSizeBinaryType)
+TYPE_ID_TRAIT(DATE32, Date32Type)
+TYPE_ID_TRAIT(DATE64, Date64Type)
+TYPE_ID_TRAIT(TIME32, Time32Type)
+TYPE_ID_TRAIT(TIME64, Time64Type)
+TYPE_ID_TRAIT(TIMESTAMP, TimestampType)
+TYPE_ID_TRAIT(INTERVAL_DAY_TIME, DayTimeIntervalType)
+TYPE_ID_TRAIT(INTERVAL_MONTHS, MonthIntervalType)
+TYPE_ID_TRAIT(DURATION, DurationType)
+TYPE_ID_TRAIT(DECIMAL128, Decimal128Type)
+TYPE_ID_TRAIT(DECIMAL256, Decimal256Type)
+TYPE_ID_TRAIT(STRUCT, StructType)
+TYPE_ID_TRAIT(LIST, ListType)
+TYPE_ID_TRAIT(LARGE_LIST, LargeListType)
+TYPE_ID_TRAIT(FIXED_SIZE_LIST, FixedSizeListType)
+TYPE_ID_TRAIT(MAP, MapType)
+TYPE_ID_TRAIT(DENSE_UNION, DenseUnionType)
+TYPE_ID_TRAIT(SPARSE_UNION, SparseUnionType)
+TYPE_ID_TRAIT(DICTIONARY, DictionaryType)
+TYPE_ID_TRAIT(EXTENSION, ExtensionType)
+
+#undef TYPE_ID_TRAIT
 
 //
 // Per-type type traits
@@ -237,10 +290,19 @@ struct TypeTraits<Decimal128Type> {
 };
 
 template <>
+struct TypeTraits<Decimal256Type> {
+  using ArrayType = Decimal256Array;
+  using BuilderType = Decimal256Builder;
+  using ScalarType = Decimal256Scalar;
+  constexpr static bool is_parameter_free = false;
+};
+
+template <>
 struct TypeTraits<BinaryType> {
   using ArrayType = BinaryArray;
   using BuilderType = BinaryBuilder;
   using ScalarType = BinaryScalar;
+  using OffsetType = Int32Type;
   constexpr static bool is_parameter_free = true;
   static inline std::shared_ptr<DataType> type_singleton() { return binary(); }
 };
@@ -250,6 +312,7 @@ struct TypeTraits<LargeBinaryType> {
   using ArrayType = LargeBinaryArray;
   using BuilderType = LargeBinaryBuilder;
   using ScalarType = LargeBinaryScalar;
+  using OffsetType = Int64Type;
   constexpr static bool is_parameter_free = true;
   static inline std::shared_ptr<DataType> type_singleton() { return large_binary(); }
 };
@@ -267,6 +330,7 @@ struct TypeTraits<StringType> {
   using ArrayType = StringArray;
   using BuilderType = StringBuilder;
   using ScalarType = StringScalar;
+  using OffsetType = Int32Type;
   constexpr static bool is_parameter_free = true;
   static inline std::shared_ptr<DataType> type_singleton() { return utf8(); }
 };
@@ -276,6 +340,7 @@ struct TypeTraits<LargeStringType> {
   using ArrayType = LargeStringArray;
   using BuilderType = LargeStringBuilder;
   using ScalarType = LargeStringScalar;
+  using OffsetType = Int64Type;
   constexpr static bool is_parameter_free = true;
   static inline std::shared_ptr<DataType> type_singleton() { return large_utf8(); }
 };
@@ -305,6 +370,7 @@ struct TypeTraits<ListType> {
   using OffsetType = Int32Type;
   using OffsetArrayType = Int32Array;
   using OffsetBuilderType = Int32Builder;
+  using OffsetScalarType = Int32Scalar;
   constexpr static bool is_parameter_free = false;
 };
 
@@ -316,6 +382,7 @@ struct TypeTraits<LargeListType> {
   using OffsetType = Int64Type;
   using OffsetArrayType = Int64Array;
   using OffsetBuilderType = Int64Builder;
+  using OffsetScalarType = Int64Scalar;
   constexpr static bool is_parameter_free = false;
 };
 
@@ -356,9 +423,18 @@ struct TypeTraits<StructType> {
 };
 
 template <>
-struct TypeTraits<UnionType> {
-  using ArrayType = UnionArray;
-  using ScalarType = UnionScalar;
+struct TypeTraits<SparseUnionType> {
+  using ArrayType = SparseUnionArray;
+  using BuilderType = SparseUnionBuilder;
+  using ScalarType = SparseUnionScalar;
+  constexpr static bool is_parameter_free = false;
+};
+
+template <>
+struct TypeTraits<DenseUnionType> {
+  using ArrayType = DenseUnionArray;
+  using BuilderType = DenseUnionBuilder;
+  using ScalarType = DenseUnionScalar;
   constexpr static bool is_parameter_free = false;
 };
 
@@ -463,12 +539,20 @@ using enable_if_base_binary = enable_if_t<is_base_binary_type<T>::value, R>;
 
 // Any binary excludes string from Base binary
 template <typename T>
-using is_any_binary_type =
+using is_binary_type =
     std::integral_constant<bool, std::is_same<BinaryType, T>::value ||
                                      std::is_same<LargeBinaryType, T>::value>;
 
 template <typename T, typename R = void>
-using enable_if_any_binary = enable_if_t<is_any_binary_type<T>::value, R>;
+using enable_if_binary = enable_if_t<is_binary_type<T>::value, R>;
+
+template <typename T>
+using is_string_type =
+    std::integral_constant<bool, std::is_same<StringType, T>::value ||
+                                     std::is_same<LargeStringType, T>::value>;
+
+template <typename T, typename R = void>
+using enable_if_string = enable_if_t<is_string_type<T>::value, R>;
 
 template <typename T>
 using is_string_like_type =
@@ -476,6 +560,9 @@ using is_string_like_type =
 
 template <typename T, typename R = void>
 using enable_if_string_like = enable_if_t<is_string_like_type<T>::value, R>;
+
+template <typename T, typename U, typename R = void>
+using enable_if_same = enable_if_t<std::is_same<T, U>::value, R>;
 
 // Note that this also includes DecimalType
 template <typename T>
@@ -499,6 +586,18 @@ using is_decimal_type = std::is_base_of<DecimalType, T>;
 template <typename T, typename R = void>
 using enable_if_decimal = enable_if_t<is_decimal_type<T>::value, R>;
 
+template <typename T>
+using is_decimal128_type = std::is_base_of<Decimal128Type, T>;
+
+template <typename T, typename R = void>
+using enable_if_decimal128 = enable_if_t<is_decimal128_type<T>::value, R>;
+
+template <typename T>
+using is_decimal256_type = std::is_base_of<Decimal256Type, T>;
+
+template <typename T, typename R = void>
+using enable_if_decimal256 = enable_if_t<is_decimal256_type<T>::value, R>;
+
 // Nested Types
 
 template <typename T>
@@ -506,6 +605,9 @@ using is_nested_type = std::is_base_of<NestedType, T>;
 
 template <typename T, typename R = void>
 using enable_if_nested = enable_if_t<is_nested_type<T>::value, R>;
+
+template <typename T, typename R = void>
+using enable_if_not_nested = enable_if_t<!is_nested_type<T>::value, R>;
 
 template <typename T>
 using is_var_length_list_type =
@@ -528,6 +630,15 @@ using is_fixed_size_list_type = std::is_same<FixedSizeListType, T>;
 
 template <typename T, typename R = void>
 using enable_if_fixed_size_list = enable_if_t<is_fixed_size_list_type<T>::value, R>;
+
+template <typename T>
+using is_list_type =
+    std::integral_constant<bool, std::is_same<T, ListType>::value ||
+                                     std::is_same<T, LargeListType>::value ||
+                                     std::is_same<T, FixedSizeListType>::value>;
+
+template <typename T, typename R = void>
+using enable_if_list_type = enable_if_t<is_list_type<T>::value, R>;
 
 template <typename T>
 using is_list_like_type =
@@ -587,6 +698,18 @@ using is_interval_type = std::is_base_of<IntervalType, T>;
 template <typename T, typename R = void>
 using enable_if_interval = enable_if_t<is_interval_type<T>::value, R>;
 
+template <typename T>
+using is_dictionary_type = std::is_base_of<DictionaryType, T>;
+
+template <typename T, typename R = void>
+using enable_if_dictionary = enable_if_t<is_dictionary_type<T>::value, R>;
+
+template <typename T>
+using is_extension_type = std::is_base_of<ExtensionType, T>;
+
+template <typename T, typename R = void>
+using enable_if_extension = enable_if_t<is_extension_type<T>::value, R>;
+
 // Attribute differentiation
 
 template <typename T>
@@ -603,8 +726,12 @@ template <typename T, typename R = void>
 using enable_if_has_c_type = enable_if_t<has_c_type<T>::value, R>;
 
 template <typename T>
-using has_string_view = std::integral_constant<bool, is_binary_like_type<T>::value ||
-                                                         is_string_like_type<T>::value>;
+using has_string_view =
+    std::integral_constant<bool, std::is_same<BinaryType, T>::value ||
+                                     std::is_same<LargeBinaryType, T>::value ||
+                                     std::is_same<StringType, T>::value ||
+                                     std::is_same<LargeStringType, T>::value ||
+                                     std::is_same<FixedSizeBinaryType, T>::value>;
 
 template <typename T, typename R = void>
 using enable_if_has_string_view = enable_if_t<has_string_view<T>::value, R>;
@@ -617,11 +744,11 @@ template <typename T, typename R = void>
 using enable_if_8bit_int = enable_if_t<is_8bit_int<T>::value, R>;
 
 template <typename T>
-using is_paramater_free_type =
+using is_parameter_free_type =
     std::integral_constant<bool, TypeTraits<T>::is_parameter_free>;
 
 template <typename T, typename R = void>
-using enable_if_parameter_free = enable_if_t<is_paramater_free_type<T>::value, R>;
+using enable_if_parameter_free = enable_if_t<is_parameter_free_type<T>::value, R>;
 
 // Physical representation quirks
 
@@ -643,6 +770,14 @@ using is_physical_unsigned_integer_type =
 template <typename T, typename R = void>
 using enable_if_physical_unsigned_integer =
     enable_if_t<is_physical_unsigned_integer_type<T>::value, R>;
+
+template <typename T>
+using is_physical_integer_type =
+    std::integral_constant<bool, is_physical_unsigned_integer_type<T>::value ||
+                                     is_physical_signed_integer_type<T>::value>;
+
+template <typename T, typename R = void>
+using enable_if_physical_integer = enable_if_t<is_physical_integer_type<T>::value, R>;
 
 // Like is_floating_type but excluding half-floats which don't have a
 // float-like c type.
@@ -672,6 +807,32 @@ static inline bool is_integer(Type::type type_id) {
   return false;
 }
 
+static inline bool is_signed_integer(Type::type type_id) {
+  switch (type_id) {
+    case Type::INT8:
+    case Type::INT16:
+    case Type::INT32:
+    case Type::INT64:
+      return true;
+    default:
+      break;
+  }
+  return false;
+}
+
+static inline bool is_unsigned_integer(Type::type type_id) {
+  switch (type_id) {
+    case Type::UINT8:
+    case Type::UINT16:
+    case Type::UINT32:
+    case Type::UINT64:
+      return true;
+    default:
+      break;
+  }
+  return false;
+}
+
 static inline bool is_floating(Type::type type_id) {
   switch (type_id) {
     case Type::HALF_FLOAT:
@@ -686,7 +847,6 @@ static inline bool is_floating(Type::type type_id) {
 
 static inline bool is_primitive(Type::type type_id) {
   switch (type_id) {
-    case Type::NA:
     case Type::BOOL:
     case Type::UINT8:
     case Type::INT8:
@@ -705,7 +865,8 @@ static inline bool is_primitive(Type::type type_id) {
     case Type::TIME64:
     case Type::TIMESTAMP:
     case Type::DURATION:
-    case Type::INTERVAL:
+    case Type::INTERVAL_MONTHS:
+    case Type::INTERVAL_DAY_TIME:
       return true;
     default:
       break;
@@ -754,7 +915,8 @@ static inline bool is_dictionary(Type::type type_id) {
 
 static inline bool is_fixed_size_binary(Type::type type_id) {
   switch (type_id) {
-    case Type::DECIMAL:
+    case Type::DECIMAL128:
+    case Type::DECIMAL256:
     case Type::FIXED_SIZE_BINARY:
       return true;
     default:
@@ -765,6 +927,22 @@ static inline bool is_fixed_size_binary(Type::type type_id) {
 
 static inline bool is_fixed_width(Type::type type_id) {
   return is_primitive(type_id) || is_dictionary(type_id) || is_fixed_size_binary(type_id);
+}
+
+static inline bool is_nested(Type::type type_id) {
+  switch (type_id) {
+    case Type::LIST:
+    case Type::LARGE_LIST:
+    case Type::FIXED_SIZE_LIST:
+    case Type::MAP:
+    case Type::STRUCT:
+    case Type::SPARSE_UNION:
+    case Type::DENSE_UNION:
+      return true;
+    default:
+      break;
+  }
+  return false;
 }
 
 }  // namespace arrow

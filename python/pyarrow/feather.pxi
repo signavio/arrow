@@ -52,7 +52,7 @@ def write_feather(Table table, object dest, compression=None,
                                   properties))
 
 
-cdef class FeatherReader:
+cdef class FeatherReader(_Weakrefable):
     cdef:
         shared_ptr[CFeatherReader] reader
 
@@ -65,6 +65,10 @@ cdef class FeatherReader:
 
         with nogil:
             self.reader = GetResultValue(CFeatherReader.Open(reader))
+
+    @property
+    def version(self):
+        return self.reader.get().version()
 
     def read(self):
         cdef shared_ptr[CTable] sp_table

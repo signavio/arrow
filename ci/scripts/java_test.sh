@@ -22,18 +22,20 @@ arrow_dir=${1}
 source_dir=${1}/java
 cpp_build_dir=${2}/cpp/${ARROW_BUILD_TYPE:-debug}
 
-# for jni and plasma tests
+# For JNI and Plasma tests
 export LD_LIBRARY_PATH=${ARROW_HOME}/lib:${LD_LIBRARY_PATH}
 export PLASMA_STORE=${ARROW_HOME}/bin/plasma-store-server
 
 mvn="mvn -B -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn"
+# Use `2 * ncores` threads
+mvn="${mvn} -T 2C"
 
 pushd ${source_dir}
 
 ${mvn} test
 
 if [ "${ARROW_GANDIVA_JAVA}" = "ON" ]; then
-  ${mvn} test -Parrow-jni -pl gandiva -Darrow.cpp.build.dir=${cpp_build_dir}
+  ${mvn} test -Parrow-jni -pl adapter/orc,gandiva -Darrow.cpp.build.dir=${cpp_build_dir}
 fi
 
 if [ "${ARROW_PLASMA}" = "ON" ]; then

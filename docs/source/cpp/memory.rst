@@ -22,6 +22,9 @@
 Memory Management
 =================
 
+.. seealso::
+   :doc:`Memory management API reference <api/memory>`
+
 Buffers
 =======
 
@@ -71,11 +74,12 @@ You can allocate a buffer yourself by calling one of the
 :func:`arrow::AllocateBuffer` or :func:`arrow::AllocateResizableBuffer`
 overloads::
 
-   std::shared_ptr<arrow::Buffer> buffer;
-
-   if (!arrow::AllocateBuffer(4096, &buffer).ok()) {
+   arrow::Result<std::unique_ptr<Buffer>> maybe_buffer = arrow::AllocateBuffer(4096);
+   if (!maybe_buffer.ok()) {
       // ... handle allocation error
    }
+
+   std::shared_ptr<arrow::Buffer> buffer = *std::move(maybe_buffer);
    uint8_t* buffer_data = buffer->mutable_data();
    memcpy(buffer_data, "hello world", 11);
 
@@ -138,7 +142,7 @@ Arrow represents the CPU and other devices using the
 specifies how to allocate on a given device.  Each device has a default memory manager, but
 additional instances may be constructed (for example, wrapping a custom
 :class:`arrow::MemoryPool` the CPU).
-:class:`arrow::MemoryManager` instances which specifiy how to allocate
+:class:`arrow::MemoryManager` instances which specify how to allocate
 memory on a given device (for example, using a particular
 :class:`arrow::MemoryPool` on the CPU).
 

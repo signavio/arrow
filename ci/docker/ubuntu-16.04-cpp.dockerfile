@@ -15,14 +15,17 @@
 # specific language governing permissions and limitations
 # under the License.
 
-ARG arch=amd64
-FROM ${arch}/ubuntu:16.04
+ARG base=amd64/ubuntu:16.04
+FROM ${base}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ENV DEBIAN_FRONTEND noninteractive
 
-ARG llvm
+# LLVM 10 or later requires C++ 14 but g++-5's C++ 14 support is limited.
+# cpp/src/arrow/vendored/datetime/date.h doesn't work.
+# ARG llvm
+ENV llvm=8
 RUN apt-get update -y -q && \
     apt-get install -y -q --no-install-recommends \
         apt-transport-https \
@@ -48,6 +51,7 @@ RUN apt-get update -y -q && \
         liblz4-dev \
         libre2-dev \
         libssl-dev \
+        libutf8proc-dev \
         libzstd1-dev \
         llvm-${llvm}-dev \
         make \

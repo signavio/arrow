@@ -81,6 +81,7 @@ cmake -G "%GENERATOR%" ^
       -DARROW_BUILD_TESTS=ON ^
       -DGTest_SOURCE=BUNDLED ^
       -DCMAKE_BUILD_TYPE=%CONFIGURATION% ^
+      -DCMAKE_UNITY_BUILD=ON ^
       -DARROW_CXXFLAGS="/MP" ^
       -DARROW_WITH_BZ2=ON ^
       -DARROW_WITH_ZLIB=ON ^
@@ -94,7 +95,7 @@ cmake -G "%GENERATOR%" ^
       -DARROW_PARQUET=ON ^
       ..  || exit /B
 
-cmake --build . --target INSTALL --config Release
+cmake --build . --target INSTALL --config Release || exit /B 1
 
 @rem NOTE(wesm): Building googletest is flaky for me with ninja. Building it
 @rem first fixes the problem
@@ -118,12 +119,14 @@ popd
 @rem Build and import pyarrow
 pushd %ARROW_SOURCE%\python
 
+pip install -r requirements-test.txt || exit /B 1
+
 set PYARROW_CMAKE_GENERATOR=%GENERATOR%
 set PYARROW_WITH_FLIGHT=1
 set PYARROW_WITH_PARQUET=1
 set PYARROW_WITH_DATASET=1
-python setup.py build_ext --inplace --bundle-arrow-cpp bdist_wheel  || exit /B 1
-py.test pyarrow -v -s --parquet || exit /B 1
+python setup.py build_ext --inplace --bundle-arrow-cpp bdist_wheel || exit /B 1
+py.test pyarrow -v -s --enable-parquet || exit /B 1
 
 popd
 

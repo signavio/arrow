@@ -21,6 +21,7 @@ import static org.apache.arrow.vector.NullCheckingForGet.NULL_CHECKING_ENABLED;
 
 import java.math.BigInteger;
 
+import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.complex.impl.UInt8ReaderImpl;
 import org.apache.arrow.vector.complex.reader.FieldReader;
@@ -31,14 +32,18 @@ import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.util.TransferPair;
 
-import io.netty.buffer.ArrowBuf;
-
 /**
  * UInt8Vector implements a fixed width vector (8 bytes) of
  * integer values which could be null. A validity buffer (bit vector) is
  * maintained to track which elements in the vector are null.
  */
 public final class UInt8Vector extends BaseFixedWidthVector implements BaseIntVector {
+
+  /**
+   * The maximum 64-bit unsigned long integer.
+   */
+  public static final long MAX_UINT8 = 0XFFFFFFFFFFFFFFFFL;
+
   private static final byte TYPE_WIDTH = 8;
   private final FieldReader reader;
 
@@ -87,7 +92,7 @@ public final class UInt8Vector extends BaseFixedWidthVector implements BaseIntVe
    * @return value stored at the index.
    */
   public static BigInteger getNoOverflow(final ArrowBuf buffer, final int index) {
-    BigInteger l = BigInteger.valueOf(buffer.getLong(index * TYPE_WIDTH));
+    BigInteger l = BigInteger.valueOf(buffer.getLong((long) index * TYPE_WIDTH));
     return SAFE_CONVERSION_MASK.and(l);
   }
 
@@ -102,7 +107,7 @@ public final class UInt8Vector extends BaseFixedWidthVector implements BaseIntVe
     if (NULL_CHECKING_ENABLED && isSet(index) == 0) {
       throw new IllegalStateException("Value at index is null");
     }
-    return valueBuffer.getLong(index * TYPE_WIDTH);
+    return valueBuffer.getLong((long) index * TYPE_WIDTH);
   }
 
   /**
@@ -118,7 +123,7 @@ public final class UInt8Vector extends BaseFixedWidthVector implements BaseIntVe
       return;
     }
     holder.isSet = 1;
-    holder.value = valueBuffer.getLong(index * TYPE_WIDTH);
+    holder.value = valueBuffer.getLong((long) index * TYPE_WIDTH);
   }
 
   /**
@@ -131,7 +136,7 @@ public final class UInt8Vector extends BaseFixedWidthVector implements BaseIntVe
     if (isSet(index) == 0) {
       return null;
     } else {
-      return valueBuffer.getLong(index * TYPE_WIDTH);
+      return valueBuffer.getLong((long) index * TYPE_WIDTH);
     }
   }
 
@@ -158,7 +163,7 @@ public final class UInt8Vector extends BaseFixedWidthVector implements BaseIntVe
 
 
   private void setValue(int index, long value) {
-    valueBuffer.setLong(index * TYPE_WIDTH, value);
+    valueBuffer.setLong((long) index * TYPE_WIDTH, value);
   }
 
   /**

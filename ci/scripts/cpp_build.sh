@@ -82,6 +82,7 @@ cmake -G "${CMAKE_GENERATOR:-Ninja}" \
       -DARROW_PLASMA_JAVA_CLIENT=${ARROW_PLASMA_JAVA_CLIENT:-OFF} \
       -DARROW_PLASMA=${ARROW_PLASMA:-OFF} \
       -DARROW_PYTHON=${ARROW_PYTHON:-OFF} \
+      -DARROW_RUNTIME_SIMD_LEVEL=${ARROW_RUNTIME_SIMD_LEVEL:-MAX} \
       -DARROW_S3=${ARROW_S3:-OFF} \
       -DARROW_TEST_LINKAGE=${ARROW_TEST_LINKAGE:-shared} \
       -DARROW_TEST_MEMCHECK=${ARROW_TEST_MEMCHECK:-OFF} \
@@ -97,8 +98,10 @@ cmake -G "${CMAKE_GENERATOR:-Ninja}" \
       -DARROW_WITH_BZ2=${ARROW_WITH_BZ2:-OFF} \
       -DARROW_WITH_LZ4=${ARROW_WITH_LZ4:-OFF} \
       -DARROW_WITH_SNAPPY=${ARROW_WITH_SNAPPY:-OFF} \
+      -DARROW_WITH_UTF8PROC=${ARROW_WITH_UTF8PROC:-ON} \
       -DARROW_WITH_ZLIB=${ARROW_WITH_ZLIB:-OFF} \
       -DARROW_WITH_ZSTD=${ARROW_WITH_ZSTD:-OFF} \
+      -DAWSSDK_SOURCE=${AWSSDK_SOURCE:-} \
       -Dbenchmark_SOURCE=${benchmark_SOURCE:-} \
       -DBOOST_SOURCE=${BOOST_SOURCE:-} \
       -DBrotli_SOURCE=${Brotli_SOURCE:-} \
@@ -117,17 +120,22 @@ cmake -G "${CMAKE_GENERATOR:-Ninja}" \
       -DORC_SOURCE=${ORC_SOURCE:-} \
       -DPARQUET_BUILD_EXECUTABLES=${PARQUET_BUILD_EXECUTABLES:-OFF} \
       -DPARQUET_BUILD_EXAMPLES=${PARQUET_BUILD_EXAMPLES:-OFF} \
-      -DPARQUET_REQUIRE_ENCRYPTION=${ARROW_WITH_OPENSSL:-ON} \
+      -DPARQUET_REQUIRE_ENCRYPTION=${PARQUET_REQUIRE_ENCRYPTION:-ON} \
       -DProtobuf_SOURCE=${Protobuf_SOURCE:-} \
       -DRapidJSON_SOURCE=${RapidJSON_SOURCE:-} \
       -DRE2_SOURCE=${RE2_SOURCE:-} \
       -DSnappy_SOURCE=${Snappy_SOURCE:-} \
       -DThrift_SOURCE=${Thrift_SOURCE:-} \
-      -DZSTD_SOURCE=${ZSTD_SOURCE:-} \
+      -Dutf8proc_SOURCE=${utf8proc_SOURCE:-} \
+      -Dzstd_SOURCE=${zstd_SOURCE:-} \
       ${CMAKE_ARGS} \
       ${source_dir}
 
-time cmake --build . --target install
+if [ ! -z "${CPP_MAKE_PARALLELISM}" ]; then
+  time cmake --build . --target install -- -j${CPP_MAKE_PARALLELISM}
+else
+  time cmake --build . --target install
+fi
 
 popd
 

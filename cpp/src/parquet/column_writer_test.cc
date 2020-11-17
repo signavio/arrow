@@ -22,6 +22,7 @@
 
 #include "arrow/io/buffered.h"
 #include "arrow/testing/gtest_util.h"
+#include "arrow/util/bitmap_builders.h"
 
 #include "parquet/column_reader.h"
 #include "parquet/column_writer.h"
@@ -752,8 +753,8 @@ TEST(TestColumnWriter, RepeatedListsUpdateSpacedBug) {
   auto values_data = reinterpret_cast<const int32_t*>(values_buffer->data());
 
   std::shared_ptr<Buffer> valid_bits;
-  ASSERT_OK_AND_ASSIGN(
-      valid_bits, ::arrow::BitUtil::BytesToBits({1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1}));
+  ASSERT_OK_AND_ASSIGN(valid_bits, ::arrow::internal::BytesToBits(
+                                       {1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1}));
 
   // valgrind will warn about out of bounds access into def_levels_data
   typed_writer->WriteBatchSpaced(14, def_levels.data(), rep_levels.data(),
@@ -763,11 +764,11 @@ TEST(TestColumnWriter, RepeatedListsUpdateSpacedBug) {
 
 void GenerateLevels(int min_repeat_factor, int max_repeat_factor, int max_level,
                     std::vector<int16_t>& input_levels) {
-  // for each repetition count upto max_repeat_factor
+  // for each repetition count up to max_repeat_factor
   for (int repeat = min_repeat_factor; repeat <= max_repeat_factor; repeat++) {
     // repeat count increases by a factor of 2 for every iteration
     int repeat_count = (1 << repeat);
-    // generate levels for repetition count upto the maximum level
+    // generate levels for repetition count up to the maximum level
     int16_t value = 0;
     int bwidth = 0;
     while (value <= max_level) {
@@ -879,7 +880,7 @@ TEST(TestLevels, TestLevelsDecodeMultipleBitWidth) {
   // for each encoding
   for (int encode = 0; encode < 2; encode++) {
     Encoding::type encoding = encodings[encode];
-    // BIT_PACKED requires a sequence of atleast 8
+    // BIT_PACKED requires a sequence of at least 8
     if (encoding == Encoding::BIT_PACKED) min_repeat_factor = 3;
     // for each maximum bit-width
     for (int bit_width = 1; bit_width <= max_bit_width; bit_width++) {

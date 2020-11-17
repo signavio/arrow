@@ -20,9 +20,9 @@
 #[cfg(feature = "simd")]
 use packed_simd::u8x64;
 
-static BIT_MASK: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
+const BIT_MASK: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 
-static POPCOUNT_TABLE: [u8; 256] = [
+const POPCOUNT_TABLE: [u8; 256] = [
     0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4,
     3, 4, 4, 5, 1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5, 2, 3, 3, 4, 3, 4, 4, 5,
     3, 4, 4, 5, 4, 5, 5, 6, 1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5, 2, 3, 3, 4,
@@ -43,7 +43,7 @@ pub fn round_upto_multiple_of_64(num: usize) -> usize {
 
 /// Returns the nearest multiple of `factor` that is `>=` than `num`. Here `factor` must
 /// be a power of 2.
-fn round_upto_power_of_2(num: usize, factor: usize) -> usize {
+pub fn round_upto_power_of_2(num: usize, factor: usize) -> usize {
     debug_assert!(factor > 0 && (factor & (factor - 1)) == 0);
     (num + (factor - 1)) & !(factor - 1)
 }
@@ -56,26 +56,77 @@ pub fn get_bit(data: &[u8], i: usize) -> bool {
 
 /// Returns whether bit at position `i` in `data` is set or not.
 ///
+/// # Safety
+///
 /// Note this doesn't do any bound checking, for performance reason. The caller is
 /// responsible to guarantee that `i` is within bounds.
 #[inline]
 pub unsafe fn get_bit_raw(data: *const u8, i: usize) -> bool {
-    (*data.offset((i >> 3) as isize) & BIT_MASK[i & 7]) != 0
+    (*data.add(i >> 3) & BIT_MASK[i & 7]) != 0
 }
 
 /// Sets bit at position `i` for `data`
 #[inline]
 pub fn set_bit(data: &mut [u8], i: usize) {
-    data[i >> 3] |= BIT_MASK[i & 7]
+    data[i >> 3] |= BIT_MASK[i & 7];
 }
 
 /// Sets bit at position `i` for `data`
+///
+/// # Safety
 ///
 /// Note this doesn't do any bound checking, for performance reason. The caller is
 /// responsible to guarantee that `i` is within bounds.
 #[inline]
 pub unsafe fn set_bit_raw(data: *mut u8, i: usize) {
-    *data.offset((i >> 3) as isize) |= BIT_MASK[i & 7]
+    *data.add(i >> 3) |= BIT_MASK[i & 7];
+}
+
+/// Sets bit at position `i` for `data` to 0
+#[inline]
+pub fn unset_bit(data: &mut [u8], i: usize) {
+    data[i >> 3] ^= BIT_MASK[i & 7];
+}
+
+/// Sets bit at position `i` for `data` to 0
+///
+/// # Safety
+///
+/// Note this doesn't do any bound checking, for performance reason. The caller is
+/// responsible to guarantee that `i` is within bounds.
+#[inline]
+pub unsafe fn unset_bit_raw(data: *mut u8, i: usize) {
+    *data.add(i >> 3) ^= BIT_MASK[i & 7];
+}
+
+/// Sets bits in the non-inclusive range `start..end` for `data`
+///
+/// # Safety
+///
+/// Note this doesn't do any bound checking, for performance reason. The caller is
+/// responsible to guarantee that both `start` and `end` are within bounds.
+#[inline]
+pub unsafe fn set_bits_raw(data: *mut u8, start: usize, end: usize) {
+    let start_byte = (start >> 3) as isize;
+    let end_byte = (end >> 3) as isize;
+
+    let start_offset = (start & 7) as u8;
+    let end_offset = (end & 7) as u8;
+
+    // All set apart from lowest `start_offset` bits
+    let start_mask = !((1 << start_offset) - 1);
+    // All clear apart from lowest `end_offset` bits
+    let end_mask = (1 << end_offset) - 1;
+
+    if start_byte == end_byte {
+        *data.offset(start_byte) |= start_mask & end_mask;
+    } else {
+        *data.offset(start_byte) |= start_mask;
+        for i in (start_byte + 1)..end_byte {
+            *data.offset(i) = 0xFF;
+        }
+        *data.offset(end_byte) |= end_mask;
+    }
 }
 
 /// Returns the number of 1-bits in `data`
@@ -120,14 +171,17 @@ pub fn count_set_bits_offset(data: &[u8], offset: usize, length: usize) -> usize
 /// Returns the ceil of `value`/`divisor`
 #[inline]
 pub fn ceil(value: usize, divisor: usize) -> usize {
-    let mut result = value / divisor;
-    if value % divisor != 0 {
-        result += 1
-    };
-    result
+    let (quot, rem) = (value / divisor, value % divisor);
+    if rem > 0 && divisor > 0 {
+        quot + 1
+    } else {
+        quot
+    }
 }
 
 /// Performs SIMD bitwise binary operations.
+///
+/// # Safety
 ///
 /// Note that each slice should be 64 bytes and it is the callers responsibility to ensure
 /// that this is the case.  If passed slices larger than 64 bytes the operation will only
@@ -221,6 +275,17 @@ mod tests {
     }
 
     #[test]
+    fn test_unset_bit() {
+        let mut b = [0b11111111];
+        unset_bit(&mut b, 0);
+        assert_eq!([0b11111110], b);
+        unset_bit(&mut b, 2);
+        assert_eq!([0b11111010], b);
+        unset_bit(&mut b, 5);
+        assert_eq!([0b11011010], b);
+    }
+
+    #[test]
     fn test_set_bit_raw() {
         const NUM_BYTE: usize = 10;
         let mut buf = vec![0; NUM_BYTE];
@@ -233,6 +298,61 @@ mod tests {
                 unsafe {
                     set_bit_raw(buf.as_mut_ptr(), i);
                 }
+            }
+        }
+
+        let raw_ptr = buf.as_ptr();
+        for (i, b) in expected.iter().enumerate() {
+            unsafe {
+                assert_eq!(*b, get_bit_raw(raw_ptr, i));
+            }
+        }
+    }
+
+    #[test]
+    fn test_unset_bit_raw() {
+        const NUM_BYTE: usize = 10;
+        let mut buf = vec![255; NUM_BYTE];
+        let mut expected = vec![];
+        let mut rng = thread_rng();
+        for i in 0..8 * NUM_BYTE {
+            let b = rng.gen_bool(0.5);
+            expected.push(b);
+            if !b {
+                unsafe {
+                    unset_bit_raw(buf.as_mut_ptr(), i);
+                }
+            }
+        }
+
+        let raw_ptr = buf.as_ptr();
+        for (i, b) in expected.iter().enumerate() {
+            unsafe {
+                assert_eq!(*b, get_bit_raw(raw_ptr, i));
+            }
+        }
+    }
+
+    #[test]
+    fn test_set_bits_raw() {
+        const NUM_BYTE: usize = 64;
+        const NUM_BLOCKS: usize = 12;
+        const MAX_BLOCK_SIZE: usize = 32;
+        let mut buf = vec![0; NUM_BYTE];
+
+        let mut expected = Vec::with_capacity(NUM_BYTE * 8);
+        expected.resize(NUM_BYTE * 8, false);
+
+        let mut rng = thread_rng();
+
+        for _ in 0..NUM_BLOCKS {
+            let start = rng.gen_range(0, NUM_BYTE * 8 - MAX_BLOCK_SIZE);
+            let end = start + rng.gen_range(1, MAX_BLOCK_SIZE);
+            unsafe {
+                set_bits_raw(buf.as_mut_ptr(), start, end);
+            }
+            for i in start..end {
+                expected[i] = true;
             }
         }
 
@@ -289,6 +409,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(any(target_arch = "x86", target_arch = "x86_64")))]
     fn test_ceil() {
         assert_eq!(ceil(0, 1), 0);
         assert_eq!(ceil(1, 1), 1);

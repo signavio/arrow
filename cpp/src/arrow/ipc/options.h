@@ -20,9 +20,10 @@
 #include <cstdint>
 #include <vector>
 
+#include "arrow/ipc/type_fwd.h"
+#include "arrow/status.h"
 #include "arrow/type_fwd.h"
 #include "arrow/util/compression.h"
-#include "arrow/util/optional.h"
 #include "arrow/util/visibility.h"
 
 namespace arrow {
@@ -55,16 +56,20 @@ struct ARROW_EXPORT IpcWriteOptions {
   /// \brief The memory pool to use for allocations made during IPC writing
   MemoryPool* memory_pool = default_memory_pool();
 
-  /// \brief EXPERIMENTAL: Codec to use for compressing and decompressing
-  /// record batch body buffers. This is not part of the Arrow IPC protocol and
-  /// only for internal use (e.g. Feather files). May only be LZ4_FRAME and
-  /// ZSTD
-  Compression::type compression = Compression::UNCOMPRESSED;
-  int compression_level = Compression::kUseDefaultCompressionLevel;
+  /// \brief Compression codec to use for record batch body buffers
+  ///
+  /// May only be UNCOMPRESSED, LZ4_FRAME and ZSTD.
+  std::shared_ptr<util::Codec> codec;
 
   /// \brief Use global CPU thread pool to parallelize any computational tasks
   /// like compression
   bool use_threads = true;
+
+  /// \brief Format version to use for IPC messages and their metadata.
+  ///
+  /// Presently using V5 version (readable by 1.0.0 and later).
+  /// V4 is also available (readable by 0.8.0 and later).
+  MetadataVersion metadata_version = MetadataVersion::V5;
 
   static IpcWriteOptions Defaults();
 };
@@ -81,8 +86,8 @@ struct ARROW_EXPORT IpcReadOptions {
   MemoryPool* memory_pool = default_memory_pool();
 
   /// \brief EXPERIMENTAL: Top-level schema fields to include when
-  /// deserializing RecordBatch. If null, return all deserialized fields
-  util::optional<std::vector<int>> included_fields;
+  /// deserializing RecordBatch. If empty, return all deserialized fields
+  std::vector<int> included_fields;
 
   /// \brief Use global CPU thread pool to parallelize any computational tasks
   /// like decompression

@@ -17,14 +17,16 @@
 
 context("CsvTableReader")
 
+# Not all types round trip via CSV 100% identical by default
+tbl <- example_data[, c("dbl", "lgl", "false", "chr")]
+
 test_that("Can read csv file", {
   tf <- tempfile()
   on.exit(unlink(tf))
 
-  write.csv(iris, tf, row.names = FALSE)
+  write.csv(tbl, tf, row.names = FALSE)
 
-  iris$Species <- as.character(iris$Species)
-  tab0 <- Table$create(!!!iris)
+  tab0 <- Table$create(tbl)
   tab1 <- read_csv_arrow(tf, as_data_frame = FALSE)
   expect_equal(tab0, tab1)
   tab2 <- read_csv_arrow(mmap_open(tf), as_data_frame = FALSE)
@@ -37,24 +39,20 @@ test_that("read_csv_arrow(as_data_frame=TRUE)", {
   tf <- tempfile()
   on.exit(unlink(tf))
 
-  write.csv(iris, tf, row.names = FALSE)
-  iris$Species <- as.character(iris$Species)
-
+  write.csv(tbl, tf, row.names = FALSE)
   tab1 <- read_csv_arrow(tf, as_data_frame = TRUE)
-  expect_equivalent(iris, tab1)
+  expect_equivalent(tbl, tab1)
 })
 
 test_that("read_delim_arrow parsing options: delim", {
   tf <- tempfile()
   on.exit(unlink(tf))
 
-  write.table(iris, tf, sep = "\t", row.names = FALSE)
+  write.table(tbl, tf, sep = "\t", row.names = FALSE)
   tab1 <- read_tsv_arrow(tf)
   tab2 <- read_delim_arrow(tf, delim = "\t")
   expect_equivalent(tab1, tab2)
-
-  iris$Species <- as.character(iris$Species)
-  expect_equivalent(iris, tab1)
+  expect_equivalent(tbl, tab1)
 })
 
 test_that("read_delim_arrow parsing options: quote", {
@@ -79,26 +77,25 @@ test_that("read_csv_arrow parsing options: col_names", {
   on.exit(unlink(tf))
 
   # Writing the CSV without the header
-  write.table(iris, tf, sep = ",", row.names = FALSE, col.names = FALSE)
+  write.table(tbl, tf, sep = ",", row.names = FALSE, col.names = FALSE)
 
   # Reading with col_names = FALSE autogenerates names
   no_names <- read_csv_arrow(tf, col_names = FALSE)
-  expect_equal(no_names$f0, iris$Sepal.Length)
+  expect_equal(no_names$f0, tbl[[1]])
 
-  tab1 <- read_csv_arrow(tf, col_names = names(iris))
+  tab1 <- read_csv_arrow(tf, col_names = names(tbl))
 
-  expect_identical(names(tab1), names(iris))
-  iris$Species <- as.character(iris$Species)
-  expect_equivalent(iris, tab1)
+  expect_identical(names(tab1), names(tbl))
+  expect_equivalent(tbl, tab1)
 
   # This errors (correctly) because I haven't given enough names
   # but the error message is "Invalid: Empty CSV file", which is not accurate
   expect_error(
-    read_csv_arrow(tf, col_names = names(iris)[1])
+    read_csv_arrow(tf, col_names = names(tbl)[1])
   )
   # Same here
   expect_error(
-    read_csv_arrow(tf, col_names = c(names(iris), names(iris)))
+    read_csv_arrow(tf, col_names = c(names(tbl), names(tbl)))
   )
 })
 
@@ -108,25 +105,24 @@ test_that("read_csv_arrow parsing options: skip", {
 
   # Adding two garbage lines to start the csv
   cat("asdf\nqwer\n", file = tf)
-  suppressWarnings(write.table(iris, tf, sep = ",", row.names = FALSE, append = TRUE))
+  suppressWarnings(write.table(tbl, tf, sep = ",", row.names = FALSE, append = TRUE))
 
   tab1 <- read_csv_arrow(tf, skip = 2)
 
-  expect_identical(names(tab1), names(iris))
-  iris$Species <- as.character(iris$Species)
-  expect_equivalent(iris, tab1)
+  expect_identical(names(tab1), names(tbl))
+  expect_equivalent(tbl, tab1)
 })
 
 test_that("read_csv_arrow parsing options: skip_empty_rows", {
   tf <- tempfile()
   on.exit(unlink(tf))
 
-  write.csv(iris, tf, row.names = FALSE)
+  write.csv(tbl, tf, row.names = FALSE)
   cat("\n\n", file = tf, append = TRUE)
 
   tab1 <- read_csv_arrow(tf, skip_empty_rows = FALSE)
 
-  expect_equal(nrow(tab1), nrow(iris) + 2)
+  expect_equal(nrow(tab1), nrow(tbl) + 2)
   expect_true(is.na(tail(tab1, 1)[[1]]))
 })
 
@@ -160,11 +156,101 @@ test_that("read_csv_arrow() respects col_select", {
   tf <- tempfile()
   on.exit(unlink(tf))
 
-  write.csv(iris, tf, row.names = FALSE, quote = FALSE)
+  write.csv(tbl, tf, row.names = FALSE, quote = FALSE)
 
-  tab <- read_csv_arrow(tf, col_select = starts_with("Sepal"), as_data_frame = FALSE)
-  expect_equal(tab, Table$create(Sepal.Length = iris$Sepal.Length, Sepal.Width = iris$Sepal.Width))
+  tab <- read_csv_arrow(tf, col_select = ends_with("l"), as_data_frame = FALSE)
+  expect_equal(tab, Table$create(example_data[, c("dbl", "lgl")]))
 
-  tib <- read_csv_arrow(tf, col_select = starts_with("Sepal"), as_data_frame = TRUE)
-  expect_equal(tib, tibble::tibble(Sepal.Length = iris$Sepal.Length, Sepal.Width = iris$Sepal.Width))
+  tib <- read_csv_arrow(tf, col_select = ends_with("l"), as_data_frame = TRUE)
+  expect_equal(tib, example_data[, c("dbl", "lgl")])
+})
+
+test_that("read_csv_arrow() can detect compression from file name", {
+  skip_if_not_available("gzip")
+  tf <- tempfile(fileext = ".csv.gz")
+  on.exit(unlink(tf))
+
+  write.csv(tbl, gzfile(tf), row.names = FALSE, quote = FALSE)
+  tab1 <- read_csv_arrow(tf)
+  expect_equivalent(tbl, tab1)
+})
+
+test_that("read_csv_arrow(schema=)", {
+  tbl <- example_data[, "int"]
+  tf <- tempfile(); on.exit(unlink(tf))
+  write.csv(tbl, tf, row.names = FALSE)
+
+  df <- read_csv_arrow(tf, schema = schema(int = float64()), skip = 1)
+  expect_identical(df, tibble::tibble(int = as.numeric(tbl$int)))
+})
+
+test_that("read_csv_arrow(col_types = <Schema>)", {
+  tbl <- example_data[, "int"]
+  tf <- tempfile(); on.exit(unlink(tf))
+  write.csv(tbl, tf, row.names = FALSE)
+
+  df <- read_csv_arrow(tf, col_types = schema(int = float64()))
+  expect_identical(df, tibble::tibble(int = as.numeric(tbl$int)))
+})
+
+test_that("read_csv_arrow(col_types=string, col_names)", {
+  tbl <- example_data[, "int"]
+  tf <- tempfile(); on.exit(unlink(tf))
+  write.csv(tbl, tf, row.names = FALSE)
+
+  df <- read_csv_arrow(tf, col_names = "int", col_types = "d", skip = 1)
+  expect_identical(df, tibble::tibble(int = as.numeric(tbl$int)))
+
+  expect_error(read_csv_arrow(tf, col_types = c("i", "d")))
+  expect_error(read_csv_arrow(tf, col_types = "d"))
+  expect_error(read_csv_arrow(tf, col_types = "i", col_names = c("a", "b")))
+  expect_error(read_csv_arrow(tf, col_types = "y", col_names = "a"))
+})
+
+test_that("read_csv_arrow() can read timestamps", {
+  tbl <- tibble::tibble(time = as.POSIXct("2020-07-20 16:20", tz = "UTC"))
+  tf <- tempfile(); on.exit(unlink(tf))
+  write.csv(tbl, tf, row.names = FALSE)
+
+  df <- read_csv_arrow(tf, col_types = schema(time = timestamp(timezone = "UTC")))
+  expect_equal(tbl, df)
+
+  df <- read_csv_arrow(tf, col_types = "t", col_names = "time", skip = 1)
+  expect_equal(tbl, df, check.tzone = FALSE) # col_types = "t" makes timezone-naive timestamp
+})
+
+test_that("read_csv_arrow(timestamp_parsers=)", {
+  tf <- tempfile(); on.exit(unlink(tf))
+  tbl <- tibble::tibble(time = "23/09/2020")
+  write.csv(tbl, tf, row.names = FALSE)
+
+  df <- read_csv_arrow(
+    tf,
+    col_types = schema(time = timestamp(timezone = "UTC")),
+    timestamp_parsers = "%d/%m/%Y"
+  )
+  expect_equal(df$time, as.POSIXct(tbl$time, format = "%d/%m/%Y", tz = "UTC"))
+})
+
+test_that("Skipping columns with null()", {
+  tf <- tempfile(); on.exit(unlink(tf))
+  cols <- c("dbl", "lgl", "false", "chr")
+  tbl <- example_data[, cols]
+  write.csv(tbl, tf, row.names = FALSE)
+
+  df <- read_csv_arrow(tf, col_types = "d-_c", col_names = cols, skip = 1)
+  expect_identical(df, tbl[, c("dbl", "chr")])
+})
+
+test_that("Mix of guessing and declaring types", {
+  tf <- tempfile(); on.exit(unlink(tf))
+  cols <- c("dbl", "lgl", "false", "chr")
+  tbl <- example_data[, cols]
+  write.csv(tbl, tf, row.names = FALSE)
+
+  tab <- read_csv_arrow(tf, col_types = schema(dbl = float32()), as_data_frame = FALSE)
+  expect_equal(tab$schema, schema(dbl = float32(), lgl = bool(), false = bool(), chr = utf8()))
+
+  df <- read_csv_arrow(tf, col_types = "d-?c", col_names = cols, skip = 1)
+  expect_identical(df, tbl[, c("dbl", "false", "chr")])
 })

@@ -30,10 +30,12 @@
 #endif
 
 #include "arrow/filesystem/localfs.h"
+#include "arrow/filesystem/path_util.h"
 #include "arrow/filesystem/util_internal.h"
 #include "arrow/io/file.h"
 #include "arrow/util/io_util.h"
 #include "arrow/util/logging.h"
+#include "arrow/util/uri.h"
 #include "arrow/util/windows_fixup.h"
 
 namespace arrow {
@@ -237,6 +239,31 @@ bool LocalFileSystemOptions::Equals(const LocalFileSystemOptions& other) const {
   return use_mmap == other.use_mmap;
 }
 
+Result<LocalFileSystemOptions> LocalFileSystemOptions::FromUri(
+    const ::arrow::internal::Uri& uri, std::string* out_path) {
+  if (!uri.username().empty() || !uri.password().empty()) {
+    return Status::Invalid("Unsupported username or password in local URI: '",
+                           uri.ToString(), "'");
+  }
+  std::string path;
+  const auto host = uri.host();
+  if (!host.empty()) {
+#ifdef _WIN32
+    std::stringstream ss;
+    ss << "//" << host << "/" << internal::RemoveLeadingSlash(uri.path());
+    *out_path = ss.str();
+#else
+    return Status::Invalid("Unsupported hostname in non-Windows local URI: '",
+                           uri.ToString(), "'");
+#endif
+  } else {
+    *out_path = uri.path();
+  }
+
+  // TODO handle use_mmap option
+  return LocalFileSystemOptions();
+}
+
 LocalFileSystem::LocalFileSystem() : options_(LocalFileSystemOptions::Defaults()) {}
 
 LocalFileSystem::LocalFileSystem(const LocalFileSystemOptions& options)
@@ -292,6 +319,9 @@ Status LocalFileSystem::DeleteDir(const std::string& path) {
 }
 
 Status LocalFileSystem::DeleteDirContents(const std::string& path) {
+  if (internal::IsEmptyPath(path)) {
+    return internal::InvalidDeleteDirContents(path);
+  }
   ARROW_ASSIGN_OR_RAISE(auto fn, PlatformFilename::FromString(path));
   auto st = ::arrow::internal::DeleteDirContents(fn, /*allow_not_found=*/false).status();
   if (!st.ok()) {
@@ -300,6 +330,10 @@ Status LocalFileSystem::DeleteDirContents(const std::string& path) {
     return st.WithMessage(ss.str());
   }
   return Status::OK();
+}
+
+Status LocalFileSystem::DeleteRootDirContents() {
+  return Status::Invalid("LocalFileSystem::DeleteRootDirContents is strictly forbidden");
 }
 
 Status LocalFileSystem::DeleteFile(const std::string& path) {

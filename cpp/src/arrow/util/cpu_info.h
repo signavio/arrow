@@ -39,12 +39,36 @@ class ARROW_EXPORT CpuInfo {
   static constexpr int64_t SSE4_2 = (1 << 3);
   static constexpr int64_t POPCNT = (1 << 4);
   static constexpr int64_t ASIMD = (1 << 5);
+  static constexpr int64_t AVX = (1 << 6);
+  static constexpr int64_t AVX2 = (1 << 7);
+  static constexpr int64_t AVX512F = (1 << 8);
+  static constexpr int64_t AVX512CD = (1 << 9);
+  static constexpr int64_t AVX512VL = (1 << 10);
+  static constexpr int64_t AVX512DQ = (1 << 11);
+  static constexpr int64_t AVX512BW = (1 << 12);
+  static constexpr int64_t BMI1 = (1 << 13);
+  static constexpr int64_t BMI2 = (1 << 14);
+
+  /// Typical AVX512 subsets consists of AVX512F,AVX512BW,AVX512VL,AVX512CD,AVX512DQ
+  static constexpr int64_t AVX512 = AVX512F | AVX512CD | AVX512VL | AVX512DQ | AVX512BW;
 
   /// Cache enums for L1 (data), L2 and L3
   enum CacheLevel {
     L1_CACHE = 0,
     L2_CACHE = 1,
     L3_CACHE = 2,
+  };
+
+  enum class Vendor : int { Unknown = 0, Intel, AMD };
+
+  /// The SIMD level set by user
+  enum UserSimdLevel {
+    USER_SIMD_NONE = 0,
+    USER_SIMD_SSE4_2,
+    USER_SIMD_AVX,
+    USER_SIMD_AVX2,
+    USER_SIMD_AVX512,
+    USER_SIMD_MAX,
   };
 
   static CpuInfo* GetInstance();
@@ -56,8 +80,8 @@ class ARROW_EXPORT CpuInfo {
   /// Returns all the flags for this cpu
   int64_t hardware_flags();
 
-  /// Returns whether of not the cpu supports this flag
-  bool IsSupported(int64_t flag) const { return (hardware_flags_ & flag) != 0; }
+  /// Returns whether or not the cpu supports all the flags
+  bool IsSupported(int64_t flags) const { return (hardware_flags_ & flags) == flags; }
 
   /// \brief The processor supports SSE4.2 and the Arrow libraries are built
   /// with support for it
@@ -79,6 +103,14 @@ class ARROW_EXPORT CpuInfo {
   /// Returns the model name of the cpu (e.g. Intel i7-2600)
   std::string model_name();
 
+  /// Returns the vendor of the cpu.
+  Vendor vendor() const { return vendor_; }
+
+  bool HasEfficientBmi2() const {
+    // BMI2 (pext, pdep) is only efficient on Intel X86 processors.
+    return vendor() == Vendor::Intel && IsSupported(BMI2);
+  }
+
  private:
   CpuInfo();
 
@@ -87,12 +119,16 @@ class ARROW_EXPORT CpuInfo {
   /// Inits CPU cache size variables with default values
   void SetDefaultCacheSize();
 
+  /// Parse the SIMD level by ARROW_USER_SIMD_LEVEL env
+  void ParseUserSimdLevel();
+
   int64_t hardware_flags_;
   int64_t original_hardware_flags_;
   int64_t cache_sizes_[L3_CACHE + 1];
   int64_t cycles_per_ms_;
   int num_cores_;
   std::string model_name_;
+  Vendor vendor_;
 };
 
 }  // namespace internal

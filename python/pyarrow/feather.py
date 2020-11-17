@@ -19,8 +19,8 @@
 import os
 
 from pyarrow.pandas_compat import _pandas_api  # noqa
-from pyarrow.lib import FeatherError  # noqa
-from pyarrow.lib import Table, concat_tables
+from pyarrow.lib import (Codec, FeatherError, Table,  # noqa
+                         concat_tables, schema)
 import pyarrow.lib as ext
 
 
@@ -40,8 +40,8 @@ class FeatherDataset:
     validate_schema : bool, default True
         Check that individual file schemas are all the same / compatible
     """
+
     def __init__(self, path_or_paths, validate_schema=True):
-        _check_pandas_version()
         self.paths = path_or_paths
         self.validate_schema = validate_schema
 
@@ -93,6 +93,7 @@ class FeatherDataset:
         pandas.DataFrame
             Content of the file as a pandas DataFrame (of columns)
         """
+        _check_pandas_version()
         return self.read_table(columns=columns).to_pandas(
             use_threads=use_threads)
 
@@ -110,6 +111,9 @@ def check_chunked_overflow(name, col):
         raise ValueError("Column '{}' of type {} was chunked on conversion "
                          "to Arrow and cannot be currently written to "
                          "Feather format".format(name, str(col.type)))
+
+
+_FEATHER_SUPPORTED_CODECS = {'lz4', 'zstd', 'uncompressed'}
 
 
 def write_feather(df, dest, compression=None, compression_level=None,
@@ -139,8 +143,8 @@ def write_feather(df, dest, compression=None, compression_level=None,
     """
     if _pandas_api.have_pandas:
         _check_pandas_version()
-        if (_pandas_api.has_sparse
-                and isinstance(df, _pandas_api.pd.SparseDataFrame)):
+        if (_pandas_api.has_sparse and
+                isinstance(df, _pandas_api.pd.SparseDataFrame)):
             df = df.to_dense()
 
     if _pandas_api.is_data_frame(df):
@@ -165,11 +169,14 @@ def write_feather(df, dest, compression=None, compression_level=None,
         if chunksize is not None:
             raise ValueError("Feather V1 files do not support chunksize "
                              "option")
-
-    supported_compression_options = (None, 'lz4', 'zstd', 'uncompressed')
-    if compression not in supported_compression_options:
-        raise ValueError('compression="{}" not supported, must be one of {}'
-                         .format(compression, supported_compression_options))
+    else:
+        if compression is None and Codec.is_available('lz4_frame'):
+            compression = 'lz4'
+        elif (compression is not None and
+              compression not in _FEATHER_SUPPORTED_CODECS):
+            raise ValueError('compression="{}" not supported, must be '
+                             'one of {}'.format(compression,
+                                                _FEATHER_SUPPORTED_CODECS))
 
     try:
         ext.write_feather(table, dest, compression=compression,
@@ -184,7 +191,7 @@ def write_feather(df, dest, compression=None, compression_level=None,
         raise
 
 
-def read_feather(source, columns=None, use_threads=True):
+def read_feather(source, columns=None, use_threads=True, memory_map=True):
     """
     Read a pandas.DataFrame from Feather format. To read as pyarrow.Table use
     feather.read_table.
@@ -197,15 +204,16 @@ def read_feather(source, columns=None, use_threads=True):
         read.
     use_threads: bool, default True
         Whether to parallelize reading using multiple threads.
+    memory_map : boolean, default True
+        Use memory mapping when opening file on disk
 
     Returns
     -------
     df : pandas.DataFrame
     """
     _check_pandas_version()
-    return read_table(source, columns=columns).to_pandas(
-        use_threads=use_threads
-    )
+    return (read_table(source, columns=columns, memory_map=memory_map)
+            .to_pandas(use_threads=use_threads))
 
 
 def read_table(source, columns=None, memory_map=True):
@@ -233,11 +241,21 @@ def read_table(source, columns=None, memory_map=True):
 
     column_types = [type(column) for column in columns]
     if all(map(lambda t: t == int, column_types)):
-        return reader.read_indices(columns)
+        table = reader.read_indices(columns)
     elif all(map(lambda t: t == str, column_types)):
-        return reader.read_names(columns)
+        table = reader.read_names(columns)
+    else:
+        column_type_names = [t.__name__ for t in column_types]
+        raise TypeError("Columns must be indices or names. "
+                        "Got columns {} of types {}"
+                        .format(columns, column_type_names))
 
-    column_type_names = [t.__name__ for t in column_types]
-    raise TypeError("Columns must be indices or names. "
-                    "Got columns {} of types {}"
-                    .format(columns, column_type_names))
+    # Feather v1 already respects the column selection
+    if reader.version < 3:
+        return table
+    # Feather v2 reads with sorted / deduplicated selection
+    elif sorted(set(columns)) == columns:
+        return table
+    else:
+        # follow exact order / selection of names
+        return table.select(columns)

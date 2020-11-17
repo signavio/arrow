@@ -88,6 +88,7 @@ where
 }
 
 /// A CSV writer
+#[derive(Debug)]
 pub struct Writer<W: Write> {
     /// The object to write to
     writer: csv_crate::Writer<W>,
@@ -254,7 +255,7 @@ impl<W: Write> Writer<W> {
         if self.beginning {
             if self.has_headers {
                 let mut headers: Vec<String> = Vec::with_capacity(num_columns);
-                &batch
+                batch
                     .schema()
                     .fields()
                     .iter()
@@ -275,6 +276,7 @@ impl<W: Write> Writer<W> {
 }
 
 /// A CSV writer builder
+#[derive(Debug)]
 pub struct WriterBuilder {
     /// Optional column delimiter. Defaults to `b','`
     delimiter: Option<u8>,
@@ -366,12 +368,16 @@ impl WriterBuilder {
             writer,
             delimiter,
             has_headers: self.has_headers,
-            date_format: self.date_format.unwrap_or(DEFAULT_DATE_FORMAT.to_string()),
-            time_format: self.time_format.unwrap_or(DEFAULT_TIME_FORMAT.to_string()),
+            date_format: self
+                .date_format
+                .unwrap_or_else(|| DEFAULT_DATE_FORMAT.to_string()),
+            time_format: self
+                .time_format
+                .unwrap_or_else(|| DEFAULT_TIME_FORMAT.to_string()),
             timestamp_format: self
                 .timestamp_format
-                .unwrap_or(DEFAULT_TIMESTAMP_FORMAT.to_string()),
-            beginning: false,
+                .unwrap_or_else(|| DEFAULT_TIMESTAMP_FORMAT.to_string()),
+            beginning: true,
         }
     }
 }

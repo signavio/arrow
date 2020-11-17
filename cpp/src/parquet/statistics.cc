@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include "parquet/statistics.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -25,16 +27,15 @@
 #include "arrow/array.h"
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
+#include "arrow/util/bitmap_reader.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/optional.h"
 #include "arrow/util/ubsan.h"
-
 #include "parquet/encoding.h"
 #include "parquet/exception.h"
 #include "parquet/platform.h"
 #include "parquet/schema.h"
-#include "parquet/statistics.h"
 
 using arrow::default_memory_pool;
 using arrow::MemoryPool;
@@ -222,11 +223,11 @@ CleanStatistic(std::pair<T, T> min_max) {
 
   // Ignore if one of the value is nan.
   if (std::isnan(min) || std::isnan(max)) {
-    return nonstd::nullopt;
+    return arrow::util::nullopt;
   }
 
   if (min == std::numeric_limits<T>::max() && max == std::numeric_limits<T>::lowest()) {
-    return nonstd::nullopt;
+    return arrow::util::nullopt;
   }
 
   T zero{};
@@ -244,7 +245,7 @@ CleanStatistic(std::pair<T, T> min_max) {
 
 optional<std::pair<FLBA, FLBA>> CleanStatistic(std::pair<FLBA, FLBA> min_max) {
   if (min_max.first.ptr == nullptr || min_max.second.ptr == nullptr) {
-    return nonstd::nullopt;
+    return arrow::util::nullopt;
   }
   return min_max;
 }
@@ -252,7 +253,7 @@ optional<std::pair<FLBA, FLBA>> CleanStatistic(std::pair<FLBA, FLBA> min_max) {
 optional<std::pair<ByteArray, ByteArray>> CleanStatistic(
     std::pair<ByteArray, ByteArray> min_max) {
   if (min_max.first.ptr == nullptr || min_max.second.ptr == nullptr) {
-    return nonstd::nullopt;
+    return arrow::util::nullopt;
   }
   return min_max;
 }
@@ -466,6 +467,20 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
 
   bool HasMinMax() const override { return has_min_max_; }
 
+  bool Equals(const Statistics& raw_other) const override {
+    if (physical_type() != raw_other.physical_type()) return false;
+
+    const auto& other = checked_cast<const TypedStatisticsImpl&>(raw_other);
+
+    if (has_min_max_ != other.has_min_max_) return false;
+
+    return (has_min_max_ && MinMaxEqual(other)) && null_count() == other.null_count() &&
+           distinct_count() == other.distinct_count() &&
+           num_values() == other.num_values();
+  }
+
+  bool MinMaxEqual(const TypedStatisticsImpl& other) const;
+
   void Reset() override {
     ResetCounts();
     has_min_max_ = false;
@@ -504,13 +519,13 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
 
   const ColumnDescriptor* descr() const override { return descr_; }
 
-  std::string EncodeMin() override {
+  std::string EncodeMin() const override {
     std::string s;
     if (HasMinMax()) this->PlainEncode(min_, &s);
     return s;
   }
 
-  std::string EncodeMax() override {
+  std::string EncodeMax() const override {
     std::string s;
     if (HasMinMax()) this->PlainEncode(max_, &s);
     return s;
@@ -541,8 +556,8 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
   std::shared_ptr<TypedComparator<DType>> comparator_;
   std::shared_ptr<ResizableBuffer> min_buffer_, max_buffer_;
 
-  void PlainEncode(const T& src, std::string* dst);
-  void PlainDecode(const std::string& src, T* dst);
+  void PlainEncode(const T& src, std::string* dst) const;
+  void PlainDecode(const std::string& src, T* dst) const;
 
   void Copy(const T& src, T* dst, ResizableBuffer*) { *dst = src; }
 
@@ -565,7 +580,7 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
   }
 
   void SetMinMaxPair(std::pair<T, T> min_max) {
-    // CleanStatistic can return a nullopt in case of erronous values, e.g. NaN
+    // CleanStatistic can return a nullopt in case of erroneous values, e.g. NaN
     auto maybe_min_max = CleanStatistic(min_max);
     if (!maybe_min_max) return;
 
@@ -582,6 +597,20 @@ class TypedStatisticsImpl : public TypedStatistics<DType> {
     }
   }
 };
+
+template <>
+inline bool TypedStatisticsImpl<FLBAType>::MinMaxEqual(
+    const TypedStatisticsImpl<FLBAType>& other) const {
+  uint32_t len = descr_->type_length();
+  return std::memcmp(min_.ptr, other.min_.ptr, len) == 0 &&
+         std::memcmp(max_.ptr, other.max_.ptr, len) == 0;
+}
+
+template <typename DType>
+bool TypedStatisticsImpl<DType>::MinMaxEqual(
+    const TypedStatisticsImpl<DType>& other) const {
+  return min_ != other.min_ && max_ != other.max_;
+}
 
 template <>
 inline void TypedStatisticsImpl<FLBAType>::Copy(const FLBA& src, FLBA* dst,
@@ -633,7 +662,7 @@ void TypedStatisticsImpl<DType>::UpdateSpaced(const T* values, const uint8_t* va
 }
 
 template <typename DType>
-void TypedStatisticsImpl<DType>::PlainEncode(const T& src, std::string* dst) {
+void TypedStatisticsImpl<DType>::PlainEncode(const T& src, std::string* dst) const {
   auto encoder = MakeTypedEncoder<DType>(Encoding::PLAIN, false, descr_, pool_);
   encoder->Put(&src, 1);
   auto buffer = encoder->FlushValues();
@@ -642,7 +671,7 @@ void TypedStatisticsImpl<DType>::PlainEncode(const T& src, std::string* dst) {
 }
 
 template <typename DType>
-void TypedStatisticsImpl<DType>::PlainDecode(const std::string& src, T* dst) {
+void TypedStatisticsImpl<DType>::PlainDecode(const std::string& src, T* dst) const {
   auto decoder = MakeTypedDecoder<DType>(Encoding::PLAIN, descr_);
   decoder->SetData(1, reinterpret_cast<const uint8_t*>(src.c_str()),
                    static_cast<int>(src.size()));
@@ -650,12 +679,14 @@ void TypedStatisticsImpl<DType>::PlainDecode(const std::string& src, T* dst) {
 }
 
 template <>
-void TypedStatisticsImpl<ByteArrayType>::PlainEncode(const T& src, std::string* dst) {
+void TypedStatisticsImpl<ByteArrayType>::PlainEncode(const T& src,
+                                                     std::string* dst) const {
   dst->assign(reinterpret_cast<const char*>(src.ptr), src.len);
 }
 
 template <>
-void TypedStatisticsImpl<ByteArrayType>::PlainDecode(const std::string& src, T* dst) {
+void TypedStatisticsImpl<ByteArrayType>::PlainDecode(const std::string& src,
+                                                     T* dst) const {
   dst->len = static_cast<uint32_t>(src.size());
   dst->ptr = reinterpret_cast<const uint8_t*>(src.c_str());
 }

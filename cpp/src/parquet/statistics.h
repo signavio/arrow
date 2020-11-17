@@ -230,10 +230,10 @@ class PARQUET_EXPORT Statistics {
   virtual void Reset() = 0;
 
   /// \brief Plain-encoded minimum value
-  virtual std::string EncodeMin() = 0;
+  virtual std::string EncodeMin() const = 0;
 
   /// \brief Plain-encoded maximum value
-  virtual std::string EncodeMax() = 0;
+  virtual std::string EncodeMax() const = 0;
 
   /// \brief The finalized encoded form of the statistics for transport
   virtual EncodedStatistics Encode() = 0;
@@ -243,6 +243,9 @@ class PARQUET_EXPORT Statistics {
 
   /// \brief The full type descriptor from the column schema
   virtual const ColumnDescriptor* descr() const = 0;
+
+  /// \brief Check two Statistics for equality
+  virtual bool Equals(const Statistics& other) const = 0;
 
  protected:
   static std::shared_ptr<Statistics> Make(Type::type physical_type, const void* min,

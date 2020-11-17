@@ -27,6 +27,19 @@ add_dependencies(gandiva-all gandiva gandiva-tests gandiva-benchmarks)
 
 find_package(LLVMAlt REQUIRED)
 
+if(LLVM_VERSION_MAJOR LESS "10")
+  set(GANDIVA_CXX_STANDARD ${CMAKE_CXX_STANDARD})
+else()
+  # LLVM 10 or later requires C++ 14
+  if(CMAKE_CXX_STANDARD LESS 14)
+    set(GANDIVA_CXX_STANDARD 14)
+  else()
+    set(GANDIVA_CXX_STANDARD ${CMAKE_CXX_STANDARD})
+  endif()
+endif()
+
+add_definitions(-DGANDIVA_LLVM_VERSION=${LLVM_VERSION_MAJOR})
+
 # Set the path where the bitcode file generated, see precompiled/CMakeLists.txt
 set(GANDIVA_PRECOMPILED_BC_PATH "${CMAKE_CURRENT_BINARY_DIR}/irhelpers.bc")
 set(GANDIVA_PRECOMPILED_CC_PATH "${CMAKE_CURRENT_BINARY_DIR}/precompiled_bitcode.cc")
@@ -93,7 +106,7 @@ endif()
 #     set(GANDIVA_SHARED_LINK_FLAGS "${GANDIVA_SHARED_LINK_FLAGS} /EXPORT:${SYMBOL}")
 #   endforeach()
 # endif()
-if(NOT APPLE AND NOT MSVC)
+if(NOT APPLE AND NOT MSVC_TOOLCHAIN)
   # Localize thirdparty symbols using a linker version script. This hides them
   # from the client application. The OS X linker does not support the
   # version-script option.
@@ -130,6 +143,7 @@ add_arrow_lib(gandiva
 
 foreach(LIB_TARGET ${GANDIVA_LIBRARIES})
   target_compile_definitions(${LIB_TARGET} PRIVATE GANDIVA_EXPORTING)
+  set_target_properties(${LIB_TARGET} PROPERTIES CXX_STANDARD ${GANDIVA_CXX_STANDARD})
 endforeach()
 
 if(ARROW_BUILD_STATIC AND WIN32)
@@ -164,10 +178,6 @@ function(ADD_GANDIVA_TEST REL_TEST_NAME)
       "gandiva"
       LABELS
       "gandiva-tests"
-      EXTRA_LINK_LIBS
-      LLVM::LLVM_INTERFACE
-      EXTRA_DEPENDENCIES
-      LLVM::LLVM_INTERFACE
       ${ARG_UNPARSED_ARGUMENTS})
 
   # and uses less disk space, but in some cases we need to force static
@@ -185,14 +195,22 @@ function(ADD_GANDIVA_TEST REL_TEST_NAME)
                   ${GANDIVA_SHARED_TEST_LINK_LIBS}
                   ${ARG_UNPARSED_ARGUMENTS})
   endif()
+
+  set(TEST_NAME gandiva-${REL_TEST_NAME})
+  string(REPLACE "_" "-" TEST_NAME ${TEST_NAME})
+  set_target_properties(${TEST_NAME} PROPERTIES CXX_STANDARD ${GANDIVA_CXX_STANDARD})
 endfunction()
 
+set(GANDIVA_INTERNALS_TEST_ARGUMENTS)
+if(WIN32)
+  list(APPEND GANDIVA_INTERNALS_TEST_ARGUMENTS EXTRA_LINK_LIBS LLVM::LLVM_INTERFACE)
+endif()
 add_gandiva_test(internals-test
                  SOURCES
                  bitmap_accumulator_test.cc
                  engine_llvm_test.cc
-                 function_signature_test.cc
                  function_registry_test.cc
+                 function_signature_test.cc
                  llvm_types_test.cc
                  llvm_generator_test.cc
                  annotator_test.cc
@@ -205,7 +223,13 @@ add_gandiva_test(internals-test
                  simple_arena_test.cc
                  like_holder_test.cc
                  decimal_type_util_test.cc
-                 random_generator_holder_test.cc)
+                 random_generator_holder_test.cc
+                 gdv_function_stubs_test.cc
+                 EXTRA_DEPENDENCIES
+                 LLVM::LLVM_INTERFACE
+                 EXTRA_INCLUDES
+                 $<TARGET_PROPERTY:LLVM::LLVM_INTERFACE,INTERFACE_INCLUDE_DIRECTORIES>
+                 ${GANDIVA_INTERNALS_TEST_ARGUMENTS})
 
 if(ARROW_GANDIVA_JAVA)
   add_subdirectory(jni)

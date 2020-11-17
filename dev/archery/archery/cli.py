@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -17,11 +16,13 @@
 # under the License.
 
 from collections import namedtuple
+from io import StringIO
 import click
 import errno
 import json
 import logging
 import os
+import pathlib
 import sys
 
 from .benchmark.compare import RunnerComparator, DEFAULT_THRESHOLD
@@ -30,9 +31,8 @@ from .lang.cpp import CppCMakeDefinition, CppConfiguration
 from .utils.codec import JsonEncoder
 from .utils.lint import linter, python_numpydoc, LintValidationException
 from .utils.logger import logger, ctx as log_ctx
-from .utils.source import ArrowSources
+from .utils.source import ArrowSources, InvalidArrowSource
 from .utils.tmpdir import tmpdir
-from .bot import CommentBot, actions
 
 # Set default logging to INFO in command line.
 logging.basicConfig(level=logging.INFO)
@@ -90,11 +90,10 @@ def archery(ctx, debug, pdb, quiet):
 
 def validate_arrow_sources(ctx, param, src):
     """ Ensure a directory contains Arrow cpp sources. """
-    if isinstance(src, str):
-        if not ArrowSources.valid(src):
-            raise click.BadParameter(f"No Arrow C++ sources found in {src}.")
-        src = ArrowSources(src)
-    return src
+    try:
+        return ArrowSources.find(src)
+    except InvalidArrowSource as e:
+        raise click.BadParameter(str(e))
 
 
 build_dir_type = click.Path(dir_okay=True, file_okay=False, resolve_path=True)
@@ -104,6 +103,9 @@ build_type = click.Choice(["debug", "relwithdebinfo", "release"],
 # Supported warn levels
 warn_level_type = click.Choice(["everything", "checkin", "production"],
                                case_sensitive=False)
+
+simd_level = click.Choice(["NONE", "SSE4_2", "AVX2", "AVX512"],
+                          case_sensitive=True)
 
 
 def cpp_toolchain_options(cmd):
@@ -125,7 +127,7 @@ def _apply_options(cmd, options):
 
 
 @archery.command(short_help="Initialize an Arrow C++ build")
-@click.option("--src", metavar="<arrow_src>", default=ArrowSources.find(),
+@click.option("--src", metavar="<arrow_src>", default=None,
               callback=validate_arrow_sources,
               help="Specify Arrow source directory")
 # toolchain
@@ -134,36 +136,87 @@ def _apply_options(cmd, options):
               help="CMake's CMAKE_BUILD_TYPE")
 @click.option("--warn-level", default="production", type=warn_level_type,
               help="Controls compiler warnings -W(no-)error.")
-# components
-@click.option("--with-tests", default=True, type=BOOL,
-              help="Build with tests.")
-@click.option("--with-benchmarks", default=False, type=BOOL,
-              help="Build with benchmarks.")
-@click.option("--with-examples", default=False, type=BOOL,
-              help="Build with examples.")
-@click.option("--with-python", default=False, type=BOOL,
-              help="Build with python extension.")
-@click.option("--with-parquet", default=False, type=BOOL,
-              help="Build with parquet file support.")
-@click.option("--with-gandiva", default=False, type=BOOL,
-              help="Build with Gandiva expression compiler support.")
-@click.option("--with-plasma", default=False, type=BOOL,
-              help="Build with Plasma object store support.")
-@click.option("--with-flight", default=False, type=BOOL,
-              help="Build with Flight rpc support.")
-@click.option("--with-compute", default=True, type=BOOL,
-              help="Build with compute kernels support.")
-@click.option("--with-dataset", default=False, type=BOOL,
-              help="Build with dataset support.")
-@click.option("--use-sanitizers", default=False, type=BOOL,
-              help="Toggles ARROW_USE_*SAN sanitizers.")
-@click.option("--with-fuzzing", default=False, type=BOOL,
-              help="Toggles ARROW_FUZZING.")
 @click.option("--use-gold-linker", default=True, type=BOOL,
               help="Toggles ARROW_USE_LD_GOLD option.")
+@click.option("--simd-level", default="SSE4_2", type=simd_level,
+              help="Toggles ARROW_SIMD_LEVEL option.")
+# Tests and benchmarks
+@click.option("--with-tests", default=True, type=BOOL,
+              help="Build with tests.")
+@click.option("--with-benchmarks", default=None, type=BOOL,
+              help="Build with benchmarks.")
+@click.option("--with-examples", default=None, type=BOOL,
+              help="Build with examples.")
+@click.option("--with-integration", default=None, type=BOOL,
+              help="Build with integration test executables.")
+# Static checks
+@click.option("--use-asan", default=None, type=BOOL,
+              help="Toggle ARROW_USE_ASAN sanitizer.")
+@click.option("--use-tsan", default=None, type=BOOL,
+              help="Toggle ARROW_USE_TSAN sanitizer.")
+@click.option("--use-ubsan", default=None, type=BOOL,
+              help="Toggle ARROW_USE_UBSAN sanitizer.")
+@click.option("--with-fuzzing", default=None, type=BOOL,
+              help="Toggle ARROW_FUZZING.")
+# Components
+@click.option("--with-compute", default=None, type=BOOL,
+              help="Build the Arrow compute module.")
+@click.option("--with-csv", default=None, type=BOOL,
+              help="Build the Arrow CSV parser module.")
+@click.option("--with-cuda", default=None, type=BOOL,
+              help="Build the Arrow CUDA extensions.")
+@click.option("--with-dataset", default=None, type=BOOL,
+              help="Build the Arrow dataset module.")
+@click.option("--with-filesystem", default=None, type=BOOL,
+              help="Build the Arrow filesystem layer.")
+@click.option("--with-flight", default=None, type=BOOL,
+              help="Build with Flight rpc support.")
+@click.option("--with-gandiva", default=None, type=BOOL,
+              help="Build with Gandiva expression compiler support.")
+@click.option("--with-hdfs", default=None, type=BOOL,
+              help="Build the Arrow HDFS bridge.")
+@click.option("--with-hiveserver2", default=None, type=BOOL,
+              help="Build the HiveServer2 client and arrow adapater.")
+@click.option("--with-ipc", default=None, type=BOOL,
+              help="Build the Arrow IPC extensions.")
+@click.option("--with-json", default=None, type=BOOL,
+              help="Build the Arrow JSON parser module.")
+@click.option("--with-jni", default=None, type=BOOL,
+              help="Build the Arrow JNI lib.")
+@click.option("--with-mimalloc", default=None, type=BOOL,
+              help="Build the Arrow mimalloc based allocator.")
+@click.option("--with-parquet", default=None, type=BOOL,
+              help="Build with Parquet file support.")
+@click.option("--with-plasma", default=None, type=BOOL,
+              help="Build with Plasma object store support.")
+@click.option("--with-python", default=None, type=BOOL,
+              help="Build the Arrow CPython extesions.")
+@click.option("--with-r", default=None, type=BOOL,
+              help="Build the Arrow R extensions. This is not a CMake option, "
+              "it will toggle required options")
+@click.option("--with-s3", default=None, type=BOOL,
+              help="Build Arrow with S3 support.")
+# Compressions
+@click.option("--with-brotli", default=None, type=BOOL,
+              help="Build Arrow with brotli compression.")
+@click.option("--with-bz2", default=None, type=BOOL,
+              help="Build Arrow with bz2 compression.")
+@click.option("--with-lz4", default=None, type=BOOL,
+              help="Build Arrow with lz4 compression.")
+@click.option("--with-snappy", default=None, type=BOOL,
+              help="Build Arrow with snappy compression.")
+@click.option("--with-zlib", default=None, type=BOOL,
+              help="Build Arrow with zlib compression.")
+@click.option("--with-zstd", default=None, type=BOOL,
+              help="Build Arrow with zstd compression.")
+# CMake extra feature
 @click.option("--cmake-extras", type=str, multiple=True,
               help="Extra flags/options to pass to cmake invocation. "
               "Can be stacked")
+@click.option("--install-prefix", type=str,
+              help="Destination directory where files are installed. Expand to"
+              "CMAKE_INSTALL_PREFIX. Defaults to to $CONDA_PREFIX if the"
+              "variable exists.")
 # misc
 @click.option("-f", "--force", type=BOOL, is_flag=True, default=False,
               help="Delete existing build directory if found.")
@@ -212,7 +265,8 @@ lint_checks = [
     LintCheck('clang-tidy', "Lint C++ files with clang-tidy."),
     LintCheck('cpplint', "Lint C++ files with cpplint."),
     LintCheck('iwyu', "Lint changed C++ files with Include-What-You-Use."),
-    LintCheck('flake8', "Lint Python files with flake8."),
+    LintCheck('python',
+              "Format and lint Python files with autopep8 and flake8."),
     LintCheck('numpydoc', "Lint Python files with numpydoc."),
     LintCheck('cmake-format', "Format CMake files with cmake-format.py."),
     LintCheck('rat',
@@ -235,7 +289,7 @@ def decorate_lint_command(cmd):
 
 
 @archery.command(short_help="Check Arrow source tree for errors")
-@click.option("--src", metavar="<arrow_src>", default=ArrowSources.find(),
+@click.option("--src", metavar="<arrow_src>", default=None,
               callback=validate_arrow_sources,
               help="Specify Arrow source directory")
 @click.option("--fix", is_flag=True, type=BOOL, default=False,
@@ -263,12 +317,14 @@ def lint(ctx, src, fix, iwyu_all, **checks):
 
 @archery.command(short_help="Lint python docstring with NumpyDoc")
 @click.argument('symbols', nargs=-1)
-@click.option("--src", metavar="<arrow_src>", default=ArrowSources.find(),
+@click.option("--src", metavar="<arrow_src>", default=None,
               callback=validate_arrow_sources,
               help="Specify Arrow source directory")
-@click.option("--whitelist", "-w", help="Allow only these rules")
-@click.option("--blacklist", "-b", help="Disallow these rules")
-def numpydoc(src, symbols, whitelist, blacklist):
+@click.option("--allow-rule", "-a", multiple=True,
+              help="Allow only these rules")
+@click.option("--disallow-rule", "-d", multiple=True,
+              help="Disallow these rules")
+def numpydoc(src, symbols, allow_rule, disallow_rule):
     """
     Pass list of modules or symbols as arguments to restrict the validation.
 
@@ -280,10 +336,10 @@ def numpydoc(src, symbols, whitelist, blacklist):
     archery numpydoc pyarrow.csv pyarrow.json pyarrow.parquet
     archery numpydoc pyarrow.array
     """
-    blacklist = blacklist or {'GL01', 'SA01', 'EX01', 'ES01'}
+    disallow_rule = disallow_rule or {'GL01', 'SA01', 'EX01', 'ES01'}
     try:
-        results = python_numpydoc(symbols, whitelist=whitelist,
-                                  blacklist=blacklist)
+        results = python_numpydoc(symbols, allow_rules=allow_rule,
+                                  disallow_rule=disallow_rule)
         for result in results:
             result.ok()
     except LintValidationException:
@@ -303,8 +359,7 @@ def benchmark(ctx):
 def benchmark_common_options(cmd):
     options = [
         click.option("--src", metavar="<arrow_src>", show_default=True,
-                     default=ArrowSources.find(),
-                     callback=validate_arrow_sources,
+                     default=None, callback=validate_arrow_sources,
                      help="Specify Arrow source directory"),
         click.option("--preserve", type=BOOL, default=False, show_default=True,
                      is_flag=True,
@@ -328,7 +383,7 @@ def benchmark_filter_options(cmd):
                      help="Regex filtering benchmark suites."),
         click.option("--benchmark-filter", metavar="<regex>",
                      show_default=True, type=str, default=None,
-                     help="Regex filtering benchmark suites.")
+                     help="Regex filtering benchmarks.")
     ]
     return _apply_options(cmd, options)
 
@@ -343,10 +398,10 @@ def benchmark_list(ctx, rev_or_path, src, preserve, output, cmake_extras,
     """ List benchmark suite.
     """
     with tmpdir(preserve=preserve) as root:
-        logger.debug(f"Running benchmark {rev_or_path}")
+        logger.debug("Running benchmark {}".format(rev_or_path))
 
         conf = CppBenchmarkRunner.default_configuration(
-                cmake_extras=cmake_extras, **kwargs)
+            cmake_extras=cmake_extras, **kwargs)
 
         runner_base = BenchmarkRunner.from_rev_or_path(
             src, root, rev_or_path, conf)
@@ -396,10 +451,10 @@ def benchmark_run(ctx, rev_or_path, src, preserve, output, cmake_extras,
     archery benchmark run --output=run.json
     """
     with tmpdir(preserve=preserve) as root:
-        logger.debug(f"Running benchmark {rev_or_path}")
+        logger.debug("Running benchmark {}".format(rev_or_path))
 
         conf = CppBenchmarkRunner.default_configuration(
-                cmake_extras=cmake_extras, **kwargs)
+            cmake_extras=cmake_extras, **kwargs)
 
         runner_base = BenchmarkRunner.from_rev_or_path(
             src, root, rev_or_path, conf,
@@ -414,15 +469,18 @@ def benchmark_run(ctx, rev_or_path, src, preserve, output, cmake_extras,
 @click.option("--threshold", type=float, default=DEFAULT_THRESHOLD,
               show_default=True,
               help="Regression failure threshold in percentage.")
+@click.option("--repetitions", type=int, default=1, show_default=True,
+              help=("Number of repetitions of each benchmark. Increasing "
+                    "may improve result precision."))
 @click.argument("contender", metavar="[<contender>",
                 default=ArrowSources.WORKSPACE, required=False)
-@click.argument("baseline", metavar="[<baseline>]]", default="master",
+@click.argument("baseline", metavar="[<baseline>]]", default="origin/master",
                 required=False)
 @click.pass_context
 def benchmark_diff(ctx, src, preserve, output, cmake_extras,
                    suite_filter, benchmark_filter,
-                   threshold, contender, baseline, **kwargs):
-    """ Compare (diff) benchmark runs.
+                   repetitions, threshold, contender, baseline, **kwargs):
+    """Compare (diff) benchmark runs.
 
     This command acts like git-diff but for benchmark results.
 
@@ -493,25 +551,49 @@ def benchmark_diff(ctx, src, preserve, output, cmake_extras,
     archery --quiet benchmark diff WORKSPACE run.json > result.json
     """
     with tmpdir(preserve=preserve) as root:
-        logger.debug(f"Comparing {contender} (contender) with "
-                     f"{baseline} (baseline)")
+        logger.debug("Comparing {} (contender) with {} (baseline)"
+                     .format(contender, baseline))
 
         conf = CppBenchmarkRunner.default_configuration(
-                cmake_extras=cmake_extras, **kwargs)
+            cmake_extras=cmake_extras, **kwargs)
 
         runner_cont = BenchmarkRunner.from_rev_or_path(
             src, root, contender, conf,
-            suite_filter=suite_filter, benchmark_filter=benchmark_filter)
+            repetitions=repetitions,
+            suite_filter=suite_filter,
+            benchmark_filter=benchmark_filter)
         runner_base = BenchmarkRunner.from_rev_or_path(
             src, root, baseline, conf,
-            suite_filter=suite_filter, benchmark_filter=benchmark_filter)
+            repetitions=repetitions,
+            suite_filter=suite_filter,
+            benchmark_filter=benchmark_filter)
 
         runner_comp = RunnerComparator(runner_cont, runner_base, threshold)
 
         # TODO(kszucs): test that the output is properly formatted jsonlines
-        for comparator in runner_comp.comparisons:
-            json.dump(comparator, output, cls=JsonEncoder)
-            output.write("\n")
+        comparisons_json = _get_comparisons_as_json(runner_comp.comparisons)
+        formatted = _format_comparisons_with_pandas(comparisons_json)
+        output.write(formatted)
+        output.write('\n')
+
+
+def _get_comparisons_as_json(comparisons):
+    buf = StringIO()
+    for comparator in comparisons:
+        json.dump(comparator, buf, cls=JsonEncoder)
+        buf.write("\n")
+
+    return buf.getvalue()
+
+
+def _format_comparisons_with_pandas(comparisons_json):
+    import pandas as pd
+    df = pd.read_json(StringIO(comparisons_json), lines=True)
+    # parse change % so we can sort by it
+    df['change %'] = df.pop('change').str[:-1].map(float)
+    df = df[['benchmark', 'baseline', 'contender', 'change %', 'counters']]
+    df = df.sort_values(by='change %', ascending=False)
+    return df.to_string()
 
 
 # ----------------------------------------------------------------------
@@ -537,6 +619,8 @@ def _set_default(opt, default):
               help='Include JavaScript in integration tests')
 @click.option('--with-go', type=bool, default=False,
               help='Include Go in integration tests')
+@click.option('--with-rust', type=bool, default=False,
+              help='Include Rust in integration tests')
 @click.option('--write_generated_json', default=False,
               help='Generate test JSON to indicated path')
 @click.option('--run-flight', is_flag=True, default=False,
@@ -551,7 +635,7 @@ def _set_default(opt, default):
 @click.option('stop_on_error', '-x', '--stop-on-error',
               is_flag=True, default=False,
               help='Stop on first error')
-@click.option('--gold_dirs', multiple=True,
+@click.option('--gold-dirs', multiple=True,
               help="gold integration test file paths")
 @click.option('-k', '--match',
               help=("Substring for test names to include in run, "
@@ -568,7 +652,7 @@ def integration(with_all=False, random_seed=12345, **args):
 
     gen_path = args['write_generated_json']
 
-    languages = ['cpp', 'java', 'js', 'go']
+    languages = ['cpp', 'java', 'js', 'go', 'rust']
 
     enabled_languages = 0
     for lang in languages:
@@ -601,10 +685,285 @@ def integration(with_all=False, random_seed=12345, **args):
 @click.option('--crossbow-token', '-ct', envvar='CROSSBOW_GITHUB_TOKEN',
               help='OAuth token for pushing to the crossow repository')
 def trigger_bot(event_name, event_payload, arrow_token, crossbow_token):
+    from .bot import CommentBot, actions
+
     event_payload = json.loads(event_payload.read())
 
     bot = CommentBot(name='github-actions', handler=actions, token=arrow_token)
     bot.handle(event_name, event_payload)
+
+
+@archery.group('docker')
+@click.option("--src", metavar="<arrow_src>", default=None,
+              callback=validate_arrow_sources,
+              help="Specify Arrow source directory.")
+@click.pass_obj
+def docker_compose(obj, src):
+    """Interact with docker-compose based builds."""
+    from .docker import DockerCompose
+
+    config_path = src.path / 'docker-compose.yml'
+    if not config_path.exists():
+        raise click.ClickException(
+            "Docker compose configuration cannot be found in directory {}, "
+            "try to pass the arrow source directory explicitly.".format(src)
+        )
+
+    # take the docker-compose parameters like PYTHON, PANDAS, UBUNTU from the
+    # environment variables to keep the usage similar to docker-compose
+    obj['compose'] = DockerCompose(config_path, params=os.environ)
+
+
+@docker_compose.command('run')
+@click.argument('image')
+@click.argument('command', required=False, default=None)
+@click.option('--env', '-e', multiple=True,
+              help="Set environment variable within the container")
+@click.option('--user', '-u', default=None,
+              help="Username or UID to run the container with")
+@click.option('--force-pull/--no-pull', default=True,
+              help="Whether to force pull the image and its ancestor images")
+@click.option('--force-build/--no-build', default=True,
+              help="Whether to force build the image and its ancestor images")
+@click.option('--build-only', default=False, is_flag=True,
+              help="Pull and/or build the image, but do not run it")
+@click.option('--use-cache/--no-cache', default=True,
+              help="Whether to use cache when building the image and its "
+                   "ancestor images")
+@click.option('--use-leaf-cache/--no-leaf-cache', default=True,
+              help="Whether to use cache when building only the (leaf) image "
+                   "passed as the argument. To disable caching for both the "
+                   "image and its ancestors use --no-cache option.")
+@click.option('--dry-run/--execute', default=False,
+              help="Display the docker-compose commands instead of executing "
+                   "them.")
+@click.option('--volume', '-v', multiple=True,
+              help="Set volume within the container")
+@click.pass_obj
+def docker_compose_run(obj, image, command, *, env, user, force_pull,
+                       force_build, build_only, use_cache, use_leaf_cache,
+                       dry_run, volume):
+    """Execute docker-compose builds.
+
+    To see the available builds run `archery docker images`.
+
+    Examples:
+
+    # execute a single build
+    archery docker run conda-python
+
+    # execute the builds but disable the image pulling
+    archery docker run --no-cache conda-python
+
+    # pass a docker-compose parameter, like the python version
+    PYTHON=3.8 archery docker run conda-python
+
+    # disable the cache only for the leaf image
+    PANDAS=master archery docker run --no-leaf-cache conda-python-pandas
+
+    # entirely skip building the image
+    archery docker run --no-pull --no-build conda-python
+
+    # pass runtime parameters via docker environment variables
+    archery docker run -e CMAKE_BUILD_TYPE=release ubuntu-cpp
+
+    # set a volume
+    archery docker run -v $PWD/build:/build ubuntu-cpp
+
+    # starting an interactive bash session for debugging
+    archery docker run ubuntu-cpp bash
+    """
+    from .docker import UndefinedImage
+
+    compose = obj['compose']
+
+    if dry_run:
+        from types import MethodType
+
+        def _print_command(self, *args, **kwargs):
+            params = ['{}={}'.format(k, v) for k, v in self.params.items()]
+            command = ' '.join(params + ['docker-compose'] + list(args))
+            click.echo(command)
+
+        compose._execute_compose = MethodType(_print_command, compose)
+
+    env = dict(kv.split('=', 1) for kv in env)
+    try:
+        compose.run(
+            image,
+            command=command,
+            env=env,
+            user=user,
+            force_pull=force_pull,
+            force_build=force_build,
+            build_only=build_only,
+            use_cache=use_cache,
+            use_leaf_cache=use_leaf_cache,
+            volumes=volume
+        )
+    except UndefinedImage as e:
+        raise click.ClickException(
+            "There is no service/image defined in docker-compose.yml with "
+            "name: {}".format(str(e))
+        )
+    except RuntimeError as e:
+        raise click.ClickException(str(e))
+
+
+@docker_compose.command('push')
+@click.argument('image')
+@click.option('--user', '-u', required=True, envvar='ARCHERY_DOCKER_USER',
+              help='Docker repository username')
+@click.option('--password', '-p', required=True,
+              envvar='ARCHERY_DOCKER_PASSWORD',
+              help='Docker repository password')
+@click.pass_obj
+def docker_compose_push(obj, image, user, password):
+    """Push the generated docker-compose image."""
+    compose = obj['compose']
+    compose.push(image, user=user, password=password)
+
+
+@docker_compose.command('images')
+@click.pass_obj
+def docker_compose_images(obj):
+    """List the available docker-compose images."""
+    compose = obj['compose']
+    click.echo('Available images:')
+    for image in compose.images():
+        click.echo(' - {}'.format(image))
+
+
+@archery.group('release')
+@click.option("--src", metavar="<arrow_src>", default=None,
+              callback=validate_arrow_sources,
+              help="Specify Arrow source directory.")
+@click.option("--jira-cache", type=click.Path(), default=None,
+              help="File path to cache queried JIRA issues per version.")
+@click.pass_obj
+def release(obj, src, jira_cache):
+    """Release releated commands."""
+    from .release import Jira, CachedJira
+
+    jira = Jira()
+    if jira_cache is not None:
+        jira = CachedJira(jira_cache, jira=jira)
+
+    obj['jira'] = jira
+    obj['repo'] = src.path
+
+
+@release.command('curate')
+@click.argument('version')
+@click.pass_obj
+def release_curate(obj, version):
+    """Release curation."""
+    from .release import Release
+
+    release = Release.from_jira(version, jira=obj['jira'], repo=obj['repo'])
+    curation = release.curate()
+
+    click.echo(curation.render('console'))
+
+
+@release.group('changelog')
+def release_changelog():
+    """Release changelog."""
+    pass
+
+
+@release_changelog.command('add')
+@click.argument('version')
+@click.pass_obj
+def release_changelog_add(obj, version):
+    """Prepend the changelog with the current release"""
+    from .release import Release
+
+    jira, repo = obj['jira'], obj['repo']
+
+    # just handle the current version
+    release = Release.from_jira(version, jira=jira, repo=repo)
+    if release.is_released:
+        raise ValueError('This version has been already released!')
+
+    changelog = release.changelog()
+    changelog_path = pathlib.Path(repo) / 'CHANGELOG.md'
+
+    current_content = changelog_path.read_text()
+    new_content = changelog.render('markdown') + current_content
+
+    changelog_path.write_text(new_content)
+    click.echo("CHANGELOG.md is updated!")
+
+
+@release_changelog.command('generate')
+@click.argument('version')
+@click.argument('output', type=click.File('w', encoding='utf8'), default='-')
+@click.pass_obj
+def release_changelog_generate(obj, version, output):
+    """Generate the changelog of a specific release."""
+    from .release import Release
+
+    jira, repo = obj['jira'], obj['repo']
+
+    # just handle the current version
+    release = Release.from_jira(version, jira=jira, repo=repo)
+
+    changelog = release.changelog()
+    output.write(changelog.render('markdown'))
+
+
+@release_changelog.command('regenerate')
+@click.pass_obj
+def release_changelog_regenerate(obj):
+    """Regeneretate the whole CHANGELOG.md file"""
+    from .release import Release
+
+    jira, repo = obj['jira'], obj['repo']
+    changelogs = []
+
+    for version in jira.arrow_versions():
+        if not version.released:
+            continue
+        release = Release.from_jira(version, jira=jira, repo=repo)
+        click.echo('Querying changelog for version: {}'.format(version))
+        changelogs.append(release.changelog())
+
+    click.echo('Rendering new CHANGELOG.md file...')
+    changelog_path = pathlib.Path(repo) / 'CHANGELOG.md'
+    with changelog_path.open('w') as fp:
+        for cl in changelogs:
+            fp.write(cl.render('markdown'))
+
+
+@release.command('cherry-pick')
+@click.argument('version')
+@click.option('--dry-run/--execute', default=True,
+              help="Display the git commands instead of executing them.")
+@click.option('--recreate/--continue', default=True,
+              help="Recreate the maintenance branch or only apply unapplied "
+                   "patches.")
+@click.pass_obj
+def release_cherry_pick(obj, version, dry_run, recreate):
+    """
+    Cherry pick commits.
+    """
+    from .release import Release, MinorRelease, PatchRelease
+
+    release = Release.from_jira(version, jira=obj['jira'], repo=obj['repo'])
+    if not isinstance(release, (MinorRelease, PatchRelease)):
+        raise click.UsageError('Cherry-pick command only supported for minor '
+                               'and patch releases')
+
+    if not dry_run:
+        release.cherry_pick_commits(recreate_branch=recreate)
+        click.echo('Executed the following commands:\n')
+
+    click.echo(
+        'git checkout {} -b {}'.format(release.previous.tag, release.branch)
+    )
+    for commit in release.commits_to_pick():
+        click.echo('git cherry-pick {}'.format(commit.hexsha))
 
 
 if __name__ == "__main__":

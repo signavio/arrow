@@ -23,7 +23,6 @@
 
 #include "gtest/gtest.h"
 
-#include <arrow/compute/api.h>
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -31,9 +30,10 @@
 #include <vector>
 
 #include "arrow/api.h"
-#include "arrow/compute/kernels/cast.h"
+#include "arrow/compute/api.h"
 #include "arrow/pretty_print.h"
 #include "arrow/record_batch.h"
+#include "arrow/scalar.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/random.h"
 #include "arrow/testing/util.h"
@@ -55,20 +55,21 @@
 #include "parquet/test_util.h"
 
 using arrow::Array;
+using arrow::ArrayData;
 using arrow::ArrayVisitor;
 using arrow::Buffer;
 using arrow::ChunkedArray;
 using arrow::DataType;
+using arrow::Datum;
 using arrow::default_memory_pool;
 using arrow::ListArray;
 using arrow::PrimitiveArray;
 using arrow::ResizableBuffer;
+using arrow::Scalar;
 using arrow::Status;
 using arrow::Table;
 using arrow::TimeUnit;
-using arrow::compute::Datum;
 using arrow::compute::DictionaryEncode;
-using arrow::compute::FunctionContext;
 using arrow::io::BufferReader;
 
 using arrow::randint;
@@ -416,7 +417,6 @@ void DoSimpleRoundtrip(const std::shared_ptr<Table>& table, bool use_threads,
                               ::arrow::default_memory_pool(), &reader));
 
   reader->set_use_threads(use_threads);
-
   if (column_subset.size() > 0) {
     ASSERT_OK_NO_THROW(reader->ReadTable(column_subset, out));
   } else {
@@ -433,6 +433,7 @@ void CheckSimpleRoundtrip(const std::shared_ptr<Table>& table, int64_t row_group
       table, false /* use_threads */, row_group_size, {}, &result, arrow_properties));
   ::arrow::AssertSchemaEqual(*table->schema(), *result->schema(),
                              /*check_metadata=*/false);
+  ASSERT_OK(result->ValidateFull());
   ::arrow::AssertTablesEqual(*table, *result, false);
 }
 
@@ -504,6 +505,23 @@ class TestParquetIO : public ::testing::Test {
     ASSERT_EQ(1, chunked_out->num_chunks());
     *out = chunked_out->chunk(0);
     ASSERT_NE(nullptr, out->get());
+  }
+
+  void ReadSingleColumnFileStatistics(std::unique_ptr<FileReader> file_reader,
+                                      std::shared_ptr<Scalar>* min,
+                                      std::shared_ptr<Scalar>* max) {
+    auto metadata = file_reader->parquet_reader()->metadata();
+    ASSERT_EQ(1, metadata->num_row_groups());
+    ASSERT_EQ(1, metadata->num_columns());
+
+    auto row_group = metadata->RowGroup(0);
+    ASSERT_EQ(1, row_group->num_columns());
+
+    auto column = row_group->ColumnChunk(0);
+    ASSERT_TRUE(column->is_stats_set());
+    auto statistics = column->statistics();
+
+    ASSERT_OK(StatisticsAsScalars(*statistics, min, max));
   }
 
   void ReadAndCheckSingleColumnFile(const Array& values) {
@@ -670,7 +688,7 @@ TYPED_TEST(TestParquetIO, SingleColumnTableRequiredWrite) {
   ASSERT_NO_FATAL_FAILURE(this->ReaderFromSink(&reader));
   ASSERT_NO_FATAL_FAILURE(this->ReadTableFromFile(std::move(reader), &out));
   ASSERT_EQ(1, out->num_columns());
-  ASSERT_EQ(100, out->num_rows());
+  EXPECT_EQ(100, out->num_rows());
 
   std::shared_ptr<ChunkedArray> chunked_array = out->column(0);
   ASSERT_EQ(1, chunked_array->num_chunks());
@@ -701,9 +719,7 @@ TYPED_TEST(TestParquetIO, SingleColumnOptionalDictionaryWrite) {
 
   ASSERT_OK(NullableArray<TypeParam>(SMALL_SIZE, 10, kDefaultSeed, &values));
 
-  Datum out;
-  FunctionContext ctx(default_memory_pool());
-  ASSERT_OK(DictionaryEncode(&ctx, Datum(values), &out));
+  ASSERT_OK_AND_ASSIGN(Datum out, DictionaryEncode(values));
   std::shared_ptr<Array> dict_values = MakeArray(out.array());
   std::shared_ptr<GroupNode> schema =
       MakeSimpleSchema(*dict_values->type(), Repetition::OPTIONAL);
@@ -1071,8 +1087,8 @@ TEST_F(TestUInt32ParquetIO, Parquet_1_0_Compatibility) {
   }
 
   std::vector<std::shared_ptr<Buffer>> buffers{values->null_bitmap(), int64_data};
-  auto arr_data = std::make_shared<::arrow::ArrayData>(::arrow::int64(), values->length(),
-                                                       buffers, values->null_count());
+  auto arr_data = std::make_shared<ArrayData>(::arrow::int64(), values->length(), buffers,
+                                              values->null_count());
   std::shared_ptr<Array> expected_values = MakeArray(arr_data);
   ASSERT_NE(expected_values, NULLPTR);
 
@@ -1277,6 +1293,22 @@ class TestPrimitiveParquetIO : public TestParquetIO<TestType> {
 
     ExpectArrayT<TestType>(values.data(), out.get());
   }
+
+  void CheckSingleColumnStatisticsRequiredRead() {
+    std::vector<T> values(SMALL_SIZE, test_traits<TestType>::value);
+    std::unique_ptr<FileReader> file_reader;
+    ASSERT_NO_FATAL_FAILURE(MakeTestFile(values, 1, &file_reader));
+
+    std::shared_ptr<Scalar> min, max;
+    this->ReadSingleColumnFileStatistics(std::move(file_reader), &min, &max);
+
+    ASSERT_OK_AND_ASSIGN(
+        auto value, ::arrow::MakeScalar(::arrow::TypeTraits<TestType>::type_singleton(),
+                                        test_traits<TestType>::value));
+
+    ASSERT_TRUE(value->Equals(*min));
+    ASSERT_TRUE(value->Equals(*max));
+  }
 };
 
 typedef ::testing::Types<::arrow::BooleanType, ::arrow::UInt8Type, ::arrow::Int8Type,
@@ -1289,6 +1321,10 @@ TYPED_TEST_SUITE(TestPrimitiveParquetIO, PrimitiveTestTypes);
 
 TYPED_TEST(TestPrimitiveParquetIO, SingleColumnRequiredRead) {
   ASSERT_NO_FATAL_FAILURE(this->CheckSingleColumnRequiredRead(1));
+}
+
+TYPED_TEST(TestPrimitiveParquetIO, SingleColumnStatisticsRequiredRead) {
+  ASSERT_NO_FATAL_FAILURE(this->CheckSingleColumnStatisticsRequiredRead());
 }
 
 TYPED_TEST(TestPrimitiveParquetIO, SingleColumnRequiredTableRead) {
@@ -1823,7 +1859,7 @@ void MakeDoubleTable(int num_columns, int num_rows, int nchunks,
     fields[i] = ::arrow::field(ss.str(), values->type());
   }
   auto schema = std::make_shared<::arrow::Schema>(fields);
-  *out = Table::Make(schema, columns);
+  *out = Table::Make(schema, columns, num_rows);
 }
 
 void MakeSimpleListArray(int num_rows, int max_value_length, const std::string& item_name,
@@ -1960,7 +1996,8 @@ TEST(TestArrowReadWrite, ReadTableManually) {
   AssertTablesEqual(*actual, *expected, /*same_chunk_layout=*/false);
 }
 
-TEST(TestArrowReadWrite, GetRecordBatchReader) {
+void TestGetRecordBatchReader(
+    ArrowReaderProperties properties = default_arrow_reader_properties()) {
   const int num_columns = 20;
   const int num_rows = 1000;
   const int batch_size = 100;
@@ -1972,7 +2009,6 @@ TEST(TestArrowReadWrite, GetRecordBatchReader) {
   ASSERT_NO_FATAL_FAILURE(WriteTableToBuffer(table, num_rows / 2,
                                              default_arrow_writer_properties(), &buffer));
 
-  ArrowReaderProperties properties = default_arrow_reader_properties();
   properties.set_batch_size(batch_size);
 
   std::unique_ptr<FileReader> reader;
@@ -2010,6 +2046,43 @@ TEST(TestArrowReadWrite, GetRecordBatchReader) {
 
   ASSERT_OK(rb_reader->ReadNext(&actual_batch));
   ASSERT_EQ(nullptr, actual_batch);
+}
+
+TEST(TestArrowReadWrite, GetRecordBatchReader) { TestGetRecordBatchReader(); }
+
+// Same as the test above, but using coalesced reads.
+TEST(TestArrowReadWrite, CoalescedReads) {
+  ArrowReaderProperties arrow_properties = default_arrow_reader_properties();
+  arrow_properties.set_pre_buffer(true);
+  TestGetRecordBatchReader(arrow_properties);
+}
+
+TEST(TestArrowReadWrite, GetRecordBatchReaderNoColumns) {
+  ArrowReaderProperties properties = default_arrow_reader_properties();
+  const int num_rows = 10;
+  const int num_columns = 20;
+
+  std::shared_ptr<Table> table;
+  ASSERT_NO_FATAL_FAILURE(MakeDoubleTable(num_columns, num_rows, 1, &table));
+
+  std::shared_ptr<Buffer> buffer;
+  ASSERT_NO_FATAL_FAILURE(
+      WriteTableToBuffer(table, num_rows, default_arrow_writer_properties(), &buffer));
+
+  std::unique_ptr<FileReader> reader;
+  FileReaderBuilder builder;
+  ASSERT_OK(builder.Open(std::make_shared<BufferReader>(buffer)));
+  ASSERT_OK(builder.properties(properties)->Build(&reader));
+
+  std::shared_ptr<::arrow::RecordBatchReader> rb_reader;
+  ASSERT_OK_NO_THROW(reader->GetRecordBatchReader({0}, {}, &rb_reader));
+
+  std::shared_ptr<::arrow::RecordBatch> actual_batch;
+  ASSERT_OK(rb_reader->ReadNext(&actual_batch));
+
+  ASSERT_NE(actual_batch, nullptr);
+  ASSERT_EQ(actual_batch->num_columns(), 0);
+  ASSERT_EQ(actual_batch->num_rows(), num_rows);
 }
 
 TEST(TestArrowReadWrite, ScanContents) {
@@ -2058,6 +2131,46 @@ TEST(TestArrowReadWrite, ReadColumnSubset) {
   auto ex_schema = ::arrow::schema(ex_fields);
   auto expected = Table::Make(ex_schema, ex_columns);
   ASSERT_NO_FATAL_FAILURE(::arrow::AssertTablesEqual(*expected, *result));
+}
+
+TEST(TestArrowReadWrite, ReadCoalescedColumnSubset) {
+  const int num_columns = 20;
+  const int num_rows = 1000;
+
+  std::shared_ptr<Table> table;
+  ASSERT_NO_FATAL_FAILURE(MakeDoubleTable(num_columns, num_rows, 1, &table));
+  std::shared_ptr<Buffer> buffer;
+  ASSERT_NO_FATAL_FAILURE(WriteTableToBuffer(table, num_rows / 2,
+                                             default_arrow_writer_properties(), &buffer));
+
+  std::unique_ptr<FileReader> reader;
+  FileReaderBuilder builder;
+  ReaderProperties properties = default_reader_properties();
+  ArrowReaderProperties arrow_properties = default_arrow_reader_properties();
+  arrow_properties.set_pre_buffer(true);
+  ASSERT_OK(builder.Open(std::make_shared<BufferReader>(buffer), properties));
+  ASSERT_OK(builder.properties(arrow_properties)->Build(&reader));
+  reader->set_use_threads(true);
+
+  // Test multiple subsets to ensure we can read from the file multiple times
+  std::vector<std::vector<int>> column_subsets = {
+      {0, 4, 8, 10}, {0, 1, 2, 3}, {5, 17, 18, 19}};
+
+  for (std::vector<int>& column_subset : column_subsets) {
+    std::shared_ptr<Table> result;
+    ASSERT_OK(reader->ReadTable(column_subset, &result));
+
+    std::vector<std::shared_ptr<::arrow::ChunkedArray>> ex_columns;
+    std::vector<std::shared_ptr<::arrow::Field>> ex_fields;
+    for (int i : column_subset) {
+      ex_columns.push_back(table->column(i));
+      ex_fields.push_back(table->field(i));
+    }
+
+    auto ex_schema = ::arrow::schema(ex_fields);
+    auto expected = Table::Make(ex_schema, ex_columns);
+    ASSERT_NO_FATAL_FAILURE(::arrow::AssertTablesEqual(*expected, *result));
+  }
 }
 
 TEST(TestArrowReadWrite, ListLargeRecords) {
@@ -2232,8 +2345,57 @@ TEST(ArrowReadWrite, SimpleStructRoundTrip) {
       2);
 }
 
-// Disabled until implementation can be finished.
-TEST(TestArrowReadWrite, DISABLED_CanonicalNestedRoundTrip) {
+TEST(ArrowReadWrite, SingleColumnNullableStruct) {
+  auto links =
+      field("Links",
+            ::arrow::struct_({field("Backward", ::arrow::int64(), /*nullable=*/true)}));
+
+  auto links_id_array = ::arrow::ArrayFromJSON(links->type(),
+                                               "[null, "
+                                               "{\"Backward\": 10}"
+                                               "]");
+
+  CheckSimpleRoundtrip(
+      ::arrow::Table::Make(std::make_shared<::arrow::Schema>(
+                               std::vector<std::shared_ptr<::arrow::Field>>{links}),
+                           {links_id_array}),
+      3);
+}
+
+TEST(ArrowReadWrite, NestedRequiredField) {
+  auto int_field = ::arrow::field("int_array", ::arrow::int32(), /*nullable=*/false);
+  auto int_array = ::arrow::ArrayFromJSON(int_field->type(), "[0, 1, 2, 3, 4, 5, 7, 8]");
+  auto struct_field =
+      ::arrow::field("root", ::arrow::struct_({int_field}), /*nullable=*/true);
+  std::shared_ptr<Buffer> validity_bitmap;
+  ASSERT_OK_AND_ASSIGN(validity_bitmap, ::arrow::AllocateBitmap(8));
+  validity_bitmap->mutable_data()[0] = 0xCC;
+
+  auto struct_data = ArrayData::Make(struct_field->type(), /*length=*/8,
+                                     {validity_bitmap}, {int_array->data()});
+  CheckSimpleRoundtrip(::arrow::Table::Make(::arrow::schema({struct_field}),
+                                            {::arrow::MakeArray(struct_data)}),
+                       /*row_group_size=*/8);
+}
+
+TEST(ArrowReadWrite, NestedNullableField) {
+  auto int_field = ::arrow::field("int_array", ::arrow::int32());
+  auto int_array =
+      ::arrow::ArrayFromJSON(int_field->type(), "[0, null, 2, null, 4, 5, null, 8]");
+  auto struct_field =
+      ::arrow::field("root", ::arrow::struct_({int_field}), /*nullable=*/true);
+  std::shared_ptr<Buffer> validity_bitmap;
+  ASSERT_OK_AND_ASSIGN(validity_bitmap, ::arrow::AllocateBitmap(8));
+  validity_bitmap->mutable_data()[0] = 0xCC;
+
+  auto struct_data = ArrayData::Make(struct_field->type(), /*length=*/8,
+                                     {validity_bitmap}, {int_array->data()});
+  CheckSimpleRoundtrip(::arrow::Table::Make(::arrow::schema({struct_field}),
+                                            {::arrow::MakeArray(struct_data)}),
+                       /*row_group_size=*/8);
+}
+
+TEST(TestArrowReadWrite, CanonicalNestedRoundTrip) {
   auto doc_id = field("DocId", ::arrow::int64(), /*nullable=*/false);
   auto links = field(
       "Links",
@@ -2262,7 +2424,7 @@ TEST(TestArrowReadWrite, DISABLED_CanonicalNestedRoundTrip) {
   // string literals implemented properly
   auto name_array = ::arrow::ArrayFromJSON(
       name->type(),
-      "([[{\"Language\": [{\"Code\": \"en_us\", \"Country\":\"us\"},"
+      "[[{\"Language\": [{\"Code\": \"en_us\", \"Country\":\"us\"},"
       "{\"Code\": \"en_us\", \"Country\": null}],"
       "\"Url\": \"http://A\"},"
       "{\"Url\": \"http://B\"},"
@@ -2271,6 +2433,198 @@ TEST(TestArrowReadWrite, DISABLED_CanonicalNestedRoundTrip) {
   auto expected =
       ::arrow::Table::Make(schema, {doc_id_array, links_id_array, name_array});
   CheckSimpleRoundtrip(expected, 2);
+}
+
+TEST(ArrowReadWrite, ListOfStruct) {
+  using ::arrow::field;
+
+  auto type = ::arrow::list(::arrow::struct_(
+      {field("a", ::arrow::int16(), /*nullable=*/false), field("b", ::arrow::utf8())}));
+
+  const char* json = R"([
+      [{"a": 4, "b": "foo"}, {"a": 5}, {"a": 6, "b": "bar"}],
+      [null, {"a": 7}],
+      null,
+      []])";
+  auto array = ::arrow::ArrayFromJSON(type, json);
+  auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});
+  CheckSimpleRoundtrip(table, 2);
+}
+
+TEST(ArrowReadWrite, ListOfStructOfList1) {
+  using ::arrow::field;
+  using ::arrow::list;
+  using ::arrow::struct_;
+
+  auto type = list(struct_({field("a", ::arrow::int16(), /*nullable=*/false),
+                            field("b", list(::arrow::int64()))}));
+
+  const char* json = R"([
+      [{"a": 123, "b": [1, 2, null, 3]}, null],
+      null,
+      [],
+      [{"a": 456}, {"a": 789, "b": []}, {"a": 876, "b": [4, 5, 6]}]])";
+  auto array = ::arrow::ArrayFromJSON(type, json);
+  auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});
+  CheckSimpleRoundtrip(table, 2);
+}
+
+TEST(ArrowReadWrite, Map) {
+  using ::arrow::field;
+  using ::arrow::map;
+
+  auto type = map(::arrow::int16(), ::arrow::utf8());
+
+  const char* json = R"([
+      [[1, "a"], [2, "b"]],
+      [[3, "c"]],
+      [],
+      null,
+      [[4, "d"], [5, "e"], [6, "f"]]
+  ])";
+  auto array = ::arrow::ArrayFromJSON(type, json);
+  auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});
+  auto props_store_schema = ArrowWriterProperties::Builder().store_schema()->build();
+  CheckSimpleRoundtrip(table, 2, props_store_schema);
+}
+
+TEST(ArrowReadWrite, LargeList) {
+  using ::arrow::field;
+  using ::arrow::large_list;
+  using ::arrow::struct_;
+
+  auto type = large_list(::arrow::int16());
+
+  const char* json = R"([
+      [1, 2, 3],
+      [4, 5, 6],
+      [7, 8, 9]])";
+  auto array = ::arrow::ArrayFromJSON(type, json);
+  auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});
+  auto props_store_schema = ArrowWriterProperties::Builder().store_schema()->build();
+  CheckSimpleRoundtrip(table, 2, props_store_schema);
+}
+
+TEST(ArrowReadWrite, FixedSizeList) {
+  using ::arrow::field;
+  using ::arrow::fixed_size_list;
+  using ::arrow::struct_;
+
+  auto type = fixed_size_list(::arrow::int16(), /*size=*/3);
+
+  const char* json = R"([
+      [1, 2, 3],
+      [4, 5, 6],
+      [7, 8, 9]])";
+  auto array = ::arrow::ArrayFromJSON(type, json);
+  auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});
+  auto props_store_schema = ArrowWriterProperties::Builder().store_schema()->build();
+  CheckSimpleRoundtrip(table, 2, props_store_schema);
+}
+
+TEST(ArrowReadWrite, ListOfStructOfList2) {
+  using ::arrow::field;
+  using ::arrow::list;
+  using ::arrow::struct_;
+
+  auto type =
+      list(field("item",
+                 struct_({field("a", ::arrow::int16(), /*nullable=*/false),
+                          field("b", list(::arrow::int64()), /*nullable=*/false)}),
+                 /*nullable=*/false));
+
+  const char* json = R"([
+      [{"a": 123, "b": [1, 2, 3]}],
+      null,
+      [],
+      [{"a": 456, "b": []}, {"a": 789, "b": [null]}, {"a": 876, "b": [4, 5, 6]}]])";
+  auto array = ::arrow::ArrayFromJSON(type, json);
+  auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});
+  CheckSimpleRoundtrip(table, 2);
+}
+
+TEST(ArrowReadWrite, StructOfLists) {
+  using ::arrow::field;
+  using ::arrow::list;
+
+  auto type = ::arrow::struct_(
+      {field("a", list(::arrow::utf8()), /*nullable=*/false),
+       field("b", list(field("f", ::arrow::int64(), /*nullable=*/false)))});
+
+  const char* json = R"([
+      {"a": ["1", "2"], "b": []},
+      {"a": [], "b": [3, 4, 5]},
+      {"a": ["6"], "b": null},
+      {"a": [null, "7"], "b": [8]}])";
+  auto array = ::arrow::ArrayFromJSON(type, json);
+  auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});
+  CheckSimpleRoundtrip(table, 2);
+}
+
+TEST(ArrowReadWrite, ListOfStructOfLists1) {
+  using ::arrow::field;
+  using ::arrow::list;
+
+  auto type = list(::arrow::struct_(
+      {field("a", list(::arrow::utf8()), /*nullable=*/false),
+       field("b", list(field("f", ::arrow::int64(), /*nullable=*/false)))}));
+
+  const char* json = R"([
+      [{"a": ["1", "2"], "b": []}, null],
+      [],
+      null,
+      [null],
+      [{"a": [], "b": [3, 4, 5]}, {"a": ["6"], "b": null}],
+      [null, {"a": [null, "7"], "b": [8]}]])";
+  auto array = ::arrow::ArrayFromJSON(type, json);
+  auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});
+  CheckSimpleRoundtrip(table, 2);
+}
+
+TEST(ArrowReadWrite, ListOfStructOfLists2) {
+  using ::arrow::field;
+  using ::arrow::list;
+
+  auto type = list(
+      field("x",
+            ::arrow::struct_(
+                {field("a", list(::arrow::utf8()), /*nullable=*/false),
+                 field("b", list(field("f", ::arrow::int64(), /*nullable=*/false)))}),
+            /*nullable=*/false));
+
+  const char* json = R"([
+      [{"a": ["1", "2"], "b": []}],
+      [],
+      null,
+      [],
+      [{"a": [], "b": [3, 4, 5]}, {"a": ["6"], "b": null}],
+      [{"a": [null, "7"], "b": [8]}]])";
+  auto array = ::arrow::ArrayFromJSON(type, json);
+  auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});
+  CheckSimpleRoundtrip(table, 2);
+}
+
+TEST(ArrowReadWrite, ListOfStructOfLists3) {
+  using ::arrow::field;
+  using ::arrow::list;
+
+  auto type = list(field(
+      "x",
+      ::arrow::struct_({field("a", list(::arrow::utf8()), /*nullable=*/false),
+                        field("b", list(field("f", ::arrow::int64(), /*nullable=*/false)),
+                              /*nullable=*/false)}),
+      /*nullable=*/false));
+
+  const char* json = R"([
+      [{"a": ["1", "2"], "b": []}],
+      [],
+      null,
+      [],
+      [{"a": [], "b": [3, 4, 5]}, {"a": ["6"], "b": []}],
+      [{"a": [null, "7"], "b": [8]}]])";
+  auto array = ::arrow::ArrayFromJSON(type, json);
+  auto table = ::arrow::Table::Make(::arrow::schema({field("root", type)}), {array});
+  CheckSimpleRoundtrip(table, 2);
 }
 
 TEST(TestArrowReadWrite, DictionaryColumnChunkedWrite) {
@@ -2333,6 +2687,39 @@ TEST(TestArrowReadWrite, DictionaryColumnChunkedWrite) {
   auto expected_table = Table::Make(schema, columns);
 
   ::arrow::AssertTablesEqual(*expected_table, *result, false);
+}
+
+TEST(TestArrowReadWrite, NonUniqueDictionaryValues) {
+  // ARROW-10237
+  auto dict_with_dupes = ArrayFromJSON(::arrow::utf8(), R"(["a", "a", "b"])");
+  // test with all valid 4-long `indices`
+  for (int i = 0; i < 4 * 4 * 4 * 4; ++i) {
+    int j = i;
+    ASSERT_OK_AND_ASSIGN(
+        auto indices,
+        ArrayFromBuilderVisitor(::arrow::int32(), 4, [&](::arrow::Int32Builder* b) {
+          if (j % 4 < dict_with_dupes->length()) {
+            b->UnsafeAppend(j % 4);
+          } else {
+            b->UnsafeAppendNull();
+          }
+          j /= 4;
+        }));
+    ASSERT_OK_AND_ASSIGN(auto plain, ::arrow::compute::Take(*dict_with_dupes, *indices));
+    ASSERT_OK_AND_ASSIGN(auto encoded,
+                         ::arrow::DictionaryArray::FromArrays(indices, dict_with_dupes));
+
+    auto table = Table::Make(::arrow::schema({::arrow::field("d", encoded->type())}),
+                             ::arrow::ArrayVector{encoded});
+
+    ASSERT_OK(table->ValidateFull());
+
+    std::shared_ptr<Table> round_tripped;
+    ASSERT_NO_FATAL_FAILURE(DoSimpleRoundtrip(table, true, 20, {}, &round_tripped));
+
+    ASSERT_OK(round_tripped->ValidateFull());
+    ::arrow::AssertArraysEqual(*plain, *round_tripped->column(0)->chunk(0), true);
+  }
 }
 
 TEST(TestArrowWrite, CheckChunkSize) {
@@ -2608,7 +2995,7 @@ TEST_F(TestNestedSchemaRead, ReadIntoTableFull) {
   ASSERT_OK_NO_THROW(reader_->ReadTable(&table));
   ASSERT_EQ(table->num_rows(), NUM_SIMPLE_TEST_ROWS);
   ASSERT_EQ(table->num_columns(), 2);
-  ASSERT_EQ(table->schema()->field(0)->type()->num_children(), 2);
+  ASSERT_EQ(table->schema()->field(0)->type()->num_fields(), 2);
   ASSERT_NO_FATAL_FAILURE(ValidateTableArrayTypes(*table));
 
   auto struct_field_array =
@@ -2643,7 +3030,7 @@ TEST_F(TestNestedSchemaRead, ReadTablePartial) {
   ASSERT_EQ(table->num_columns(), 2);
   ASSERT_EQ(table->schema()->field(0)->name(), "group1");
   ASSERT_EQ(table->schema()->field(1)->name(), "leaf3");
-  ASSERT_EQ(table->schema()->field(0)->type()->num_children(), 1);
+  ASSERT_EQ(table->schema()->field(0)->type()->num_fields(), 1);
   ASSERT_NO_FATAL_FAILURE(ValidateTableArrayTypes(*table));
 
   // columns: {group1.leaf1, leaf3}
@@ -2652,7 +3039,7 @@ TEST_F(TestNestedSchemaRead, ReadTablePartial) {
   ASSERT_EQ(table->num_columns(), 2);
   ASSERT_EQ(table->schema()->field(0)->name(), "group1");
   ASSERT_EQ(table->schema()->field(1)->name(), "leaf3");
-  ASSERT_EQ(table->schema()->field(0)->type()->num_children(), 1);
+  ASSERT_EQ(table->schema()->field(0)->type()->num_fields(), 1);
   ASSERT_NO_FATAL_FAILURE(ValidateTableArrayTypes(*table));
 
   // columns: {group1.leaf1, group1.leaf2}
@@ -2660,7 +3047,7 @@ TEST_F(TestNestedSchemaRead, ReadTablePartial) {
   ASSERT_EQ(table->num_rows(), NUM_SIMPLE_TEST_ROWS);
   ASSERT_EQ(table->num_columns(), 1);
   ASSERT_EQ(table->schema()->field(0)->name(), "group1");
-  ASSERT_EQ(table->schema()->field(0)->type()->num_children(), 2);
+  ASSERT_EQ(table->schema()->field(0)->type()->num_fields(), 2);
   ASSERT_NO_FATAL_FAILURE(ValidateTableArrayTypes(*table));
 
   // columns: {leaf3}
@@ -2668,7 +3055,7 @@ TEST_F(TestNestedSchemaRead, ReadTablePartial) {
   ASSERT_EQ(table->num_rows(), NUM_SIMPLE_TEST_ROWS);
   ASSERT_EQ(table->num_columns(), 1);
   ASSERT_EQ(table->schema()->field(0)->name(), "leaf3");
-  ASSERT_EQ(table->schema()->field(0)->type()->num_children(), 0);
+  ASSERT_EQ(table->schema()->field(0)->type()->num_fields(), 0);
   ASSERT_NO_FATAL_FAILURE(ValidateTableArrayTypes(*table));
 
   // Test with different ordering
@@ -2677,14 +3064,8 @@ TEST_F(TestNestedSchemaRead, ReadTablePartial) {
   ASSERT_EQ(table->num_columns(), 2);
   ASSERT_EQ(table->schema()->field(0)->name(), "leaf3");
   ASSERT_EQ(table->schema()->field(1)->name(), "group1");
-  ASSERT_EQ(table->schema()->field(1)->type()->num_children(), 1);
+  ASSERT_EQ(table->schema()->field(1)->type()->num_fields(), 1);
   ASSERT_NO_FATAL_FAILURE(ValidateTableArrayTypes(*table));
-}
-
-TEST_F(TestNestedSchemaRead, StructAndListTogetherUnsupported) {
-  ASSERT_NO_FATAL_FAILURE(CreateSimpleNestedParquet(Repetition::REPEATED));
-  std::shared_ptr<Table> table;
-  ASSERT_RAISES(NotImplemented, reader_->ReadTable(&table));
 }
 
 TEST_P(TestNestedSchemaRead, DeepNestedSchemaRead) {
@@ -2765,7 +3146,7 @@ TEST(TestArrowReaderAdHoc, LARGE_MEMORY_TEST(LargeStringColumn)) {
   std::shared_ptr<Array> array;
   ASSERT_OK(builder.Finish(&array));
   auto table =
-      Table::Make(::arrow::schema({::arrow::field("x", array->type())}), {array});
+      Table::Make(::arrow::schema({::arrow::field("x", ::arrow::utf8())}), {array});
   std::shared_ptr<SchemaDescriptor> schm;
   ASSERT_OK_NO_THROW(
       ToParquetSchema(table->schema().get(), *default_writer_properties(), &schm));
@@ -2793,11 +3174,23 @@ TEST(TestArrowReaderAdHoc, LARGE_MEMORY_TEST(LargeStringColumn)) {
   array.reset();
 
   auto reader = ParquetFileReader::Open(std::make_shared<BufferReader>(tables_buffer));
-
   std::unique_ptr<FileReader> arrow_reader;
   ASSERT_OK(FileReader::Make(default_memory_pool(), std::move(reader), &arrow_reader));
   ASSERT_OK_NO_THROW(arrow_reader->ReadTable(&table));
   ASSERT_OK(table->ValidateFull());
+
+  // ARROW-9297: ensure RecordBatchReader also works
+  reader = ParquetFileReader::Open(std::make_shared<BufferReader>(tables_buffer));
+  ASSERT_OK(FileReader::Make(default_memory_pool(), std::move(reader), &arrow_reader));
+  std::shared_ptr<::arrow::RecordBatchReader> batch_reader;
+  std::vector<int> all_row_groups =
+      ::arrow::internal::Iota(reader->metadata()->num_row_groups());
+  ASSERT_OK_NO_THROW(arrow_reader->GetRecordBatchReader(all_row_groups, &batch_reader));
+  ASSERT_OK_AND_ASSIGN(auto batched_table,
+                       ::arrow::Table::FromRecordBatchReader(batch_reader.get()));
+
+  ASSERT_OK(batched_table->ValidateFull());
+  AssertTablesEqual(*table, *batched_table, /*same_chunk_layout=*/false);
 }
 
 TEST(TestArrowReaderAdHoc, HandleDictPageOffsetZero) {
@@ -2853,7 +3246,6 @@ TEST_P(TestArrowReaderAdHocSparkAndHvr, ReadDecimals) {
     ASSERT_OK(builder.Append(value));
   }
   ASSERT_OK(builder.Finish(&expected_array));
-
   AssertArraysEqual(*expected_array, *chunk);
 }
 
@@ -2986,6 +3378,30 @@ TEST_P(TestArrowReadDictionary, ReadWholeFileDict) {
   CheckReadWholeFile(*ex_table);
 }
 
+TEST_P(TestArrowReadDictionary, ZeroChunksListOfDictionary) {
+  // ARROW-8799
+  properties_.set_read_dictionary(0, true);
+  dense_values_.reset();
+  auto values = std::make_shared<ChunkedArray>(::arrow::ArrayVector{},
+                                               ::arrow::list(::arrow::utf8()));
+  options.num_rows = 0;
+  options.num_row_groups = 1;
+  expected_dense_ = MakeSimpleTable(values, false);
+
+  WriteSimple();
+
+  ASSERT_OK_AND_ASSIGN(auto reader, GetReader());
+
+  std::unique_ptr<ColumnReader> column_reader;
+  ASSERT_OK_NO_THROW(reader->GetColumn(0, &column_reader));
+
+  std::shared_ptr<ChunkedArray> chunked_out;
+  ASSERT_OK(column_reader->NextBatch(1 << 15, &chunked_out));
+
+  ASSERT_EQ(chunked_out->length(), 0);
+  ASSERT_EQ(chunked_out->num_chunks(), 1);
+}
+
 TEST_P(TestArrowReadDictionary, IncrementalReads) {
   // ARROW-6895
   options.num_rows = 100;
@@ -3010,15 +3426,12 @@ TEST_P(TestArrowReadDictionary, IncrementalReads) {
   int num_reads = 4;
   int batch_size = options.num_rows / num_reads;
 
-  ::arrow::compute::FunctionContext fc;
   for (int i = 0; i < num_reads; ++i) {
     std::shared_ptr<ChunkedArray> chunk;
     ASSERT_OK(col->NextBatch(batch_size, &chunk));
 
-    std::shared_ptr<Array> result_dense;
-    ASSERT_OK(::arrow::compute::Cast(&fc, *chunk->chunk(0), ::arrow::utf8(),
-                                     ::arrow::compute::CastOptions::Safe(),
-                                     &result_dense));
+    ASSERT_OK_AND_ASSIGN(std::shared_ptr<Array> result_dense,
+                         ::arrow::compute::Cast(*chunk->chunk(0), ::arrow::utf8()));
     AssertArraysEqual(*dense_values_->Slice(i * batch_size, batch_size), *result_dense);
   }
 }
@@ -3104,8 +3517,6 @@ TEST(TestArrowWriteDictionaries, AutoReadAsDictionary) {
 }
 
 TEST(TestArrowWriteDictionaries, NestedSubfield) {
-  // ARROW-3246: Automatic decoding of dictionary subfields left as followup
-  // work
   auto offsets = ::arrow::ArrayFromJSON(::arrow::int32(), "[0, 0, 2, 3]");
   auto indices = ::arrow::ArrayFromJSON(::arrow::int32(), "[0, 0, 0]");
   auto dict = ::arrow::ArrayFromJSON(::arrow::utf8(), "[\"foo\"]");
@@ -3116,20 +3527,14 @@ TEST(TestArrowWriteDictionaries, NestedSubfield) {
   ASSERT_OK_AND_ASSIGN(auto values,
                        ::arrow::ListArray::FromArrays(*offsets, *dict_values));
 
-  auto dense_ty = ::arrow::list(::arrow::utf8());
-  auto dense_values =
-      ::arrow::ArrayFromJSON(dense_ty, "[[], [\"foo\", \"foo\"], [\"foo\"]]");
-
   auto table = MakeSimpleTable(values, /*nullable=*/true);
-  auto expected_table = MakeSimpleTable(dense_values, /*nullable=*/true);
 
   auto props_store_schema = ArrowWriterProperties::Builder().store_schema()->build();
   std::shared_ptr<Table> actual;
   DoRoundtrip(table, values->length(), &actual, default_writer_properties(),
               props_store_schema);
 
-  // The nested subfield is not automatically decoded to dictionary
-  ::arrow::AssertTablesEqual(*expected_table, *actual);
+  ::arrow::AssertTablesEqual(*table, *actual);
 }
 
 }  // namespace arrow

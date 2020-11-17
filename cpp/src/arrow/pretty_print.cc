@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include "arrow/pretty_print.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -27,14 +29,14 @@
 #include <vector>
 
 #include "arrow/array.h"
-#include "arrow/pretty_print.h"
+#include "arrow/chunked_array.h"
 #include "arrow/record_batch.h"
 #include "arrow/status.h"
 #include "arrow/table.h"
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/checked_cast.h"
-#include "arrow/util/int_util.h"
+#include "arrow/util/int_util_internal.h"
 #include "arrow/util/key_value_metadata.h"
 #include "arrow/util/string.h"
 #include "arrow/vendored/datetime.h"
@@ -225,6 +227,11 @@ class ArrayPrinter : public PrettyPrinter {
     return Status::OK();
   }
 
+  Status WriteDataValues(const Decimal256Array& array) {
+    WriteValues(array, [&](int64_t i) { (*sink_) << array.FormatValue(i); });
+    return Status::OK();
+  }
+
   template <typename T>
   enable_if_list_like<typename T::TypeClass, Status> WriteDataValues(const T& array) {
     bool skip_comma = true;
@@ -326,7 +333,6 @@ class ArrayPrinter : public PrettyPrinter {
       if (offset != 0) {
         field = field->Slice(offset, length);
       }
-
       RETURN_NOT_OK(PrettyPrint(*field, indent_ + options_.indent_size, sink_));
     }
     return Status::OK();
@@ -353,8 +359,9 @@ class ArrayPrinter : public PrettyPrinter {
     if (array.mode() == UnionMode::DENSE) {
       Newline();
       Write("-- value_offsets: ");
-      Int32Array value_offsets(array.length(), array.value_offsets(), nullptr, 0,
-                               array.offset());
+      Int32Array value_offsets(
+          array.length(), checked_cast<const DenseUnionArray&>(array).value_offsets(),
+          nullptr, 0, array.offset());
       RETURN_NOT_OK(PrettyPrint(value_offsets, indent_ + options_.indent_size, sink_));
     }
 
@@ -362,7 +369,7 @@ class ArrayPrinter : public PrettyPrinter {
     std::vector<std::shared_ptr<Array>> children;
     children.reserve(array.num_fields());
     for (int i = 0; i < array.num_fields(); ++i) {
-      children.emplace_back(array.child(i));
+      children.emplace_back(array.field(i));
     }
     return PrintChildren(children, 0, array.length() + array.offset());
   }
@@ -550,7 +557,7 @@ Status PrettyPrint(const Table& table, const PrettyPrintOptions& options,
 }
 
 Status DebugPrint(const Array& arr, int indent) {
-  return PrettyPrint(arr, indent, &std::cout);
+  return PrettyPrint(arr, indent, &std::cerr);
 }
 
 class SchemaPrinter : public PrettyPrinter {
@@ -622,7 +629,7 @@ Status SchemaPrinter::PrintType(const DataType& type, bool nullable) {
   if (!nullable) {
     Write(" not null");
   }
-  for (int i = 0; i < type.num_children(); ++i) {
+  for (int i = 0; i < type.num_fields(); ++i) {
     Newline();
 
     std::stringstream ss;
@@ -630,7 +637,7 @@ Status SchemaPrinter::PrintType(const DataType& type, bool nullable) {
 
     indent_ += options_.indent_size;
     WriteIndented(ss.str());
-    RETURN_NOT_OK(PrintField(*type.child(i)));
+    RETURN_NOT_OK(PrintField(*type.field(i)));
     indent_ -= options_.indent_size;
   }
   return Status::OK();

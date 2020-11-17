@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
+from collections.abc import Iterable
 import datetime
 import decimal
 import hypothesis as h
@@ -24,25 +25,36 @@ import pickle
 import pytest
 import struct
 import sys
+import weakref
 
 import numpy as np
 try:
     import pickle5
 except ImportError:
     pickle5 = None
+import pytz
 
 import pyarrow as pa
 import pyarrow.tests.strategies as past
-from pyarrow import compat
 
 
 def test_total_bytes_allocated():
     assert pa.total_allocated_bytes() == 0
 
 
+def test_weakref():
+    arr = pa.array([1, 2, 3])
+    wr = weakref.ref(arr)
+    assert wr() is not None
+    del arr
+    assert wr() is None
+
+
 def test_getitem_NULL():
     arr = pa.array([1, None, 2])
-    assert arr[1] is pa.NULL
+    assert arr[1].as_py() is None
+    assert arr[1].is_valid is False
+    assert isinstance(arr[1], pa.Int64Scalar)
 
 
 def test_constructor_raises():
@@ -54,7 +66,7 @@ def test_constructor_raises():
 
 def test_list_format():
     arr = pa.array([[1], None, [2, 3, None]])
-    result = arr.format()
+    result = arr.to_string()
     expected = """\
 [
   [
@@ -72,7 +84,7 @@ def test_list_format():
 
 def test_string_format():
     arr = pa.array(['', None, 'foo'])
-    result = arr.format()
+    result = arr.to_string()
     expected = """\
 [
   "",
@@ -84,7 +96,7 @@ def test_string_format():
 
 def test_long_array_format():
     arr = pa.array(range(100))
-    result = arr.format(window=2)
+    result = arr.to_string(window=2)
     expected = """\
 [
   0,
@@ -98,7 +110,7 @@ def test_long_array_format():
 
 def test_binary_format():
     arr = pa.array([b'\x00', b'', None, b'\x01foo', b'\x80\xff'])
-    result = arr.format()
+    result = arr.to_string()
     expected = """\
 [
   00,
@@ -108,6 +120,18 @@ def test_binary_format():
   80FF
 ]"""
     assert result == expected
+
+
+def test_binary_total_values_length():
+    arr = pa.array([b'0000', None, b'11111', b'222222', b'3333333'],
+                   type='binary')
+    large_arr = pa.array([b'0000', None, b'11111', b'222222', b'3333333'],
+                         type='large_binary')
+
+    assert arr.total_values_length == 22
+    assert arr.slice(1, 3).total_values_length == 11
+    assert large_arr.total_values_length == 22
+    assert large_arr.slice(1, 3).total_values_length == 11
 
 
 def test_to_numpy_zero_copy():
@@ -264,6 +288,91 @@ def test_asarray():
     assert np_arr.tolist() == ['a', 'b', 'c', 'a', 'b']
 
 
+@pytest.mark.parametrize('ty', [
+    None,
+    pa.null(),
+    pa.int8(),
+    pa.string()
+])
+def test_nulls(ty):
+    arr = pa.nulls(3, type=ty)
+    expected = pa.array([None, None, None], type=ty)
+
+    assert len(arr) == 3
+    assert arr.equals(expected)
+
+    if ty is None:
+        assert arr.type == pa.null()
+    else:
+        assert arr.type == ty
+
+
+def test_array_from_scalar():
+    today = datetime.date.today()
+    now = datetime.datetime.now()
+    now_utc = now.replace(tzinfo=pytz.utc)
+    now_with_tz = now_utc.astimezone(pytz.timezone('US/Eastern'))
+    oneday = datetime.timedelta(days=1)
+
+    cases = [
+        (None, 1, pa.array([None])),
+        (None, 10, pa.nulls(10)),
+        (-1, 3, pa.array([-1, -1, -1], type=pa.int64())),
+        (2.71, 2, pa.array([2.71, 2.71], type=pa.float64())),
+        ("string", 4, pa.array(["string"] * 4)),
+        (
+            pa.scalar(8, type=pa.uint8()),
+            17,
+            pa.array([8] * 17, type=pa.uint8())
+        ),
+        (pa.scalar(None), 3, pa.array([None, None, None])),
+        (pa.scalar(True), 11, pa.array([True] * 11)),
+        (today, 2, pa.array([today] * 2)),
+        (now, 10, pa.array([now] * 10)),
+        (
+            now_with_tz,
+            2,
+            pa.array(
+                [now_utc] * 2,
+                type=pa.timestamp('us', tz=pytz.timezone('US/Eastern'))
+            )
+        ),
+        (now.time(), 9, pa.array([now.time()] * 9)),
+        (oneday, 4, pa.array([oneday] * 4)),
+        (False, 9, pa.array([False] * 9)),
+        ([1, 2], 2, pa.array([[1, 2], [1, 2]])),
+        (
+            pa.scalar([-1, 3], type=pa.large_list(pa.int8())),
+            5,
+            pa.array([[-1, 3]] * 5, type=pa.large_list(pa.int8()))
+        ),
+        ({'a': 1, 'b': 2}, 3, pa.array([{'a': 1, 'b': 2}] * 3))
+    ]
+
+    for value, size, expected in cases:
+        arr = pa.repeat(value, size)
+        assert len(arr) == size
+        assert arr.type.equals(expected.type)
+        assert arr.equals(expected)
+        if expected.type == pa.null():
+            assert arr.null_count == size
+        else:
+            assert arr.null_count == 0
+
+
+def test_array_from_dictionary_scalar():
+    dictionary = ['foo', 'bar', 'baz']
+    arr = pa.DictionaryArray.from_arrays([2, 1, 2, 0], dictionary=dictionary)
+
+    result = pa.repeat(arr[0], 5)
+    expected = pa.DictionaryArray.from_arrays([2] * 5, dictionary=dictionary)
+    assert result.equals(expected)
+
+    result = pa.repeat(arr[3], 5)
+    expected = pa.DictionaryArray.from_arrays([0] * 5, dictionary=dictionary)
+    assert result.equals(expected)
+
+
 def test_array_getitem():
     arr = pa.array(range(10, 15))
     lst = arr.to_pylist()
@@ -276,6 +385,10 @@ def test_array_getitem():
     for idx in range(len(arr), 2 * len(arr)):
         with pytest.raises(IndexError):
             arr[idx]
+
+    # check that numpy scalars are supported
+    for idx in range(-len(arr), len(arr)):
+        assert arr[np.int32(idx)].as_py() == lst[idx]
 
 
 def test_array_slice():
@@ -294,6 +407,8 @@ def test_array_slice():
 
     # Slice past end of array
     assert len(arr.slice(len(arr))) == 0
+    assert len(arr.slice(len(arr) + 2)) == 0
+    assert len(arr.slice(len(arr) + 2, 100)) == 0
 
     with pytest.raises(IndexError):
         arr.slice(-1)
@@ -302,15 +417,42 @@ def test_array_slice():
     assert arr[2:].equals(arr.slice(2))
     assert arr[2:5].equals(arr.slice(2, 3))
     assert arr[-5:].equals(arr.slice(len(arr) - 5))
-    with pytest.raises(IndexError):
-        arr[::-1]
-    with pytest.raises(IndexError):
-        arr[::2]
 
     n = len(arr)
     for start in range(-n * 2, n * 2):
         for stop in range(-n * 2, n * 2):
             assert arr[start:stop].to_pylist() == arr.to_pylist()[start:stop]
+
+
+def test_array_slice_negative_step():
+    # ARROW-2714
+    np_arr = np.arange(20)
+    arr = pa.array(np_arr)
+    chunked_arr = pa.chunked_array([arr])
+
+    cases = [
+        slice(None, None, -1),
+        slice(None, 6, -2),
+        slice(10, 6, -2),
+        slice(8, None, -2),
+        slice(2, 10, -2),
+        slice(10, 2, -2),
+        slice(None, None, 2),
+        slice(0, 10, 2),
+    ]
+
+    for case in cases:
+        result = arr[case]
+        expected = pa.array(np_arr[case])
+        assert result.equals(expected)
+
+        result = pa.record_batch([arr], names=['f0'])[case]
+        expected = pa.record_batch([expected], names=['f0'])
+        assert result.equals(expected)
+
+        result = chunked_arr[case]
+        expected = pa.chunked_array([np_arr[case]])
+        assert result.equals(expected)
 
 
 def test_array_diff():
@@ -336,9 +478,9 @@ def test_array_iter():
     arr = pa.array(range(10))
 
     for i, j in zip(range(10), arr):
-        assert i == j
+        assert i == j.as_py()
 
-    assert isinstance(arr, compat.Iterable)
+    assert isinstance(arr, Iterable)
 
 
 def test_struct_array_slice():
@@ -368,14 +510,17 @@ def test_array_ref_to_ndarray_base():
     assert sys.getrefcount(arr) == (refcount + 1)
 
 
-def test_array_eq_raises():
-    # ARROW-2150: we are raising when comparing arrays until we define the
-    # behavior to either be elementwise comparisons or data equality
+def test_array_eq():
+    # ARROW-2150 / ARROW-9445: we define the __eq__ behavior to be
+    # data equality (not element-wise equality)
     arr1 = pa.array([1, 2, 3], type=pa.int32())
     arr2 = pa.array([1, 2, 3], type=pa.int32())
+    arr3 = pa.array([1, 2, 3], type=pa.int64())
 
-    with pytest.raises(NotImplementedError):
-        arr1 == arr2
+    assert (arr1 == arr2) is True
+    assert (arr1 != arr2) is False
+    assert (arr1 == arr3) is False
+    assert (arr1 != arr3) is True
 
 
 def test_array_from_buffers():
@@ -538,7 +683,7 @@ def test_dictionary_from_numpy():
         assert d1[i].as_py() == dictionary[indices[i]]
 
         if mask[i]:
-            assert d2[i] is pa.NULL
+            assert d2[i].as_py() is None
         else:
             assert d2[i].as_py() == dictionary[indices[i]]
 
@@ -712,40 +857,54 @@ def test_union_from_dense():
     value_offsets = pa.array([1, 0, 0, 2, 1, 2, 3], type='int32')
     py_value = [b'b', 1, b'a', b'c', 2, 3, b'd']
 
-    def check_result(result, expected_field_names, expected_type_codes):
+    def check_result(result, expected_field_names, expected_type_codes,
+                     expected_type_code_values):
         result.validate(full=True)
         actual_field_names = [result.type[i].name
-                              for i in range(result.type.num_children)]
+                              for i in range(result.type.num_fields)]
         assert actual_field_names == expected_field_names
+        assert result.type.mode == "dense"
         assert result.type.type_codes == expected_type_codes
         assert result.to_pylist() == py_value
+        assert expected_type_code_values.equals(result.type_codes)
+        assert value_offsets.equals(result.offsets)
+        assert result.field(0).equals(binary)
+        assert result.field(1).equals(int64)
+        with pytest.raises(KeyError):
+            result.field(-1)
+        with pytest.raises(KeyError):
+            result.field(2)
 
     # without field names and type codes
     check_result(pa.UnionArray.from_dense(types, value_offsets,
                                           [binary, int64]),
                  expected_field_names=['0', '1'],
-                 expected_type_codes=[0, 1])
+                 expected_type_codes=[0, 1],
+                 expected_type_code_values=types)
 
     # with field names
     check_result(pa.UnionArray.from_dense(types, value_offsets,
                                           [binary, int64],
                                           ['bin', 'int']),
                  expected_field_names=['bin', 'int'],
-                 expected_type_codes=[0, 1])
+                 expected_type_codes=[0, 1],
+                 expected_type_code_values=types)
 
     # with type codes
     check_result(pa.UnionArray.from_dense(logical_types, value_offsets,
                                           [binary, int64],
                                           type_codes=[11, 13]),
                  expected_field_names=['0', '1'],
-                 expected_type_codes=[11, 13])
+                 expected_type_codes=[11, 13],
+                 expected_type_code_values=logical_types)
 
     # with field names and type codes
     check_result(pa.UnionArray.from_dense(logical_types, value_offsets,
                                           [binary, int64],
                                           ['bin', 'int'], [11, 13]),
                  expected_field_names=['bin', 'int'],
-                 expected_type_codes=[11, 13])
+                 expected_type_codes=[11, 13],
+                 expected_type_code_values=logical_types)
 
     # Bad type ids
     arr = pa.UnionArray.from_dense(logical_types, value_offsets,
@@ -772,37 +931,52 @@ def test_union_from_sparse():
     logical_types = pa.array([11, 13, 11, 11, 13, 13, 11], type='int8')
     py_value = [b'a', 1, b'b', b'c', 2, 3, b'd']
 
-    def check_result(result, expected_field_names, expected_type_codes):
+    def check_result(result, expected_field_names, expected_type_codes,
+                     expected_type_code_values):
         result.validate(full=True)
         assert result.to_pylist() == py_value
         actual_field_names = [result.type[i].name
-                              for i in range(result.type.num_children)]
+                              for i in range(result.type.num_fields)]
         assert actual_field_names == expected_field_names
+        assert result.type.mode == "sparse"
         assert result.type.type_codes == expected_type_codes
+        assert expected_type_code_values.equals(result.type_codes)
+        assert result.field(0).equals(binary)
+        assert result.field(1).equals(int64)
+        with pytest.raises(pa.ArrowTypeError):
+            result.offsets
+        with pytest.raises(KeyError):
+            result.field(-1)
+        with pytest.raises(KeyError):
+            result.field(2)
 
     # without field names and type codes
     check_result(pa.UnionArray.from_sparse(types, [binary, int64]),
                  expected_field_names=['0', '1'],
-                 expected_type_codes=[0, 1])
+                 expected_type_codes=[0, 1],
+                 expected_type_code_values=types)
 
     # with field names
     check_result(pa.UnionArray.from_sparse(types, [binary, int64],
                                            ['bin', 'int']),
                  expected_field_names=['bin', 'int'],
-                 expected_type_codes=[0, 1])
+                 expected_type_codes=[0, 1],
+                 expected_type_code_values=types)
 
     # with type codes
     check_result(pa.UnionArray.from_sparse(logical_types, [binary, int64],
                                            type_codes=[11, 13]),
                  expected_field_names=['0', '1'],
-                 expected_type_codes=[11, 13])
+                 expected_type_codes=[11, 13],
+                 expected_type_code_values=logical_types)
 
     # with field names and type codes
     check_result(pa.UnionArray.from_sparse(logical_types, [binary, int64],
                                            ['bin', 'int'],
                                            [11, 13]),
                  expected_field_names=['bin', 'int'],
-                 expected_type_codes=[11, 13])
+                 expected_type_codes=[11, 13],
+                 expected_type_code_values=logical_types)
 
     # Bad type ids
     arr = pa.UnionArray.from_sparse(logical_types, [binary, int64])
@@ -816,6 +990,28 @@ def test_union_from_sparse():
     # Invalid child length
     with pytest.raises(pa.ArrowInvalid):
         arr = pa.UnionArray.from_sparse(logical_types, [binary, int64[1:]])
+
+
+def test_union_array_to_pylist_with_nulls():
+    # ARROW-9556
+    arr = pa.UnionArray.from_sparse(
+        pa.array([0, 1, 0, 0, 1], type=pa.int8()),
+        [
+            pa.array([0.0, 1.1, None, 3.3, 4.4]),
+            pa.array([True, None, False, True, False]),
+        ]
+    )
+    assert arr.to_pylist() == [0.0, None, None, 3.3, False]
+
+    arr = pa.UnionArray.from_dense(
+        pa.array([0, 1, 0, 0, 0, 1, 1], type=pa.int8()),
+        pa.array([0, 0, 1, 2, 3, 1, 2], type=pa.int32()),
+        [
+            pa.array([0.0, 1.1, None, 3.3]),
+            pa.array([True, None, False])
+        ]
+    )
+    assert arr.to_pylist() == [0.0, True, 1.1, None, 3.3, None, False]
 
 
 def test_union_array_slice():
@@ -837,7 +1033,7 @@ def test_union_array_slice():
             assert arr[i:j].to_pylist() == lst[i:j]
 
 
-def _check_cast_case(case, safe=True):
+def _check_cast_case(case, *, safe=True, check_array_construction=True):
     in_data, in_type, out_data, out_type = case
     if isinstance(out_data, pa.Array):
         assert out_data.type == out_type
@@ -857,8 +1053,9 @@ def _check_cast_case(case, safe=True):
 
     # constructing an array with out type which optionally involves casting
     # for more see ARROW-1949
-    in_arr = pa.array(in_data, type=out_type, safe=safe)
-    assert in_arr.equals(expected)
+    if check_array_construction:
+        in_arr = pa.array(in_data, type=out_type, safe=safe)
+        assert in_arr.equals(expected)
 
 
 def test_cast_integers_safe():
@@ -893,19 +1090,31 @@ def test_cast_none():
     # ARROW-3735: Ensure that calling cast(None) doesn't segfault.
     arr = pa.array([1, 2, 3])
 
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError):
         arr.cast(None)
 
 
 def test_cast_list_to_primitive():
     # ARROW-8070: cast segfaults on unsupported cast from list<binary> to utf8
     arr = pa.array([[1, 2], [3, 4]])
-    with pytest.raises(pa.ArrowInvalid):
+    with pytest.raises(NotImplementedError):
         arr.cast(pa.int8())
 
     arr = pa.array([[b"a", b"b"], [b"c"]], pa.list_(pa.binary()))
-    with pytest.raises(pa.ArrowInvalid):
+    with pytest.raises(NotImplementedError):
         arr.cast(pa.binary())
+
+
+def test_slice_chunked_array_zero_chunks():
+    # ARROW-8911
+    arr = pa.chunked_array([], type='int8')
+    assert arr.num_chunks == 0
+
+    result = arr[:]
+    assert result.equals(arr)
+
+    # Do not crash
+    arr[:5]
 
 
 def test_cast_chunked_array():
@@ -976,19 +1185,143 @@ def test_floating_point_truncate_unsafe():
     ]
     for case in unsafe_cases:
         # test safe casting raises
-        with pytest.raises(pa.ArrowInvalid,
-                           match='Floating point value truncated'):
+        with pytest.raises(pa.ArrowInvalid, match='truncated'):
             _check_cast_case(case, safe=True)
 
         # test unsafe casting truncates
         _check_cast_case(case, safe=False)
 
 
+def test_decimal_to_int_safe():
+    safe_cases = [
+        (
+            [decimal.Decimal("123456"), None, decimal.Decimal("-912345")],
+            pa.decimal128(32, 5),
+            [123456, None, -912345],
+            pa.int32()
+        ),
+        (
+            [decimal.Decimal("1234"), None, decimal.Decimal("-9123")],
+            pa.decimal128(19, 10),
+            [1234, None, -9123],
+            pa.int16()
+        ),
+        (
+            [decimal.Decimal("123"), None, decimal.Decimal("-91")],
+            pa.decimal128(19, 10),
+            [123, None, -91],
+            pa.int8()
+        ),
+    ]
+    for case in safe_cases:
+        _check_cast_case(case)
+        _check_cast_case(case, safe=True)
+
+
+def test_decimal_to_int_value_out_of_bounds():
+    out_of_bounds_cases = [
+        (
+            np.array([
+                decimal.Decimal("1234567890123"),
+                None,
+                decimal.Decimal("-912345678901234")
+            ]),
+            pa.decimal128(32, 5),
+            [1912276171, None, -135950322],
+            pa.int32()
+        ),
+        (
+            [decimal.Decimal("123456"), None, decimal.Decimal("-912345678")],
+            pa.decimal128(32, 5),
+            [-7616, None, -19022],
+            pa.int16()
+        ),
+        (
+            [decimal.Decimal("1234"), None, decimal.Decimal("-9123")],
+            pa.decimal128(32, 5),
+            [-46, None, 93],
+            pa.int8()
+        ),
+    ]
+
+    for case in out_of_bounds_cases:
+        # test safe casting raises
+        with pytest.raises(pa.ArrowInvalid,
+                           match='Integer value out of bounds'):
+            _check_cast_case(case)
+
+        # XXX `safe=False` can be ignored when constructing an array
+        # from a sequence of Python objects (ARROW-8567)
+        _check_cast_case(case, safe=False, check_array_construction=False)
+
+
+def test_decimal_to_int_non_integer():
+    non_integer_cases = [
+        (
+            [
+                decimal.Decimal("123456.21"),
+                None,
+                decimal.Decimal("-912345.13")
+            ],
+            pa.decimal128(32, 5),
+            [123456, None, -912345],
+            pa.int32()
+        ),
+        (
+            [decimal.Decimal("1234.134"), None, decimal.Decimal("-9123.1")],
+            pa.decimal128(19, 10),
+            [1234, None, -9123],
+            pa.int16()
+        ),
+        (
+            [decimal.Decimal("123.1451"), None, decimal.Decimal("-91.21")],
+            pa.decimal128(19, 10),
+            [123, None, -91],
+            pa.int8()
+        ),
+    ]
+
+    for case in non_integer_cases:
+        # test safe casting raises
+        msg_regexp = 'Rescaling Decimal128 value would cause data loss'
+        with pytest.raises(pa.ArrowInvalid, match=msg_regexp):
+            _check_cast_case(case)
+
+        _check_cast_case(case, safe=False)
+
+
+def test_decimal_to_decimal():
+    arr = pa.array(
+        [decimal.Decimal("1234.12"), None],
+        type=pa.decimal128(19, 10)
+    )
+    result = arr.cast(pa.decimal128(15, 6))
+    expected = pa.array(
+        [decimal.Decimal("1234.12"), None],
+        type=pa.decimal128(15, 6)
+    )
+    assert result.equals(expected)
+
+    msg_regexp = 'Rescaling Decimal128 value would cause data loss'
+    with pytest.raises(pa.ArrowInvalid, match=msg_regexp):
+        result = arr.cast(pa.decimal128(9, 1))
+
+    result = arr.cast(pa.decimal128(9, 1), safe=False)
+    expected = pa.array(
+        [decimal.Decimal("1234.1"), None],
+        type=pa.decimal128(9, 1)
+    )
+    assert result.equals(expected)
+
+    with pytest.raises(pa.ArrowInvalid,
+                       match='Decimal value does not fit in precision'):
+        result = arr.cast(pa.decimal128(5, 2))
+
+
 def test_safe_cast_nan_to_int_raises():
     arr = pa.array([np.nan, 1.])
 
-    with pytest.raises(pa.ArrowInvalid,
-                       match='Floating point value truncated'):
+    with pytest.raises(pa.ArrowInvalid, match='truncated'):
         arr.cast(pa.int64(), safe=True)
 
 
@@ -1025,7 +1358,7 @@ def test_cast_from_null():
         pa.struct([pa.field('a', pa.int32()),
                    pa.field('b', pa.list_(pa.int8())),
                    pa.field('c', pa.string())]),
-        ]
+    ]
     for out_type in out_types:
         _check_cast_case((in_data, in_type, in_data, out_type))
 
@@ -1035,7 +1368,7 @@ def test_cast_from_null():
                   pa.field('b', pa.string())], mode=pa.lib.UnionMode_DENSE),
         pa.union([pa.field('a', pa.binary(10)),
                   pa.field('b', pa.string())], mode=pa.lib.UnionMode_SPARSE),
-        ]
+    ]
     in_arr = pa.array(in_data, type=pa.null())
     for out_type in out_types:
         with pytest.raises(NotImplementedError):
@@ -1063,7 +1396,7 @@ def test_cast_dictionary():
         pa.array([0, 1, None], type=pa.int32()),
         pa.array(["foo", "bar"]))
     assert arr.cast(pa.string()).equals(pa.array(["foo", "bar", None]))
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(pa.ArrowInvalid):
         # Shouldn't crash (ARROW-7077)
         arr.cast(pa.int32())
 
@@ -1112,6 +1445,21 @@ def test_value_counts_simple():
                            pa.field("counts", pa.int64())]))
             assert result.field("values").equals(expected_values)
             assert result.field("counts").equals(expected_counts)
+
+
+def test_unique_value_counts_dictionary_type():
+    indices = pa.array([3, 0, 0, 0, 1, 1, 3, 0, 1, 3, 0, 1])
+    dictionary = pa.array(['foo', 'bar', 'baz', 'qux'])
+
+    arr = pa.DictionaryArray.from_arrays(indices, dictionary)
+
+    unique_result = arr.unique()
+    expected = pa.DictionaryArray.from_arrays(indices.unique(), dictionary)
+    assert unique_result.equals(expected)
+
+    result = arr.value_counts()
+    result.field('values').equals(unique_result)
+    result.field('counts').equals(pa.array([3, 5, 4], type='int64'))
 
 
 def test_dictionary_encode_simple():
@@ -1166,6 +1514,10 @@ def test_dictionary_encode_sliced():
         result = pa.chunked_array([], type=arr.type).dictionary_encode()
         assert result.num_chunks == 0
         assert result.type == expected.type
+
+    # ARROW-9143 dictionary_encode after slice was segfaulting
+    array = pa.array(['foo', 'bar', 'baz'])
+    array.slice(1).dictionary_encode()
 
 
 def test_dictionary_encode_zero_length():
@@ -1491,6 +1843,15 @@ def test_array_from_numpy_datetimeD():
     assert result.equals(expected)
 
 
+def test_array_from_naive_datetimes():
+    arr = pa.array([
+        None,
+        datetime.datetime(2017, 4, 4, 12, 11, 10),
+        datetime.datetime(2018, 1, 1, 0, 2, 0)
+    ])
+    assert arr.type == pa.timestamp('us', tz=None)
+
+
 @pytest.mark.parametrize(('dtype', 'type'), [
     ('datetime64[s]', pa.timestamp('s')),
     ('datetime64[ms]', pa.timestamp('ms')),
@@ -1716,6 +2077,13 @@ def test_array_from_strided_bool():
     assert result.equals(expected)
 
 
+def test_boolean_true_count_false_count():
+    # ARROW-9145
+    arr = pa.array([True, True, None, False, None, True] * 1000)
+    assert arr.true_count == 3000
+    assert arr.false_count == 1000
+
+
 def test_buffers_primitive():
     a = pa.array([1, 2, None, 4], type=pa.int16())
     buffers = a.buffers()
@@ -1778,12 +2146,12 @@ def test_buffers_nested():
     assert bytearray(null_bitmap)[0] == 0b00000101
     # The child buffers: 'a'
     null_bitmap = buffers[1].to_pybytes()
-    assert bytearray(null_bitmap)[0] == 0b00000001
+    assert bytearray(null_bitmap)[0] == 0b00000011
     values = buffers[2].to_pybytes()
     assert struct.unpack('bxx', values) == (42,)
     # The child buffers: 'b'
     null_bitmap = buffers[3].to_pybytes()
-    assert bytearray(null_bitmap)[0] == 0b00000100
+    assert bytearray(null_bitmap)[0] == 0b00000110
     values = buffers[4].to_pybytes()
     assert struct.unpack('4xh', values) == (43,)
 
@@ -1865,6 +2233,34 @@ def test_list_array_flatten(offset_type, list_type_factory):
     assert arr1.values.equals(arr0)
     assert arr2.flatten().flatten().equals(arr0)
     assert arr2.values.values.equals(arr0)
+
+
+@pytest.mark.parametrize(('offset_type', 'list_type_factory'),
+                         [(pa.int32(), pa.list_), (pa.int64(), pa.large_list)])
+def test_list_value_parent_indices(offset_type, list_type_factory):
+    arr = pa.array(
+        [
+            [0, 1, 2],
+            None,
+            [],
+            [3, 4]
+        ], type=list_type_factory(pa.int32()))
+    expected = pa.array([0, 0, 0, 3, 3], type=offset_type)
+    assert arr.value_parent_indices().equals(expected)
+
+
+@pytest.mark.parametrize(('offset_type', 'list_type_factory'),
+                         [(pa.int32(), pa.list_), (pa.int64(), pa.large_list)])
+def test_list_value_lengths(offset_type, list_type_factory):
+    arr = pa.array(
+        [
+            [0, 1, 2],
+            None,
+            [],
+            [3, 4]
+        ], type=list_type_factory(pa.int32()))
+    expected = pa.array([3, None, 0, 2], type=offset_type)
+    assert arr.value_lengths().equals(expected)
 
 
 @pytest.mark.parametrize('list_type_factory', [pa.list_, pa.large_list])
@@ -2042,7 +2438,7 @@ def test_empty_cast():
             # ARROW-4766: Ensure that supported types conversion don't segfault
             # on empty arrays of common types
             pa.array([], type=t1).cast(t2)
-        except pa.lib.ArrowNotImplementedError:
+        except (pa.lib.ArrowNotImplementedError, pa.ArrowInvalid):
             continue
 
 
@@ -2123,9 +2519,20 @@ def test_numpy_binary_overflow_to_chunked():
 
 @pytest.mark.large_memory
 def test_list_child_overflow_to_chunked():
-    vals = [['x' * 1024]] * ((2 << 20) + 1)
-    with pytest.raises(ValueError, match="overflowed"):
-        pa.array(vals)
+    kilobyte_string = 'x' * 1024
+    two_mega = 2**21
+
+    vals = [[kilobyte_string]] * (two_mega - 1)
+    arr = pa.array(vals)
+    assert isinstance(arr, pa.Array)
+    assert len(arr) == two_mega - 1
+
+    vals = [[kilobyte_string]] * two_mega
+    arr = pa.array(vals)
+    assert isinstance(arr, pa.ChunkedArray)
+    assert len(arr) == two_mega
+    assert len(arr.chunk(0)) == two_mega - 1
+    assert len(arr.chunk(1)) == 1
 
 
 def test_infer_type_masked():
@@ -2223,6 +2630,17 @@ def test_concat_array():
 def test_concat_array_different_types():
     with pytest.raises(pa.ArrowInvalid):
         pa.concat_arrays([pa.array([1]), pa.array([2.])])
+
+
+def test_concat_array_invalid_type():
+    # ARROW-9920 - do not segfault on non-array input
+
+    with pytest.raises(TypeError, match="should contain Array objects"):
+        pa.concat_arrays([None])
+
+    arr = pa.chunked_array([[0, 1], [3, 4]])
+    with pytest.raises(TypeError, match="should contain Array objects"):
+        pa.concat_arrays(arr)
 
 
 @pytest.mark.pandas

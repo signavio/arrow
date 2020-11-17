@@ -58,29 +58,35 @@ class Message::MessageImpl {
       return Status::Invalid("Old metadata version not supported");
     }
 
+    if (message_->version() > flatbuf::MetadataVersion::MAX) {
+      return Status::Invalid("Unsupported future MetadataVersion: ",
+                             static_cast<int16_t>(message_->version()));
+    }
+
     if (message_->custom_metadata() != nullptr) {
       // Deserialize from Flatbuffers if first time called
-      RETURN_NOT_OK(
-          internal::GetKeyValueMetadata(message_->custom_metadata(), &custom_metadata_));
+      std::shared_ptr<KeyValueMetadata> md;
+      RETURN_NOT_OK(internal::GetKeyValueMetadata(message_->custom_metadata(), &md));
+      custom_metadata_ = std::move(md);  // const-ify
     }
 
     return Status::OK();
   }
 
-  Message::Type type() const {
+  MessageType type() const {
     switch (message_->header_type()) {
       case flatbuf::MessageHeader::Schema:
-        return Message::SCHEMA;
+        return MessageType::SCHEMA;
       case flatbuf::MessageHeader::DictionaryBatch:
-        return Message::DICTIONARY_BATCH;
+        return MessageType::DICTIONARY_BATCH;
       case flatbuf::MessageHeader::RecordBatch:
-        return Message::RECORD_BATCH;
+        return MessageType::RECORD_BATCH;
       case flatbuf::MessageHeader::Tensor:
-        return Message::TENSOR;
+        return MessageType::TENSOR;
       case flatbuf::MessageHeader::SparseTensor:
-        return Message::SPARSE_TENSOR;
+        return MessageType::SPARSE_TENSOR;
       default:
-        return Message::NONE;
+        return MessageType::NONE;
     }
   }
 
@@ -105,7 +111,7 @@ class Message::MessageImpl {
   std::shared_ptr<Buffer> metadata_;
   const flatbuf::Message* message_;
 
-  // The recontructed custom_metadata field from the Message Flatbuffer
+  // The reconstructed custom_metadata field from the Message Flatbuffer
   std::shared_ptr<const KeyValueMetadata> custom_metadata_;
 
   // The message body, if any
@@ -131,7 +137,7 @@ int64_t Message::body_length() const { return impl_->body_length(); }
 
 std::shared_ptr<Buffer> Message::metadata() const { return impl_->metadata(); }
 
-Message::Type Message::type() const { return impl_->type(); }
+MessageType Message::type() const { return impl_->type(); }
 
 MetadataVersion Message::metadata_version() const { return impl_->version(); }
 
@@ -176,9 +182,12 @@ Status MaybeAlignMetadata(std::shared_ptr<Buffer>* metadata) {
 }
 
 Status CheckMetadataAndGetBodyLength(const Buffer& metadata, int64_t* body_length) {
-  const flatbuf::Message* fb_message;
+  const flatbuf::Message* fb_message = nullptr;
   RETURN_NOT_OK(internal::VerifyMessage(metadata.data(), metadata.size(), &fb_message));
   *body_length = fb_message->bodyLength();
+  if (*body_length < 0) {
+    return Status::IOError("Invalid IPC message: negative bodyLength");
+  }
   return Status::OK();
 }
 
@@ -250,13 +259,13 @@ bool Message::Verify() const {
   return internal::VerifyMessage(metadata()->data(), metadata()->size(), &unused).ok();
 }
 
-std::string FormatMessageType(Message::Type type) {
+std::string FormatMessageType(MessageType type) {
   switch (type) {
-    case Message::SCHEMA:
+    case MessageType::SCHEMA:
       return "schema";
-    case Message::RECORD_BATCH:
+    case MessageType::RECORD_BATCH:
       return "record batch";
-    case Message::DICTIONARY_BATCH:
+    case MessageType::DICTIONARY_BATCH:
       return "dictionary";
     default:
       break;
@@ -420,8 +429,9 @@ Status WriteMessage(const Buffer& message, const IpcWriteOptions& options,
     RETURN_NOT_OK(file->Write(&internal::kIpcContinuationToken, sizeof(int32_t)));
   }
 
-  // Write the flatbuffer size prefix including padding
-  int32_t padded_flatbuffer_size = padded_message_length - prefix_size;
+  // Write the flatbuffer size prefix including padding in little endian
+  int32_t padded_flatbuffer_size =
+      BitUtil::ToLittleEndian(padded_message_length - prefix_size);
   RETURN_NOT_OK(file->Write(&padded_flatbuffer_size, sizeof(int32_t)));
 
   // Write the flatbuffer
@@ -471,11 +481,11 @@ class MessageDecoder::MessageDecoderImpl {
             break;
           case State::METADATA: {
             auto buffer = std::make_shared<Buffer>(data, next_required_size_);
-            RETURN_NOT_OK(ConsumeMetadataBuffer(&buffer));
+            RETURN_NOT_OK(ConsumeMetadataBuffer(buffer));
           } break;
           case State::BODY: {
             auto buffer = std::make_shared<Buffer>(data, next_required_size_);
-            RETURN_NOT_OK(ConsumeBodyBuffer(&buffer));
+            RETURN_NOT_OK(ConsumeBodyBuffer(buffer));
           } break;
           case State::EOS:
             return Status::OK();
@@ -494,9 +504,9 @@ class MessageDecoder::MessageDecoderImpl {
     return ConsumeChunks();
   }
 
-  Status ConsumeBuffer(std::shared_ptr<Buffer>* buffer) {
+  Status ConsumeBuffer(std::shared_ptr<Buffer> buffer) {
     if (buffered_size_ == 0) {
-      while ((*buffer)->size() >= next_required_size_) {
+      while (buffer->size() >= next_required_size_) {
         auto used_size = next_required_size_;
         switch (state_) {
           case State::INITIAL:
@@ -506,37 +516,37 @@ class MessageDecoder::MessageDecoderImpl {
             RETURN_NOT_OK(ConsumeMetadataLengthBuffer(buffer));
             break;
           case State::METADATA:
-            if ((*buffer)->size() == next_required_size_) {
+            if (buffer->size() == next_required_size_) {
               return ConsumeMetadataBuffer(buffer);
             } else {
-              auto sliced_buffer = SliceBuffer(*buffer, 0, next_required_size_);
-              RETURN_NOT_OK(ConsumeMetadataBuffer(&sliced_buffer));
+              auto sliced_buffer = SliceBuffer(buffer, 0, next_required_size_);
+              RETURN_NOT_OK(ConsumeMetadataBuffer(sliced_buffer));
             }
             break;
           case State::BODY:
-            if ((*buffer)->size() == next_required_size_) {
+            if (buffer->size() == next_required_size_) {
               return ConsumeBodyBuffer(buffer);
             } else {
-              auto sliced_buffer = SliceBuffer(*buffer, 0, next_required_size_);
-              RETURN_NOT_OK(ConsumeBodyBuffer(&sliced_buffer));
+              auto sliced_buffer = SliceBuffer(buffer, 0, next_required_size_);
+              RETURN_NOT_OK(ConsumeBodyBuffer(sliced_buffer));
             }
             break;
           case State::EOS:
             return Status::OK();
         }
-        if ((*buffer)->size() == used_size) {
+        if (buffer->size() == used_size) {
           return Status::OK();
         }
-        *buffer = SliceBuffer(*buffer, used_size);
+        buffer = SliceBuffer(buffer, used_size);
       }
     }
 
-    if ((*buffer)->size() == 0) {
+    if (buffer->size() == 0) {
       return Status::OK();
     }
 
-    buffered_size_ += (*buffer)->size();
-    chunks_.push_back(std::move(*buffer));
+    buffered_size_ += buffer->size();
+    chunks_.push_back(std::move(buffer));
     return ConsumeChunks();
   }
 
@@ -573,18 +583,18 @@ class MessageDecoder::MessageDecoderImpl {
   }
 
   Status ConsumeInitialData(const uint8_t* data, int64_t size) {
-    return ConsumeInitial(util::SafeLoadAs<int32_t>(data));
+    return ConsumeInitial(BitUtil::FromLittleEndian(util::SafeLoadAs<int32_t>(data)));
   }
 
-  Status ConsumeInitialBuffer(std::shared_ptr<Buffer>* buffer) {
+  Status ConsumeInitialBuffer(const std::shared_ptr<Buffer>& buffer) {
     ARROW_ASSIGN_OR_RAISE(auto continuation, ConsumeDataBufferInt32(buffer));
-    return ConsumeInitial(continuation);
+    return ConsumeInitial(BitUtil::FromLittleEndian(continuation));
   }
 
   Status ConsumeInitialChunks() {
     int32_t continuation = 0;
     RETURN_NOT_OK(ConsumeDataChunks(sizeof(int32_t), &continuation));
-    return ConsumeInitial(continuation);
+    return ConsumeInitial(BitUtil::FromLittleEndian(continuation));
   }
 
   Status ConsumeInitial(int32_t continuation) {
@@ -599,29 +609,32 @@ class MessageDecoder::MessageDecoderImpl {
       next_required_size_ = 0;
       RETURN_NOT_OK(listener_->OnEOS());
       return Status::OK();
-    } else {
+    } else if (continuation > 0) {
       state_ = State::METADATA;
       // ARROW-6314: Backwards compatibility for reading old IPC
       // messages produced prior to version 0.15.0
       next_required_size_ = continuation;
       RETURN_NOT_OK(listener_->OnMetadata());
       return Status::OK();
+    } else {
+      return Status::IOError("Invalid IPC stream: negative continuation token");
     }
   }
 
   Status ConsumeMetadataLengthData(const uint8_t* data, int64_t size) {
-    return ConsumeMetadataLength(util::SafeLoadAs<int32_t>(data));
+    return ConsumeMetadataLength(
+        BitUtil::FromLittleEndian(util::SafeLoadAs<int32_t>(data)));
   }
 
-  Status ConsumeMetadataLengthBuffer(std::shared_ptr<Buffer>* buffer) {
+  Status ConsumeMetadataLengthBuffer(const std::shared_ptr<Buffer>& buffer) {
     ARROW_ASSIGN_OR_RAISE(auto metadata_length, ConsumeDataBufferInt32(buffer));
-    return ConsumeMetadataLength(metadata_length);
+    return ConsumeMetadataLength(BitUtil::FromLittleEndian(metadata_length));
   }
 
   Status ConsumeMetadataLengthChunks() {
     int32_t metadata_length = 0;
     RETURN_NOT_OK(ConsumeDataChunks(sizeof(int32_t), &metadata_length));
-    return ConsumeMetadataLength(metadata_length);
+    return ConsumeMetadataLength(BitUtil::FromLittleEndian(metadata_length));
   }
 
   Status ConsumeMetadataLength(int32_t metadata_length) {
@@ -630,20 +643,22 @@ class MessageDecoder::MessageDecoderImpl {
       next_required_size_ = 0;
       RETURN_NOT_OK(listener_->OnEOS());
       return Status::OK();
-    } else {
+    } else if (metadata_length > 0) {
       state_ = State::METADATA;
       next_required_size_ = metadata_length;
       RETURN_NOT_OK(listener_->OnMetadata());
       return Status::OK();
+    } else {
+      return Status::IOError("Invalid IPC message: negative metadata length");
     }
   }
 
-  Status ConsumeMetadataBuffer(std::shared_ptr<Buffer>* buffer) {
-    if ((*buffer)->is_cpu()) {
-      metadata_ = std::move(*buffer);
+  Status ConsumeMetadataBuffer(const std::shared_ptr<Buffer>& buffer) {
+    if (buffer->is_cpu()) {
+      metadata_ = buffer;
     } else {
-      ARROW_ASSIGN_OR_RAISE(
-          metadata_, Buffer::ViewOrCopy(*buffer, CPUDevice::memory_manager(pool_)));
+      ARROW_ASSIGN_OR_RAISE(metadata_,
+                            Buffer::ViewOrCopy(buffer, CPUDevice::memory_manager(pool_)));
     }
     return ConsumeMetadata();
   }
@@ -693,8 +708,8 @@ class MessageDecoder::MessageDecoderImpl {
     }
   }
 
-  Status ConsumeBodyBuffer(std::shared_ptr<Buffer>* buffer) {
-    return ConsumeBody(buffer);
+  Status ConsumeBodyBuffer(std::shared_ptr<Buffer> buffer) {
+    return ConsumeBody(&buffer);
   }
 
   Status ConsumeBodyChunks() {
@@ -729,12 +744,12 @@ class MessageDecoder::MessageDecoderImpl {
     return Status::OK();
   }
 
-  Result<int32_t> ConsumeDataBufferInt32(std::shared_ptr<Buffer>* buffer) {
-    if ((*buffer)->is_cpu()) {
-      return util::SafeLoadAs<int32_t>((*buffer)->data());
+  Result<int32_t> ConsumeDataBufferInt32(const std::shared_ptr<Buffer>& buffer) {
+    if (buffer->is_cpu()) {
+      return util::SafeLoadAs<int32_t>(buffer->data());
     } else {
-      ARROW_ASSIGN_OR_RAISE(
-          auto cpu_buffer, Buffer::ViewOrCopy(*buffer, CPUDevice::memory_manager(pool_)));
+      ARROW_ASSIGN_OR_RAISE(auto cpu_buffer,
+                            Buffer::ViewOrCopy(buffer, CPUDevice::memory_manager(pool_)));
       return util::SafeLoadAs<int32_t>(cpu_buffer->data());
     }
   }
@@ -800,7 +815,7 @@ Status MessageDecoder::Consume(const uint8_t* data, int64_t size) {
 }
 
 Status MessageDecoder::Consume(std::shared_ptr<Buffer> buffer) {
-  return impl_->ConsumeBuffer(&buffer);
+  return impl_->ConsumeBuffer(buffer);
 }
 
 int64_t MessageDecoder::next_required_size() const { return impl_->next_required_size(); }
@@ -850,18 +865,6 @@ std::unique_ptr<MessageReader> MessageReader::Open(io::InputStream* stream) {
 std::unique_ptr<MessageReader> MessageReader::Open(
     const std::shared_ptr<io::InputStream>& owned_stream) {
   return std::unique_ptr<MessageReader>(new InputStreamMessageReader(owned_stream));
-}
-
-// ----------------------------------------------------------------------
-// Deprecated functions
-
-Status ReadMessage(int64_t offset, int32_t metadata_length, io::RandomAccessFile* file,
-                   std::unique_ptr<Message>* message) {
-  return ReadMessage(offset, metadata_length, file).Value(message);
-}
-
-Status ReadMessage(io::InputStream* file, std::unique_ptr<Message>* out) {
-  return ReadMessage(file, default_memory_pool()).Value(out);
 }
 
 }  // namespace ipc

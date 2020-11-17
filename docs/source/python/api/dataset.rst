@@ -19,8 +19,8 @@
 
 .. _api.dataset:
 
-Datasets
-========
+Dataset
+=======
 
 .. warning::
 
@@ -34,6 +34,7 @@ Factory functions
    :toctree: ../generated/
 
    dataset
+   parquet_dataset
    partitioning
    field
    scalar
@@ -50,9 +51,10 @@ Classes
    PartitioningFactory
    DirectoryPartitioning
    HivePartitioning
+   Dataset
    FileSystemDataset
    FileSystemFactoryOptions
    FileSystemDatasetFactory
-   Dataset
+   UnionDataset
    Scanner
    Expression

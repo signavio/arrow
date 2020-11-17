@@ -54,14 +54,20 @@ using internal::FileOpenWritable;
 using internal::FileRead;
 using internal::FileSeek;
 using internal::PlatformFilename;
+using internal::TemporaryDir;
 
 namespace io {
 
 class FileTestFixture : public ::testing::Test {
  public:
   void SetUp() {
-    path_ = "arrow-test-io-file.txt";
+    ASSERT_OK_AND_ASSIGN(temp_dir_, TemporaryDir::Make("file-test-"));
+    path_ = TempFile("arrow-test-io-file.txt");
     EnsureFileDeleted();
+  }
+
+  std::string TempFile(arrow::util::string_view path) {
+    return temp_dir_->path().Join(std::string(path)).ValueOrDie().ToString();
   }
 
   void TearDown() { EnsureFileDeleted(); }
@@ -73,6 +79,7 @@ class FileTestFixture : public ::testing::Test {
   }
 
  protected:
+  std::unique_ptr<TemporaryDir> temp_dir_;
   std::string path_;
 };
 
@@ -369,8 +376,8 @@ TEST_F(TestReadableFile, ReadAsync) {
   MakeTestFile();
   OpenFile();
 
-  auto fut1 = file_->ReadAsync(1, 10);
-  auto fut2 = file_->ReadAsync(0, 4);
+  auto fut1 = file_->ReadAsync({}, 1, 10);
+  auto fut2 = file_->ReadAsync({}, 0, 4);
   ASSERT_OK_AND_ASSIGN(auto buf1, fut1.result());
   ASSERT_OK_AND_ASSIGN(auto buf2, fut2.result());
   AssertBufferEqual(*buf1, "estdata");
@@ -388,6 +395,17 @@ TEST_F(TestReadableFile, SeekingRequired) {
   ASSERT_OK(file_->Seek(0));
   ASSERT_OK_AND_ASSIGN(buffer, file_->Read(4));
   AssertBufferEqual(*buffer, "test");
+}
+
+TEST_F(TestReadableFile, WillNeed) {
+  MakeTestFile();
+  OpenFile();
+
+  ASSERT_OK(file_->WillNeed({}));
+  ASSERT_OK(file_->WillNeed({{0, 3}, {4, 6}}));
+  ASSERT_OK(file_->WillNeed({{10, 0}}));
+
+  ASSERT_RAISES(Invalid, file_->WillNeed({{-1, -1}}));
 }
 
 TEST_F(TestReadableFile, NonexistentFile) {
@@ -545,13 +563,24 @@ TEST_F(TestPipeIO, ReadableFileFails) {
 
 class TestMemoryMappedFile : public ::testing::Test, public MemoryMapFixture {
  public:
-  void TearDown() { MemoryMapFixture::TearDown(); }
+  void SetUp() override {
+    ASSERT_OK_AND_ASSIGN(temp_dir_, TemporaryDir::Make("memory-map-test-"));
+  }
+
+  void TearDown() override { MemoryMapFixture::TearDown(); }
+
+  std::string TempFile(arrow::util::string_view path) {
+    return temp_dir_->path().Join(std::string(path)).ValueOrDie().ToString();
+  }
+
+ protected:
+  std::unique_ptr<TemporaryDir> temp_dir_;
 };
 
 TEST_F(TestMemoryMappedFile, InvalidUsages) {}
 
 TEST_F(TestMemoryMappedFile, ZeroSizeFile) {
-  std::string path = "io-memory-map-zero-size";
+  std::string path = TempFile("io-memory-map-zero-size");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(0, path));
 
   ASSERT_OK_AND_EQ(0, result->Tell());
@@ -567,7 +596,7 @@ TEST_F(TestMemoryMappedFile, MapPartFile) {
 
   const int reps = 128;
 
-  std::string path = "io-memory-map-offset";
+  std::string path = TempFile("io-memory-map-offset");
 
   // file size = 128k
   CreateFile(path, reps * buffer_size);
@@ -611,7 +640,7 @@ TEST_F(TestMemoryMappedFile, WriteRead) {
 
   const int reps = 5;
 
-  std::string path = "io-memory-map-write-read-test";
+  std::string path = TempFile("io-memory-map-write-read-test");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(reps * buffer_size, path));
 
   int64_t position = 0;
@@ -630,12 +659,12 @@ TEST_F(TestMemoryMappedFile, ReadAsync) {
   std::vector<uint8_t> buffer(buffer_size);
   random_bytes(1024, 0, buffer.data());
 
-  std::string path = "io-memory-map-read-async-test";
+  std::string path = TempFile("io-memory-map-read-async-test");
   ASSERT_OK_AND_ASSIGN(auto mmap, InitMemoryMap(buffer_size, path));
   ASSERT_OK(mmap->Write(buffer.data(), buffer_size));
 
-  auto fut1 = mmap->ReadAsync(1, 1000);
-  auto fut2 = mmap->ReadAsync(3, 4);
+  auto fut1 = mmap->ReadAsync({}, 1, 1000);
+  auto fut2 = mmap->ReadAsync({}, 3, 4);
   ASSERT_EQ(fut1.state(), FutureState::SUCCESS);
   ASSERT_EQ(fut2.state(), FutureState::SUCCESS);
   ASSERT_OK_AND_ASSIGN(auto buf1, fut1.result());
@@ -645,8 +674,23 @@ TEST_F(TestMemoryMappedFile, ReadAsync) {
   AssertBufferEqual(*buf2, Buffer(buffer.data() + 3, 4));
 }
 
+TEST_F(TestMemoryMappedFile, WillNeed) {
+  const int64_t buffer_size = 1024;
+  std::vector<uint8_t> buffer(buffer_size);
+  random_bytes(1024, 0, buffer.data());
+
+  std::string path = TempFile("io-memory-map-will-need-test");
+  ASSERT_OK_AND_ASSIGN(auto mmap, InitMemoryMap(buffer_size, path));
+  ASSERT_OK(mmap->Write(buffer.data(), buffer_size));
+
+  ASSERT_OK(mmap->WillNeed({}));
+  ASSERT_OK(mmap->WillNeed({{0, 4}, {100, 924}}));
+  ASSERT_OK(mmap->WillNeed({{1024, 0}}));
+  ASSERT_RAISES(IOError, mmap->WillNeed({{1025, 1}}));  // Out of bounds
+}
+
 TEST_F(TestMemoryMappedFile, InvalidReads) {
-  std::string path = "io-memory-map-invalid-reads-test";
+  std::string path = TempFile("io-memory-map-invalid-reads-test");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(4096, path));
 
   uint8_t buffer[10];
@@ -666,7 +710,7 @@ TEST_F(TestMemoryMappedFile, WriteResizeRead) {
     random_bytes(buffer_size, 0, b.data());
   }
 
-  std::string path = "io-memory-map-write-read-test";
+  std::string path = TempFile("io-memory-map-write-read-test");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(buffer_size, path));
 
   int64_t position = 0;
@@ -690,7 +734,7 @@ TEST_F(TestMemoryMappedFile, ResizeRaisesOnExported) {
   std::vector<uint8_t> buffer(buffer_size);
   random_bytes(buffer_size, 0, buffer.data());
 
-  std::string path = "io-memory-map-write-read-test";
+  std::string path = TempFile("io-memory-map-write-read-test");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(buffer_size, path));
 
   ASSERT_OK(result->Write(buffer.data(), buffer_size));
@@ -719,7 +763,7 @@ TEST_F(TestMemoryMappedFile, WriteReadZeroInitSize) {
   std::vector<uint8_t> buffer(buffer_size);
   random_bytes(buffer_size, 0, buffer.data());
 
-  std::string path = "io-memory-map-write-read-test";
+  std::string path = TempFile("io-memory-map-write-read-test");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(0, path));
 
   ASSERT_OK(result->Resize(buffer_size));
@@ -735,7 +779,7 @@ TEST_F(TestMemoryMappedFile, WriteThenShrink) {
   std::vector<uint8_t> buffer(buffer_size);
   random_bytes(buffer_size, 0, buffer.data());
 
-  std::string path = "io-memory-map-write-read-test";
+  std::string path = TempFile("io-memory-map-write-read-test");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(buffer_size * 2, path));
 
   ASSERT_OK(result->Resize(buffer_size));
@@ -754,7 +798,7 @@ TEST_F(TestMemoryMappedFile, WriteThenShrinkToHalfThenWrite) {
   std::vector<uint8_t> buffer(buffer_size);
   random_bytes(buffer_size, 0, buffer.data());
 
-  std::string path = "io-memory-map-write-read-test";
+  std::string path = TempFile("io-memory-map-write-read-test");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(buffer_size, path));
 
   ASSERT_OK(result->Write(buffer.data(), buffer_size));
@@ -782,7 +826,7 @@ TEST_F(TestMemoryMappedFile, ResizeToZeroThanWrite) {
   std::vector<uint8_t> buffer(buffer_size);
   random_bytes(buffer_size, 0, buffer.data());
 
-  std::string path = "io-memory-map-write-read-test";
+  std::string path = TempFile("io-memory-map-write-read-test");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(buffer_size, path));
 
   // just a sanity check that writing works ook
@@ -815,7 +859,7 @@ TEST_F(TestMemoryMappedFile, WriteAt) {
   std::vector<uint8_t> buffer(buffer_size);
   random_bytes(buffer_size, 0, buffer.data());
 
-  std::string path = "io-memory-map-write-read-test";
+  std::string path = TempFile("io-memory-map-write-read-test");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(buffer_size, path));
 
   ASSERT_OK(result->WriteAt(0, buffer.data(), buffer_size / 2));
@@ -833,7 +877,7 @@ TEST_F(TestMemoryMappedFile, WriteBeyondEnd) {
   std::vector<uint8_t> buffer(buffer_size);
   random_bytes(buffer_size, 0, buffer.data());
 
-  std::string path = "io-memory-map-write-read-test";
+  std::string path = TempFile("io-memory-map-write-read-test");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(buffer_size, path));
 
   ASSERT_OK(result->Seek(1));
@@ -849,7 +893,7 @@ TEST_F(TestMemoryMappedFile, WriteAtBeyondEnd) {
   std::vector<uint8_t> buffer(buffer_size);
   random_bytes(buffer_size, 0, buffer.data());
 
-  std::string path = "io-memory-map-write-read-test";
+  std::string path = TempFile("io-memory-map-write-read-test");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(buffer_size, path));
 
   // Attempt to write beyond end of memory map
@@ -860,7 +904,7 @@ TEST_F(TestMemoryMappedFile, WriteAtBeyondEnd) {
 }
 
 TEST_F(TestMemoryMappedFile, GetSize) {
-  std::string path = "io-memory-map-get-size";
+  std::string path = TempFile("io-memory-map-get-size");
   ASSERT_OK_AND_ASSIGN(auto result, InitMemoryMap(16384, path));
 
   ASSERT_OK_AND_EQ(16384, result->GetSize());
@@ -876,7 +920,7 @@ TEST_F(TestMemoryMappedFile, ReadOnly) {
 
   const int reps = 5;
 
-  std::string path = "ipc-read-only-test";
+  std::string path = TempFile("ipc-read-only-test");
   ASSERT_OK_AND_ASSIGN(auto rwmmap, InitMemoryMap(reps * buffer_size, path));
 
   int64_t position = 0;
@@ -907,7 +951,7 @@ TEST_F(TestMemoryMappedFile, LARGE_MEMORY_TEST(ReadWriteOver4GbFile)) {
 
   const int64_t reps = 5000;
 
-  std::string path = "ipc-read-over-4gb-file-test";
+  std::string path = TempFile("ipc-read-over-4gb-file-test");
   ASSERT_OK_AND_ASSIGN(auto rwmmap, InitMemoryMap(reps * buffer_size, path));
   AppendFile(path);
 
@@ -938,7 +982,7 @@ TEST_F(TestMemoryMappedFile, RetainMemoryMapReference) {
 
   random_bytes(1024, 0, buffer.data());
 
-  std::string path = "ipc-read-only-test";
+  std::string path = TempFile("ipc-read-only-test");
   CreateFile(path, buffer_size);
 
   {
@@ -969,7 +1013,7 @@ TEST_F(TestMemoryMappedFile, InvalidMode) {
 
   random_bytes(1024, 0, buffer.data());
 
-  std::string path = "ipc-invalid-mode-test";
+  std::string path = TempFile("ipc-invalid-mode-test");
   CreateFile(path, buffer_size);
 
   ASSERT_OK_AND_ASSIGN(auto rommap, MemoryMappedFile::Open(path, FileMode::READ));
@@ -989,7 +1033,7 @@ TEST_F(TestMemoryMappedFile, CastableToFileInterface) {
 
 TEST_F(TestMemoryMappedFile, ThreadSafety) {
   std::string data = "foobar";
-  std::string path = "ipc-multithreading-test";
+  std::string path = TempFile("ipc-multithreading-test");
   CreateFile(path, static_cast<int>(data.size()));
 
   ASSERT_OK_AND_ASSIGN(auto file, MemoryMappedFile::Open(path, FileMode::READWRITE));

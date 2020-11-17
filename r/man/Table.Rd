@@ -35,11 +35,6 @@ A caveat about the \code{$} method: because \code{Table} is an \code{R6} object,
 precedence over the table's columns. So, \code{tab$Slice} would return the
 "Slice" method function even if there were a column in the table called
 "Slice".
-
-A caveat about the \code{[} method for row operations: only "slicing" is
-currently supported. That is, you can select a continuous range of rows
-from the table, but you can't filter with a \code{logical} vector or take an
-arbitrary selection of rows by integer indices.
 }
 
 \section{R6 Methods}{
@@ -51,9 +46,7 @@ the following R6 methods that map onto the underlying C++ methods:
 \item \verb{$ColumnNames()}: Get all column names (called by \code{names(tab)})
 \item \verb{$GetColumnByName(name)}: Extract a \code{ChunkedArray} by string name
 \item \verb{$field(i)}: Extract a \code{Field} from the table schema by integer position
-\item \verb{$select(spec)}: Return a new table with a selection of columns.
-This supports the usual \code{character}, \code{numeric}, and \code{logical} selection
-methods as well as "tidy select" expressions.
+\item \verb{$SelectColumns(indices)}: Return new \code{Table} with specified columns, expressed as 0-based integers.
 \item \verb{$Slice(offset, length = NULL)}: Create a zero-copy view starting at the
 indicated integer offset and going for the given length, or to the end
 of the table if \code{NULL}, the default.
@@ -73,7 +66,9 @@ There are also some active bindings:
 \item \verb{$num_columns}
 \item \verb{$num_rows}
 \item \verb{$schema}
-\item \verb{$metadata}: Returns the key-value metadata of the \code{Schema}
+\item \verb{$metadata}: Returns the key-value metadata of the \code{Schema} as a named list.
+Modify or replace by assigning in (\code{tab$metadata <- new_metadata}).
+All list elements are coerced to string.
 \item \verb{$columns}: Returns a list of \code{ChunkedArray}s
 }
 }

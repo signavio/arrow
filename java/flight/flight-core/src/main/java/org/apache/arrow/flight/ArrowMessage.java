@@ -31,13 +31,18 @@ import org.apache.arrow.flight.grpc.AddWritableBuffer;
 import org.apache.arrow.flight.grpc.GetReadableBuffer;
 import org.apache.arrow.flight.impl.Flight.FlightData;
 import org.apache.arrow.flight.impl.Flight.FlightDescriptor;
+import org.apache.arrow.memory.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.util.AutoCloseables;
 import org.apache.arrow.util.Preconditions;
+import org.apache.arrow.vector.compression.NoCompressionCodec;
+import org.apache.arrow.vector.ipc.message.ArrowBodyCompression;
 import org.apache.arrow.vector.ipc.message.ArrowDictionaryBatch;
 import org.apache.arrow.vector.ipc.message.ArrowRecordBatch;
+import org.apache.arrow.vector.ipc.message.IpcOption;
 import org.apache.arrow.vector.ipc.message.MessageMetadataResult;
 import org.apache.arrow.vector.ipc.message.MessageSerializer;
+import org.apache.arrow.vector.types.MetadataVersion;
 import org.apache.arrow.vector.types.pojo.Schema;
 
 import com.google.common.collect.ImmutableList;
@@ -49,14 +54,13 @@ import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.WireFormat;
 
 import io.grpc.Drainable;
-import io.grpc.MethodDescriptor;
 import io.grpc.MethodDescriptor.Marshaller;
 import io.grpc.protobuf.ProtoUtils;
-import io.netty.buffer.ArrowBuf;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufInputStream;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.buffer.UnpooledByteBufAllocator;
 
 /**
  * The in-memory representation of FlightData used to manage a stream of Arrow messages.
@@ -74,7 +78,8 @@ class ArrowMessage implements AutoCloseable {
   private static final int APP_METADATA_TAG =
       (FlightData.APP_METADATA_FIELD_NUMBER << 3) | WireFormat.WIRETYPE_LENGTH_DELIMITED;
 
-  private static Marshaller<FlightData> NO_BODY_MARSHALLER = ProtoUtils.marshaller(FlightData.getDefaultInstance());
+  private static final Marshaller<FlightData> NO_BODY_MARSHALLER =
+      ProtoUtils.marshaller(FlightData.getDefaultInstance());
 
   /** Get the application-specific metadata in this message. The ArrowMessage retains ownership of the buffer. */
   public ArrowBuf getApplicationMetadata() {
@@ -105,7 +110,7 @@ class ArrowMessage implements AutoCloseable {
   }
 
   // Pre-allocated buffers for padding serialized ArrowMessages.
-  private static List<ByteBuf> PADDING_BUFFERS = Arrays.asList(
+  private static final List<ByteBuf> PADDING_BUFFERS = Arrays.asList(
       null,
       Unpooled.copiedBuffer(new byte[] { 0 }),
       Unpooled.copiedBuffer(new byte[] { 0, 0 }),
@@ -116,18 +121,22 @@ class ArrowMessage implements AutoCloseable {
       Unpooled.copiedBuffer(new byte[] { 0, 0, 0, 0, 0, 0, 0 })
   );
 
+  private final IpcOption writeOption;
   private final FlightDescriptor descriptor;
   private final MessageMetadataResult message;
   private final ArrowBuf appMetadata;
   private final List<ArrowBuf> bufs;
+  private final ArrowBodyCompression bodyCompression;
 
-  public ArrowMessage(FlightDescriptor descriptor, Schema schema) {
-    ByteBuffer serializedMessage = MessageSerializer.serializeMetadata(schema);
+  public ArrowMessage(FlightDescriptor descriptor, Schema schema, IpcOption option) {
+    this.writeOption = option;
+    ByteBuffer serializedMessage = MessageSerializer.serializeMetadata(schema, writeOption);
     this.message = MessageMetadataResult.create(serializedMessage.slice(),
         serializedMessage.remaining());
     bufs = ImmutableList.of();
     this.descriptor = descriptor;
     this.appMetadata = null;
+    this.bodyCompression = NoCompressionCodec.DEFAULT_BODY_COMPRESSION;
   }
 
   /**
@@ -135,16 +144,19 @@ class ArrowMessage implements AutoCloseable {
    * @param batch The record batch.
    * @param appMetadata The app metadata. May be null. Takes ownership of the buffer otherwise.
    */
-  public ArrowMessage(ArrowRecordBatch batch, ArrowBuf appMetadata) {
-    ByteBuffer serializedMessage = MessageSerializer.serializeMetadata(batch);
+  public ArrowMessage(ArrowRecordBatch batch, ArrowBuf appMetadata, IpcOption option) {
+    this.writeOption = option;
+    ByteBuffer serializedMessage = MessageSerializer.serializeMetadata(batch, writeOption);
     this.message = MessageMetadataResult.create(serializedMessage.slice(), serializedMessage.remaining());
     this.bufs = ImmutableList.copyOf(batch.getBuffers());
     this.descriptor = null;
     this.appMetadata = appMetadata;
+    this.bodyCompression = batch.getBodyCompression();
   }
 
-  public ArrowMessage(ArrowDictionaryBatch batch) {
-    ByteBuffer serializedMessage = MessageSerializer.serializeMetadata(batch);
+  public ArrowMessage(ArrowDictionaryBatch batch, IpcOption option) {
+    this.writeOption = new IpcOption();
+    ByteBuffer serializedMessage = MessageSerializer.serializeMetadata(batch, writeOption);
     serializedMessage = serializedMessage.slice();
     this.message = MessageMetadataResult.create(serializedMessage, serializedMessage.remaining());
     // asInputStream will free the buffers implicitly, so increment the reference count
@@ -152,14 +164,45 @@ class ArrowMessage implements AutoCloseable {
     this.bufs = ImmutableList.copyOf(batch.getDictionary().getBuffers());
     this.descriptor = null;
     this.appMetadata = null;
+    this.bodyCompression = batch.getDictionary().getBodyCompression();
+  }
+
+  /**
+   * Create an ArrowMessage containing only application metadata.
+   * @param appMetadata The application-provided metadata buffer.
+   */
+  public ArrowMessage(ArrowBuf appMetadata) {
+    // No need to take IpcOption as it's not used to serialize this kind of message.
+    this.writeOption = new IpcOption();
+    this.message = null;
+    this.bufs = ImmutableList.of();
+    this.descriptor = null;
+    this.appMetadata = appMetadata;
+    this.bodyCompression = NoCompressionCodec.DEFAULT_BODY_COMPRESSION;
+  }
+
+  public ArrowMessage(FlightDescriptor descriptor) {
+    // No need to take IpcOption as it's not used to serialize this kind of message.
+    this.writeOption = new IpcOption();
+    this.message = null;
+    this.bufs = ImmutableList.of();
+    this.descriptor = descriptor;
+    this.appMetadata = null;
+    this.bodyCompression = NoCompressionCodec.DEFAULT_BODY_COMPRESSION;
   }
 
   private ArrowMessage(FlightDescriptor descriptor, MessageMetadataResult message, ArrowBuf appMetadata,
                        ArrowBuf buf) {
+    // No need to take IpcOption as this is used for deserialized ArrowMessage coming from the wire.
+    this.writeOption = new IpcOption();
+    if (message != null) {
+      this.writeOption.metadataVersion = MetadataVersion.fromFlatbufID(message.getMessage().version());
+    }
     this.message = message;
     this.descriptor = descriptor;
     this.appMetadata = appMetadata;
     this.bufs = buf == null ? ImmutableList.of() : ImmutableList.of(buf);
+    this.bodyCompression = NoCompressionCodec.DEFAULT_BODY_COMPRESSION;
   }
 
   public MessageMetadataResult asSchemaMessage() {
@@ -171,6 +214,10 @@ class ArrowMessage implements AutoCloseable {
   }
 
   public HeaderType getMessageType() {
+    if (message == null) {
+      // Null message occurs for metadata-only messages (in DoExchange)
+      return HeaderType.NONE;
+    }
     return HeaderType.getHeader(message.headerType());
   }
 
@@ -271,8 +318,19 @@ class ArrowMessage implements AutoCloseable {
    * @return InputStream
    */
   private InputStream asInputStream(BufferAllocator allocator) {
-    try {
+    if (message == null) {
+      // If we have no IPC message, it's a pure-metadata message
+      final FlightData.Builder builder = FlightData.newBuilder();
+      if (descriptor != null) {
+        builder.setFlightDescriptor(descriptor);
+      }
+      if (appMetadata != null) {
+        builder.setAppMetadata(ByteString.copyFrom(appMetadata.nioBuffer()));
+      }
+      return NO_BODY_MARSHALLER.stream(builder.build());
+    }
 
+    try {
       final ByteString bytes = ByteString.copyFrom(message.getMessageBuffer(),
           message.bytesAfterMessage());
 
@@ -300,35 +358,35 @@ class ArrowMessage implements AutoCloseable {
 
       if (appMetadata != null && appMetadata.capacity() > 0) {
         // Must call slice() as CodedOutputStream#writeByteBuffer writes -capacity- bytes, not -limit- bytes
-        cos.writeByteBuffer(FlightData.APP_METADATA_FIELD_NUMBER, appMetadata.asNettyBuffer().nioBuffer().slice());
+        cos.writeByteBuffer(FlightData.APP_METADATA_FIELD_NUMBER, appMetadata.nioBuffer().slice());
       }
 
       cos.writeTag(FlightData.DATA_BODY_FIELD_NUMBER, WireFormat.WIRETYPE_LENGTH_DELIMITED);
       int size = 0;
       List<ByteBuf> allBufs = new ArrayList<>();
       for (ArrowBuf b : bufs) {
-        allBufs.add(b.asNettyBuffer());
+        allBufs.add(Unpooled.wrappedBuffer(b.nioBuffer()).retain());
         size += b.readableBytes();
         // [ARROW-4213] These buffers must be aligned to an 8-byte boundary in order to be readable from C++.
         if (b.readableBytes() % 8 != 0) {
-          int paddingBytes = (int)(8 - (b.readableBytes() % 8));
+          int paddingBytes = (int) (8 - (b.readableBytes() % 8));
           assert paddingBytes > 0 && paddingBytes < 8;
           size += paddingBytes;
           allBufs.add(PADDING_BUFFERS.get(paddingBytes).retain());
         }
-        // gRPC/Netty will decrement the reference count (via the ByteBufInputStream below) when written, so increment
-        // the reference count
-        b.getReferenceManager().retain();
       }
       // rawvarint is used for length definition.
       cos.writeUInt32NoTag(size);
       cos.flush();
 
-      ArrowBuf initialBuf = allocator.buffer(baos.size());
+      ByteBuf initialBuf = Unpooled.buffer(baos.size());
       initialBuf.writeBytes(baos.toByteArray());
-      final CompositeByteBuf bb = new CompositeByteBuf(allocator.getAsByteBufAllocator(), true,
+      final CompositeByteBuf bb = new CompositeByteBuf(UnpooledByteBufAllocator.DEFAULT, true,
           Math.max(2, bufs.size() + 1),
-          ImmutableList.<ByteBuf>builder().add(initialBuf.asNettyBuffer()).addAll(allBufs).build());
+          ImmutableList.<ByteBuf>builder()
+              .add(initialBuf)
+              .addAll(allBufs)
+              .build());
       final ByteBufInputStream is = new DrainableByteBufInputStream(bb);
       return is;
     } catch (Exception ex) {
@@ -370,7 +428,7 @@ class ArrowMessage implements AutoCloseable {
     return new ArrowMessageHolderMarshaller(allocator);
   }
 
-  private static class ArrowMessageHolderMarshaller implements MethodDescriptor.Marshaller<ArrowMessage> {
+  private static class ArrowMessageHolderMarshaller implements Marshaller<ArrowMessage> {
 
     private final BufferAllocator allocator;
 

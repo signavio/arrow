@@ -27,29 +27,27 @@ test_that("read_table handles various input streams (ARROW-3450, ARROW-3505)", {
 
   tf <- tempfile()
   on.exit(unlink(tf))
-  write_arrow(tab, tf)
+  expect_deprecated(
+    write_arrow(tab, tf),
+    "write_feather"
+  )
 
-  bytes <- write_arrow(tab, raw())
-
-  tab1 <- read_arrow(tf, as_data_frame = FALSE)
+  tab1 <- read_feather(tf, as_data_frame = FALSE)
   tab2 <- read_feather(normalizePath(tf), as_data_frame = FALSE)
 
   readable_file <- ReadableFile$create(tf)
-  tab3 <- read_arrow(readable_file, as_data_frame = FALSE)
+  expect_deprecated(
+    tab3 <- read_arrow(readable_file, as_data_frame = FALSE),
+    "read_feather"
+  )
   readable_file$close()
 
   mmap_file <- mmap_open(tf)
-  # check for deprecation message
-  expect_deprecated(
-    tab4 <- read_table(mmap_file),
-    "read_arrow"
-  )
   mmap_file$close()
 
   expect_equal(tab, tab1)
   expect_equal(tab, tab2)
   expect_equal(tab, tab3)
-  expect_equal(tab, tab4)
 })
 
 test_that("Table cast (ARROW-3741)", {
@@ -65,10 +63,12 @@ test_that("Table cast (ARROW-3741)", {
   expect_equal(tab2$column(1L)$type, int64())
 })
 
-test_that("Table dim() and nrow() (ARROW-3816)", {
-  tab <- Table$create(x = 1:10, y  = 1:10)
-  expect_equal(dim(tab), c(10L, 2L))
-  expect_equal(nrow(tab), 10L)
+test_that("Table S3 methods", {
+  tab <- Table$create(example_data)
+  for (f in c("dim", "nrow", "ncol", "dimnames", "colnames", "row.names", "as.list")) {
+    fun <- get(f)
+    expect_identical(fun(tab), fun(example_data), info = f)
+  }
 })
 
 test_that("Table $column and $field", {
@@ -80,14 +80,14 @@ test_that("Table $column and $field", {
   expect_error(tab$column(NA), "'i' cannot be NA")
   expect_error(tab$column(-1), "subscript out of bounds")
   expect_error(tab$column(1000), "subscript out of bounds")
-  expect_error(tab$column(1:2), class = "Rcpp::not_compatible")
-  expect_error(tab$column("one"), class = "Rcpp::not_compatible")
+  expect_error(tab$column(1:2))
+  expect_error(tab$column("one"))
 
   expect_error(tab$field(NA), "'i' cannot be NA")
   expect_error(tab$field(-1), "subscript out of bounds")
   expect_error(tab$field(1000), "subscript out of bounds")
-  expect_error(tab$field(1:2), class = "Rcpp::not_compatible")
-  expect_error(tab$field("one"), class = "Rcpp::not_compatible")
+  expect_error(tab$field(1:2))
+  expect_error(tab$field("one"))
 })
 
 test_that("[, [[, $ for Table", {
@@ -128,10 +128,21 @@ test_that("[, [[, $ for Table", {
   expect_vector(tab[[4]], tbl$chr)
   expect_null(tab$qwerty)
   expect_null(tab[["asdf"]])
-  expect_error(tab[[c(4, 3)]], class = "Rcpp::not_compatible")
+  # List-like column slicing
+  expect_data_frame(tab[2:4], tbl[2:4])
+  expect_data_frame(tab[c(2, 1)], tbl[c(2, 1)])
+  expect_data_frame(tab[-3], tbl[-3])
+
+  expect_error(tab[[c(4, 3)]])
   expect_error(tab[[NA]], "'i' must be character or numeric, not logical")
   expect_error(tab[[NULL]], "'i' must be character or numeric, not NULL")
   expect_error(tab[[c("asdf", "jkl;")]], 'length(name) not equal to 1', fixed = TRUE)
+  expect_error(tab[-3:3], "Invalid column index")
+  expect_error(tab[1000],  "Invalid column index")
+  expect_error(tab[1:1000], "Invalid column index")
+
+  skip("Table with 0 cols doesn't know how many rows it should have")
+  expect_data_frame(tab[0], tbl[0])
 })
 
 test_that("Table$Slice", {
@@ -142,14 +153,14 @@ test_that("Table$Slice", {
   expect_data_frame(tab3, tbl[6:7,])
 
   # Input validation
-  expect_error(tab$Slice("ten"), class = "Rcpp::not_compatible")
+  expect_error(tab$Slice("ten"))
   expect_error(tab$Slice(NA_integer_), "Slice 'offset' cannot be NA")
   expect_error(tab$Slice(NA), "Slice 'offset' cannot be NA")
-  expect_error(tab$Slice(10, "ten"), class = "Rcpp::not_compatible")
+  expect_error(tab$Slice(10, "ten"))
   expect_error(tab$Slice(10, NA_integer_), "Slice 'length' cannot be NA")
   expect_error(tab$Slice(NA_integer_, NA_integer_), "Slice 'offset' cannot be NA")
-  expect_error(tab$Slice(c(10, 10)), class = "Rcpp::not_compatible")
-  expect_error(tab$Slice(10, c(10, 10)), class = "Rcpp::not_compatible")
+  expect_error(tab$Slice(c(10, 10)))
+  expect_error(tab$Slice(10, c(10, 10)))
   expect_error(tab$Slice(1000), "Slice 'offset' greater than array length")
   expect_error(tab$Slice(-1), "Slice 'offset' cannot be negative")
   expect_error(tab3$Slice(10, 10), "Slice 'offset' greater than array length")
@@ -294,7 +305,7 @@ test_that("Table$Equals(check_metadata)", {
   expect_is(tab2, "Table")
   expect_false(tab1$schema$HasMetadata)
   expect_true(tab2$schema$HasMetadata)
-  expect_match(tab2$schema$metadata, "some: metadata", fixed = TRUE)
+  expect_identical(tab2$schema$metadata, list(some = "metadata"))
 
   expect_true(tab1 == tab2)
   expect_true(tab1$Equals(tab2))
@@ -308,5 +319,42 @@ test_that("Table$Equals(check_metadata)", {
 
 test_that("Table handles null type (ARROW-7064)", {
   tab <- Table$create(a = 1:10, n = vctrs::unspecified(10))
-  expect_equal(tab$schema,  schema(a = int32(), n = null()))
+  expect_equivalent(tab$schema, schema(a = int32(), n = null()))
+})
+
+test_that("Can create table with specific dictionary types", {
+  fact <- example_data[,"fct"]
+  int_types <- c(int8(), int16(), int32(), int64())
+  # TODO: test uint types when format allows
+  # uint_types <- c(uint8(), uint16(), uint32(), uint64())
+  for (i in int_types) {
+    sch <- schema(fct = dictionary(i, utf8()))
+    tab <- Table$create(fact, schema = sch)
+    expect_equal(sch, tab$schema)
+    if (i != int64()) {
+      # TODO: same downcast to int32 as we do for int64() type elsewhere
+      expect_identical(as.data.frame(tab), fact)
+    }
+  }
+})
+
+test_that("Table unifies dictionary on conversion back to R (ARROW-8374)", {
+  b1 <- record_batch(f = factor(c("a"), levels = c("a", "b")))
+  b2 <- record_batch(f = factor(c("c"), levels = c("c", "d")))
+  b3 <- record_batch(f = factor(NA, levels = "a"))
+  b4 <- record_batch(f = factor())
+
+  res <- tibble::tibble(f = factor(c("a", "c", NA), levels = c("a", "b", "c", "d")))
+  tab <- Table$create(b1, b2, b3, b4)
+
+  expect_identical(as.data.frame(tab), res)
+})
+
+test_that("Table$SelectColumns()", {
+  tab <- Table$create(x = 1:10, y = 1:10)
+
+  expect_equal(tab$SelectColumns(0L), Table$create(x = 1:10))
+
+  expect_error(tab$SelectColumns(2:4))
+  expect_error(tab$SelectColumns(""))
 })

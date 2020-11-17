@@ -35,13 +35,11 @@ RUN \
     /etc/apt/sources.list.d/backports.list
 
 ARG DEBUG
-ARG LLVM
 RUN \
   quiet=$([ "${DEBUG}" = "yes" ] || echo "-qq") && \
   apt update ${quiet} && \
   apt install -y -V ${quiet} \
     build-essential \
-    clang-${LLVM} \
     cmake \
     debhelper \
     devscripts \
@@ -53,6 +51,7 @@ RUN \
     libbrotli-dev \
     libbz2-dev \
     libc-ares-dev \
+    libcurl4-openssl-dev \
     libgirepository1.0-dev \
     libglib2.0-doc \
     libgmock-dev \
@@ -63,8 +62,8 @@ RUN \
     libsnappy-dev \
     libssl-dev \
     libthrift-dev \
+    libutf8proc-dev \
     libzstd-dev \
-    llvm-${LLVM}-dev \
     lsb-release \
     ninja-build \
     pkg-config \
@@ -74,6 +73,9 @@ RUN \
     rapidjson-dev \
     tzdata \
     zlib1g-dev && \
+  apt install -y -V -t buster-backports ${quiet} \
+    clang-8 \
+    llvm-8-dev && \
   if apt list | grep '^nvidia-cuda-toolkit/'; then \
     apt install -y -V ${quiet} nvidia-cuda-toolkit; \
   fi && \

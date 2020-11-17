@@ -47,11 +47,6 @@
 #' "Slice" method function even if there were a column in the table called
 #' "Slice".
 #'
-#' A caveat about the `[` method for row operations: only "slicing" is
-#' currently supported. That is, you can select a continuous range of rows
-#' from the table, but you can't filter with a `logical` vector or take an
-#' arbitrary selection of rows by integer indices.
-#'
 #' @section R6 Methods:
 #' In addition to the more R-friendly S3 methods, a `Table` object has
 #' the following R6 methods that map onto the underlying C++ methods:
@@ -60,9 +55,7 @@
 #' - `$ColumnNames()`: Get all column names (called by `names(tab)`)
 #' - `$GetColumnByName(name)`: Extract a `ChunkedArray` by string name
 #' - `$field(i)`: Extract a `Field` from the table schema by integer position
-#' - `$select(spec)`: Return a new table with a selection of columns.
-#'    This supports the usual `character`, `numeric`, and `logical` selection
-#'    methods as well as "tidy select" expressions.
+#' - `$SelectColumns(indices)`: Return new `Table` with specified columns, expressed as 0-based integers.
 #' - `$Slice(offset, length = NULL)`: Create a zero-copy view starting at the
 #'    indicated integer offset and going for the given length, or to the end
 #'    of the table if `NULL`, the default.
@@ -80,7 +73,9 @@
 #' - `$num_columns`
 #' - `$num_rows`
 #' - `$schema`
-#' - `$metadata`: Returns the key-value metadata of the `Schema`
+#' - `$metadata`: Returns the key-value metadata of the `Schema` as a named list.
+#'    Modify or replace by assigning in (`tab$metadata <- new_metadata`).
+#'    All list elements are coerced to string.
 #' - `$columns`: Returns a list of `ChunkedArray`s
 #' @rdname Table
 #' @name Table
@@ -118,16 +113,8 @@ Table <- R6Class("Table", inherit = ArrowObject,
       shared_ptr(Table, Table__cast(self, target_schema, options))
     },
 
-    select = function(spec) {
-      spec <- enquo(spec)
-      if (quo_is_null(spec)) {
-        self
-      } else {
-        all_vars <- self$ColumnNames()
-        vars <- vars_select(all_vars, !!spec)
-        indices <- match(vars, all_vars)
-        shared_ptr(Table, Table__select(self, indices))
-      }
+    SelectColumns = function(indices) {
+      shared_ptr(Table, Table__SelectColumns(self, indices))
     },
 
     Slice = function(offset, length = NULL) {
@@ -144,21 +131,13 @@ Table <- R6Class("Table", inherit = ArrowObject,
       if (is.integer(i)) {
         i <- Array$create(i)
       }
-      if (inherits(i, "ChunkedArray")) {
-        return(shared_ptr(Table, Table__TakeChunked(self, i)))
-      }
-      assert_is(i, "Array")
-      shared_ptr(Table, Table__Take(self, i))
+      shared_ptr(Table, call_function("take", self, i))
     },
     Filter = function(i, keep_na = TRUE) {
       if (is.logical(i)) {
         i <- Array$create(i)
       }
-      if (inherits(i, "ChunkedArray")) {
-        return(shared_ptr(Table, Table__FilterChunked(self, i, keep_na)))
-      }
-      assert_is(i, "Array")
-      shared_ptr(Table, Table__Filter(self, i, keep_na))
+      shared_ptr(Table, call_function("filter", self, i, options = list(keep_na = keep_na)))
     },
 
     Equals = function(other, check_metadata = FALSE, ...) {
@@ -178,10 +157,58 @@ Table <- R6Class("Table", inherit = ArrowObject,
     num_columns = function() Table__num_columns(self),
     num_rows = function() Table__num_rows(self),
     schema = function() shared_ptr(Schema, Table__schema(self)),
-    metadata = function() self$schema$metadata,
+    metadata = function(new) {
+      if (missing(new)) {
+        # Get the metadata (from the schema)
+        self$schema$metadata
+      } else {
+        # Set the metadata
+        new <- prepare_key_value_metadata(new)
+        out <- Table__ReplaceSchemaMetadata(self, new)
+        # ReplaceSchemaMetadata returns a new object but we're modifying in place,
+        # so swap in that new C++ object pointer into our R6 object
+        self$set_pointer(out)
+        self
+      }
+    },
     columns = function() map(Table__columns(self), shared_ptr, class = ChunkedArray)
   )
 )
+
+arrow_attributes <- function(x, only_top_level = FALSE) {
+  att <- attributes(x)
+
+  removed_attributes <- character()
+  if (identical(class(x), c("tbl_df", "tbl", "data.frame"))) {
+    removed_attributes <- c("class", "row.names", "names")
+  } else if (inherits(x, "data.frame")) {
+    removed_attributes <- c("row.names", "names")
+  } else if (inherits(x, "factor")) {
+    removed_attributes <- c("class", "levels")
+  } else if (inherits(x, "integer64") || inherits(x, "Date")) {
+    removed_attributes <- c("class")
+  } else if (inherits(x, "POSIXct")) {
+    removed_attributes <- c("class", "tzone")
+  } else if (inherits(x, "hms") || inherits(x, "difftime")) {
+    removed_attributes <- c("class", "units")
+  }
+
+  att <- att[setdiff(names(att), removed_attributes)]
+  if (isTRUE(only_top_level)) {
+    return(att)
+  }
+
+  if (is.data.frame(x)) {
+    columns <- map(x, arrow_attributes)
+    if (length(att) || !all(map_lgl(columns, is.null))) {
+      list(attributes = att, columns = columns)
+    }
+  } else if (length(att)) {
+    list(attributes = att, columns = NULL)
+  } else {
+    NULL
+  }
+}
 
 Table$create <- function(..., schema = NULL) {
   dots <- list2(...)
@@ -190,18 +217,33 @@ Table$create <- function(..., schema = NULL) {
     names(dots) <- rep_len("", length(dots))
   }
   stopifnot(length(dots) > 0)
-  shared_ptr(Table, Table__from_dots(dots, schema))
+  if (all_record_batches(dots)) {
+    shared_ptr(Table, Table__from_record_batches(dots, schema))
+  } else {
+    shared_ptr(Table, Table__from_dots(dots, schema))
+  }
 }
 
 #' @export
 as.data.frame.Table <- function(x, row.names = NULL, optional = FALSE, ...) {
-  Table__to_dataframe(x, use_threads = option_use_threads())
+  df <- Table__to_dataframe(x, use_threads = option_use_threads())
+  if (!is.null(r_metadata <- x$metadata$r)) {
+    df <- apply_arrow_r_metadata(df, .unserialize_arrow_r_metadata(r_metadata))
+  }
+  df
 }
 
 #' @export
-dim.Table <- function(x) {
-  c(x$num_rows, x$num_columns)
-}
+as.list.Table <- as.list.RecordBatch
+
+#' @export
+row.names.Table <- row.names.RecordBatch
+
+#' @export
+dimnames.Table <- dimnames.RecordBatch
+
+#' @export
+dim.Table <- function(x) c(x$num_rows, x$num_columns)
 
 #' @export
 names.Table <- function(x) x$ColumnNames()

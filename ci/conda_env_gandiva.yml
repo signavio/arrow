@@ -15,6 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-clangdev=8
-llvmdev=8
+clangdev=11
+llvmdev=11
 re2

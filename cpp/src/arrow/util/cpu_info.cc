@@ -39,6 +39,7 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdint>
 #include <fstream>
@@ -46,6 +47,8 @@
 #include <mutex>
 #include <string>
 
+#include "arrow/result.h"
+#include "arrow/util/io_util.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/string.h"
 
@@ -123,8 +126,13 @@ static struct {
   int64_t flag;
 } flag_mappings[] = {
 #if (defined(__i386) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_X64))
-    {"ssse3", CpuInfo::SSSE3},   {"sse4_1", CpuInfo::SSE4_1},
-    {"sse4_2", CpuInfo::SSE4_2}, {"popcnt", CpuInfo::POPCNT},
+    {"ssse3", CpuInfo::SSSE3},       {"sse4_1", CpuInfo::SSE4_1},
+    {"sse4_2", CpuInfo::SSE4_2},     {"popcnt", CpuInfo::POPCNT},
+    {"avx", CpuInfo::AVX},           {"avx2", CpuInfo::AVX2},
+    {"avx512f", CpuInfo::AVX512F},   {"avx512cd", CpuInfo::AVX512CD},
+    {"avx512vl", CpuInfo::AVX512VL}, {"avx512dq", CpuInfo::AVX512DQ},
+    {"avx512bw", CpuInfo::AVX512BW}, {"bmi1", CpuInfo::BMI1},
+    {"bmi2", CpuInfo::BMI2},
 #endif
 #if defined(__aarch64__)
     {"asimd", CpuInfo::ASIMD},
@@ -198,11 +206,13 @@ bool RetrieveCacheSize(int64_t* cache_sizes) {
   return true;
 }
 
-bool RetrieveCPUInfo(int64_t* hardware_flags, std::string* model_name) {
-  if (!hardware_flags || !model_name) {
+// Source: https://en.wikipedia.org/wiki/CPUID
+bool RetrieveCPUInfo(int64_t* hardware_flags, std::string* model_name,
+                     CpuInfo::Vendor* vendor) {
+  if (!hardware_flags || !model_name || !vendor) {
     return false;
   }
-  const int register_ECX_id = 1;
+  int register_EAX_id = 1;
   int highest_valid_id = 0;
   int highest_extended_valid_id = 0;
   std::bitset<32> features_ECX;
@@ -211,10 +221,20 @@ bool RetrieveCPUInfo(int64_t* hardware_flags, std::string* model_name) {
   // Get highest valid id
   __cpuid(cpu_info.data(), 0);
   highest_valid_id = cpu_info[0];
+  // HEX of "GenuineIntel": 47656E75 696E6549 6E74656C
+  // HEX of "AuthenticAMD": 41757468 656E7469 63414D44
+  if (cpu_info[1] == 0x756e6547 && cpu_info[2] == 0x49656e69 &&
+      cpu_info[3] == 0x6c65746e) {
+    *vendor = CpuInfo::Vendor::Intel;
+  } else if (cpu_info[1] == 0x68747541 && cpu_info[2] == 0x69746e65 &&
+             cpu_info[3] == 0x444d4163) {
+    *vendor = CpuInfo::Vendor::AMD;
+  }
 
-  if (highest_valid_id <= register_ECX_id) return false;
+  if (highest_valid_id <= register_EAX_id) return false;
 
-  __cpuidex(cpu_info.data(), register_ECX_id, 0);
+  // EAX=1: Processor Info and Feature Bits
+  __cpuidex(cpu_info.data(), register_EAX_id, 0);
   features_ECX = cpu_info[2];
 
   // Get highest extended id
@@ -235,11 +255,33 @@ bool RetrieveCPUInfo(int64_t* hardware_flags, std::string* model_name) {
   if (features_ECX[19]) *hardware_flags |= CpuInfo::SSE4_1;
   if (features_ECX[20]) *hardware_flags |= CpuInfo::SSE4_2;
   if (features_ECX[23]) *hardware_flags |= CpuInfo::POPCNT;
+  if (features_ECX[23]) *hardware_flags |= CpuInfo::AVX;
+
+  // cpuid with EAX=7, ECX=0: Extended Features
+  register_EAX_id = 7;
+  if (highest_valid_id > register_EAX_id) {
+    __cpuidex(cpu_info.data(), register_EAX_id, 0);
+    std::bitset<32> features_EBX = cpu_info[1];
+
+    if (features_EBX[3]) *hardware_flags |= CpuInfo::BMI1;
+    if (features_EBX[5]) *hardware_flags |= CpuInfo::AVX2;
+    if (features_EBX[8]) *hardware_flags |= CpuInfo::BMI2;
+    if (features_EBX[16]) *hardware_flags |= CpuInfo::AVX512F;
+    if (features_EBX[17]) *hardware_flags |= CpuInfo::AVX512DQ;
+    if (features_EBX[28]) *hardware_flags |= CpuInfo::AVX512CD;
+    if (features_EBX[30]) *hardware_flags |= CpuInfo::AVX512BW;
+    if (features_EBX[31]) *hardware_flags |= CpuInfo::AVX512VL;
+  }
+
   return true;
 }
 #endif
 
-CpuInfo::CpuInfo() : hardware_flags_(0), num_cores_(1), model_name_("unknown") {}
+CpuInfo::CpuInfo()
+    : hardware_flags_(0),
+      num_cores_(1),
+      model_name_("unknown"),
+      vendor_(Vendor::Unknown) {}
 
 std::unique_ptr<CpuInfo> g_cpu_info;
 static std::once_flag cpuinfo_initialized;
@@ -293,6 +335,12 @@ void CpuInfo::Init() {
         ++num_cores;
       } else if (name.compare("model name") == 0) {
         model_name_ = value;
+      } else if (name.compare("vendor_id") == 0) {
+        if (value.compare("GenuineIntel") == 0) {
+          vendor_ = Vendor::Intel;
+        } else if (value.compare("AuthenticAMD") == 0) {
+          vendor_ = Vendor::AMD;
+        }
       }
     }
   }
@@ -301,19 +349,19 @@ void CpuInfo::Init() {
 
 #ifdef __APPLE__
   // On Mac OS X use sysctl() to get the cache sizes
-  size_t len = 0;
-  sysctlbyname("hw.cachesize", NULL, &len, NULL, 0);
-  uint64_t* data = static_cast<uint64_t*>(malloc(len));
-  sysctlbyname("hw.cachesize", data, &len, NULL, 0);
-  DCHECK_GE(len / sizeof(uint64_t), 3);
-  for (size_t i = 0; i < 3; ++i) {
-    cache_sizes_[i] = data[i];
-  }
+  size_t len = sizeof(int64_t);
+  int64_t data[1];
+  sysctlbyname("hw.l1dcachesize", data, &len, NULL, 0);
+  cache_sizes_[0] = data[0];
+  sysctlbyname("hw.l2cachesize", data, &len, NULL, 0);
+  cache_sizes_[1] = data[0];
+  sysctlbyname("hw.l3cachesize", data, &len, NULL, 0);
+  cache_sizes_[2] = data[0];
 #elif _WIN32
   if (!RetrieveCacheSize(cache_sizes_)) {
     SetDefaultCacheSize();
   }
-  RetrieveCPUInfo(&hardware_flags_, &model_name_);
+  RetrieveCPUInfo(&hardware_flags_, &model_name_, &vendor_);
 #else
   SetDefaultCacheSize();
 #endif
@@ -333,6 +381,9 @@ void CpuInfo::Init() {
   } else {
     num_cores_ = 1;
   }
+
+  // Parse the user simd level
+  ParseUserSimdLevel();
 }
 
 void CpuInfo::VerifyCpuRequirements() {
@@ -395,6 +446,47 @@ void CpuInfo::SetDefaultCacheSize() {
   cache_sizes_[1] = kDefaultL2CacheSize;
   cache_sizes_[2] = kDefaultL3CacheSize;
 #endif
+}
+
+void CpuInfo::ParseUserSimdLevel() {
+  auto maybe_env_var = GetEnvVar("ARROW_USER_SIMD_LEVEL");
+  if (!maybe_env_var.ok()) {
+    // No user settings
+    return;
+  }
+  std::string s = *std::move(maybe_env_var);
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return std::toupper(c); });
+
+  int level = USER_SIMD_MAX;
+  // Parse the level
+  if (s == "AVX512") {
+    level = USER_SIMD_AVX512;
+  } else if (s == "AVX2") {
+    level = USER_SIMD_AVX2;
+  } else if (s == "AVX") {
+    level = USER_SIMD_AVX;
+  } else if (s == "SSE4_2") {
+    level = USER_SIMD_SSE4_2;
+  } else if (s == "NONE") {
+    level = USER_SIMD_NONE;
+  } else if (!s.empty()) {
+    ARROW_LOG(WARNING) << "Invalid value for ARROW_USER_SIMD_LEVEL: " << s;
+  }
+
+  // Disable feature as the level
+  if (level < USER_SIMD_AVX512) {  // Disable all AVX512 features
+    EnableFeature(AVX512, false);
+  }
+  if (level < USER_SIMD_AVX2) {  // Disable all AVX2 features
+    EnableFeature(AVX2 | BMI2, false);
+  }
+  if (level < USER_SIMD_AVX) {  // Disable all AVX features
+    EnableFeature(AVX, false);
+  }
+  if (level < USER_SIMD_SSE4_2) {  // Disable all SSE4_2 features
+    EnableFeature(SSE4_2 | BMI1, false);
+  }
 }
 
 }  // namespace internal

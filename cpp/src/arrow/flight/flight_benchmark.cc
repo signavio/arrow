@@ -21,6 +21,12 @@
 #include <string>
 #include <vector>
 
+#include <boost/accumulators/accumulators.hpp>
+#include <boost/accumulators/statistics/extended_p_square_quantile.hpp>
+#include <boost/accumulators/statistics/max.hpp>
+#include <boost/accumulators/statistics/mean.hpp>
+#include <boost/accumulators/statistics/stats.hpp>
+
 #include <gflags/gflags.h>
 
 #include "arrow/api.h"
@@ -42,11 +48,12 @@ DEFINE_int32(server_port, 31337, "The port to connect to");
 DEFINE_int32(num_servers, 1, "Number of performance servers to run");
 DEFINE_int32(num_streams, 4, "Number of streams for each server");
 DEFINE_int32(num_threads, 4, "Number of concurrent gets");
-DEFINE_int32(records_per_stream, 10000000, "Total records per stream");
+DEFINE_int64(records_per_stream, 10000000, "Total records per stream");
 DEFINE_int32(records_per_batch, 4096, "Total records per batch within stream");
 DEFINE_bool(test_put, false, "Test DoPut instead of DoGet");
 
 namespace perf = arrow::flight::perf;
+namespace acc = boost::accumulators;
 
 namespace arrow {
 
@@ -56,20 +63,46 @@ using internal::ThreadPool;
 namespace flight {
 
 struct PerformanceResult {
+  int64_t num_batches;
   int64_t num_records;
   int64_t num_bytes;
 };
 
 struct PerformanceStats {
-  PerformanceStats() : total_records(0), total_bytes(0) {}
-  std::mutex mutex;
-  int64_t total_records;
-  int64_t total_bytes;
+  using accumulator_type = acc::accumulator_set<
+      double, acc::stats<acc::tag::extended_p_square_quantile(acc::quadratic),
+                         acc::tag::mean, acc::tag::max>>;
 
-  void Update(const int64_t total_records, const int64_t total_bytes) {
+  PerformanceStats() : latencies(acc::extended_p_square_probabilities = quantiles) {}
+  std::mutex mutex;
+  int64_t total_batches = 0;
+  int64_t total_records = 0;
+  int64_t total_bytes = 0;
+  const std::array<double, 3> quantiles = {0.5, 0.95, 0.99};
+  accumulator_type latencies;
+
+  void Update(int64_t total_batches, int64_t total_records, int64_t total_bytes) {
     std::lock_guard<std::mutex> lock(this->mutex);
+    this->total_batches += total_batches;
     this->total_records += total_records;
     this->total_bytes += total_bytes;
+  }
+
+  // Invoked per batch in the test loop. Holding a lock looks not scalable.
+  // Tested with 1 ~ 8 threads, no noticeable overhead is observed.
+  // A better approach may be calculate per-thread quantiles and merge.
+  void AddLatency(uint64_t elapsed_nanos) {
+    std::lock_guard<std::mutex> lock(this->mutex);
+    latencies(elapsed_nanos);
+  }
+
+  // ns -> us
+  uint64_t max_latency() const { return acc::max(latencies) / 1000; }
+
+  uint64_t mean_latency() const { return acc::mean(latencies) / 1000; }
+
+  uint64_t quantile_latency(double q) const {
+    return acc::quantile(latencies, acc::quantile_probability = q) / 1000;
   }
 };
 
@@ -87,7 +120,8 @@ Status WaitForReady(FlightClient* client) {
 
 arrow::Result<PerformanceResult> RunDoGetTest(FlightClient* client,
                                               const perf::Token& token,
-                                              const FlightEndpoint& endpoint) {
+                                              const FlightEndpoint& endpoint,
+                                              PerformanceStats& stats) {
   std::unique_ptr<FlightStreamReader> reader;
   RETURN_NOT_OK(client->DoGet(endpoint.ticket, &reader));
 
@@ -101,8 +135,12 @@ arrow::Result<PerformanceResult> RunDoGetTest(FlightClient* client,
 
   int64_t num_bytes = 0;
   int64_t num_records = 0;
+  int64_t num_batches = 0;
+  StopWatch timer;
   while (true) {
+    timer.Start();
     RETURN_NOT_OK(reader->Next(&batch));
+    stats.AddLatency(timer.Stop());
     if (!batch.data) {
       break;
     }
@@ -117,17 +155,19 @@ arrow::Result<PerformanceResult> RunDoGetTest(FlightClient* client,
       }
     }
 
+    ++num_batches;
     num_records += batch.data->num_rows();
 
     // Hard-coded
     num_bytes += batch.data->num_rows() * bytes_per_record;
   }
-  return PerformanceResult{num_records, num_bytes};
+  return PerformanceResult{num_batches, num_records, num_bytes};
 }
 
 arrow::Result<PerformanceResult> RunDoPutTest(FlightClient* client,
                                               const perf::Token& token,
-                                              const FlightEndpoint& endpoint) {
+                                              const FlightEndpoint& endpoint,
+                                              PerformanceStats& stats) {
   std::unique_ptr<FlightStreamWriter> writer;
   std::unique_ptr<FlightMetadataReader> reader;
   std::shared_ptr<Schema> schema =
@@ -140,6 +180,7 @@ arrow::Result<PerformanceResult> RunDoPutTest(FlightClient* client,
 
   int64_t num_bytes = 0;
   int64_t num_records = 0;
+  int64_t num_batches = 0;
 
   std::shared_ptr<ResizableBuffer> buffer;
   std::vector<std::shared_ptr<Array>> arrays;
@@ -155,8 +196,9 @@ arrow::Result<PerformanceResult> RunDoPutTest(FlightClient* client,
 
   std::shared_ptr<RecordBatch> batch = RecordBatch::Make(schema, length, arrays);
 
-  int records_sent = 0;
-  const int total_records = token.definition().records_per_stream();
+  int64_t records_sent = 0;
+  const int64_t total_records = token.definition().records_per_stream();
+  StopWatch timer;
   while (records_sent < total_records) {
     if (records_sent + length > total_records) {
       const int last_length = total_records - records_sent;
@@ -166,16 +208,19 @@ arrow::Result<PerformanceResult> RunDoPutTest(FlightClient* client,
       num_bytes += last_length * bytes_per_record;
       records_sent += last_length;
     } else {
+      timer.Start();
       RETURN_NOT_OK(writer->WriteRecordBatch(*batch));
+      stats.AddLatency(timer.Stop());
       num_records += length;
       // Hard-coded
       num_bytes += length * bytes_per_record;
       records_sent += length;
     }
+    ++num_batches;
   }
 
   RETURN_NOT_OK(writer->Close());
-  return PerformanceResult{num_records, num_bytes};
+  return PerformanceResult{num_batches, num_records, num_bytes};
 }
 
 Status RunPerformanceTest(FlightClient* client, bool test_put) {
@@ -211,10 +256,10 @@ Status RunPerformanceTest(FlightClient* client, bool test_put) {
     perf::Token token;
     token.ParseFromString(endpoint.ticket.ticket);
 
-    const auto& result = test_loop(client.get(), token, endpoint);
+    const auto& result = test_loop(client.get(), token, endpoint, stats);
     if (result.ok()) {
       const PerformanceResult& perf = result.ValueOrDie();
-      stats.Update(perf.num_records, perf.num_bytes);
+      stats.Update(perf.num_batches, perf.num_records, perf.num_bytes);
     }
     return result.status();
   };
@@ -251,9 +296,12 @@ Status RunPerformanceTest(FlightClient* client, bool test_put) {
     return Status::Invalid("Did not consume expected number of records");
   }
 
+  std::cout << "Batch size: " << stats.total_bytes / stats.total_batches << std::endl;
   if (FLAGS_test_put) {
+    std::cout << "Batches written: " << stats.total_batches << std::endl;
     std::cout << "Bytes written: " << stats.total_bytes << std::endl;
   } else {
+    std::cout << "Batches read: " << stats.total_batches << std::endl;
     std::cout << "Bytes read: " << stats.total_bytes << std::endl;
   }
 
@@ -261,6 +309,17 @@ Status RunPerformanceTest(FlightClient* client, bool test_put) {
   std::cout << "Speed: "
             << (static_cast<double>(stats.total_bytes) / kMegabyte / time_elapsed)
             << " MB/s" << std::endl;
+
+  // Calculate throughput(IOPS) and latency vs batch size
+  std::cout << "Throughput: " << (static_cast<double>(stats.total_batches) / time_elapsed)
+            << " batches/s" << std::endl;
+  std::cout << "Latency mean: " << stats.mean_latency() << " us" << std::endl;
+  for (auto q : stats.quantiles) {
+    std::cout << "Latency quantile=" << q << ": " << stats.quantile_latency(q) << " us"
+              << std::endl;
+  }
+  std::cout << "Latency max: " << stats.max_latency() << " us" << std::endl;
+
   return Status::OK();
 }
 

@@ -19,6 +19,15 @@
 
 #if defined(ARROW_R_WITH_ARROW)
 
+#include <arrow/compute/api.h>
+#include <arrow/record_batch.h>
+#include <arrow/table.h>
+
+arrow::compute::ExecContext* gc_context() {
+  static arrow::compute::ExecContext context(gc_memory_pool());
+  return &context;
+}
+
 // [[arrow::export]]
 std::shared_ptr<arrow::compute::CastOptions> compute___CastOptions__initialize(
     bool allow_int_overflow, bool allow_time_truncate, bool allow_float_truncate) {
@@ -34,10 +43,7 @@ std::shared_ptr<arrow::Array> Array__cast(
     const std::shared_ptr<arrow::Array>& array,
     const std::shared_ptr<arrow::DataType>& target_type,
     const std::shared_ptr<arrow::compute::CastOptions>& options) {
-  std::shared_ptr<arrow::Array> out;
-  arrow::compute::FunctionContext context;
-  STOP_IF_NOT_OK(arrow::compute::Cast(&context, *array, target_type, *options, &out));
-  return out;
+  return ValueOrStop(arrow::compute::Cast(*array, target_type, *options, gc_context()));
 }
 
 // [[arrow::export]]
@@ -45,10 +51,9 @@ std::shared_ptr<arrow::ChunkedArray> ChunkedArray__cast(
     const std::shared_ptr<arrow::ChunkedArray>& chunked_array,
     const std::shared_ptr<arrow::DataType>& target_type,
     const std::shared_ptr<arrow::compute::CastOptions>& options) {
-  arrow::compute::Datum value(chunked_array);
-  arrow::compute::Datum out;
-  arrow::compute::FunctionContext context;
-  STOP_IF_NOT_OK(arrow::compute::Cast(&context, value, target_type, *options, &out));
+  arrow::Datum value(chunked_array);
+  arrow::Datum out =
+      ValueOrStop(arrow::compute::Cast(value, target_type, *options, gc_context()));
   return out.chunked_array();
 }
 
@@ -82,187 +87,107 @@ std::shared_ptr<arrow::Table> Table__cast(
   return arrow::Table::Make(schema, std::move(columns), table->num_rows());
 }
 
-// [[arrow::export]]
-std::shared_ptr<arrow::Array> Array__Take(const std::shared_ptr<arrow::Array>& values,
-                                          const std::shared_ptr<arrow::Array>& indices) {
-  std::shared_ptr<arrow::Array> out;
-  arrow::compute::FunctionContext context;
-  arrow::compute::TakeOptions options;
-  STOP_IF_NOT_OK(arrow::compute::Take(&context, *values, *indices, options, &out));
-  return out;
-}
-
-// [[arrow::export]]
-std::shared_ptr<arrow::ChunkedArray> Array__TakeChunked(
-    const std::shared_ptr<arrow::Array>& values,
-    const std::shared_ptr<arrow::ChunkedArray>& indices) {
-  std::shared_ptr<arrow::ChunkedArray> out;
-  arrow::compute::FunctionContext context;
-  arrow::compute::TakeOptions options;
-
-  STOP_IF_NOT_OK(arrow::compute::Take(&context, *values, *indices, options, &out));
-  return out;
-}
-
-// [[arrow::export]]
-std::shared_ptr<arrow::RecordBatch> RecordBatch__Take(
-    const std::shared_ptr<arrow::RecordBatch>& batch,
-    const std::shared_ptr<arrow::Array>& indices) {
-  std::shared_ptr<arrow::RecordBatch> out;
-  arrow::compute::FunctionContext context;
-  arrow::compute::TakeOptions options;
-  STOP_IF_NOT_OK(arrow::compute::Take(&context, *batch, *indices, options, &out));
-  return out;
-}
-
-// [[arrow::export]]
-std::shared_ptr<arrow::ChunkedArray> ChunkedArray__Take(
-    const std::shared_ptr<arrow::ChunkedArray>& values,
-    const std::shared_ptr<arrow::Array>& indices) {
-  std::shared_ptr<arrow::ChunkedArray> out;
-  arrow::compute::FunctionContext context;
-  arrow::compute::TakeOptions options;
-
-  STOP_IF_NOT_OK(arrow::compute::Take(&context, *values, *indices, options, &out));
-  return out;
-}
-
-// [[arrow::export]]
-std::shared_ptr<arrow::ChunkedArray> ChunkedArray__TakeChunked(
-    const std::shared_ptr<arrow::ChunkedArray>& values,
-    const std::shared_ptr<arrow::ChunkedArray>& indices) {
-  std::shared_ptr<arrow::ChunkedArray> out;
-  arrow::compute::FunctionContext context;
-  arrow::compute::TakeOptions options;
-
-  STOP_IF_NOT_OK(arrow::compute::Take(&context, *values, *indices, options, &out));
-  return out;
-}
-
-// [[arrow::export]]
-std::shared_ptr<arrow::Table> Table__Take(const std::shared_ptr<arrow::Table>& table,
-                                          const std::shared_ptr<arrow::Array>& indices) {
-  std::shared_ptr<arrow::Table> out;
-  arrow::compute::FunctionContext context;
-  arrow::compute::TakeOptions options;
-
-  STOP_IF_NOT_OK(arrow::compute::Take(&context, *table, *indices, options, &out));
-  return out;
-}
-
-// [[arrow::export]]
-std::shared_ptr<arrow::Table> Table__TakeChunked(
-    const std::shared_ptr<arrow::Table>& table,
-    const std::shared_ptr<arrow::ChunkedArray>& indices) {
-  std::shared_ptr<arrow::Table> out;
-  arrow::compute::FunctionContext context;
-  arrow::compute::TakeOptions options;
-
-  STOP_IF_NOT_OK(arrow::compute::Take(&context, *table, *indices, options, &out));
-  return out;
-}
-
-// [[arrow::export]]
-std::shared_ptr<arrow::Array> Array__Filter(const std::shared_ptr<arrow::Array>& values,
-                                            const std::shared_ptr<arrow::Array>& filter,
-                                            bool keep_na) {
-  arrow::compute::FunctionContext context;
-  arrow::compute::Datum out;
-  // Use the EMIT_NULL filter option to match R's behavior in [
-  arrow::compute::FilterOptions options;
-  if (keep_na) {
-    options.null_selection_behavior = arrow::compute::FilterOptions::EMIT_NULL;
+template <typename T>
+std::shared_ptr<T> MaybeUnbox(const char* class_name, SEXP x) {
+  if (Rf_inherits(x, "ArrowObject") && Rf_inherits(x, class_name)) {
+    return cpp11::as_cpp<std::shared_ptr<T>>(x);
   }
-  STOP_IF_NOT_OK(arrow::compute::Filter(&context, values, filter, {}, &out));
-  return out.make_array();
+  return nullptr;
+}
+
+namespace cpp11 {
+
+template <>
+arrow::Datum as_cpp<arrow::Datum>(SEXP x) {
+  if (auto array = MaybeUnbox<arrow::Array>("Array", x)) {
+    return array;
+  }
+
+  if (auto chunked_array = MaybeUnbox<arrow::ChunkedArray>("ChunkedArray", x)) {
+    return chunked_array;
+  }
+
+  if (auto batch = MaybeUnbox<arrow::RecordBatch>("RecordBatch", x)) {
+    return batch;
+  }
+
+  if (auto table = MaybeUnbox<arrow::Table>("Table", x)) {
+    return table;
+  }
+
+  if (auto scalar = MaybeUnbox<arrow::Scalar>("Scalar", x)) {
+    return scalar;
+  }
+
+  // This assumes that R objects have already been converted to Arrow objects;
+  // that seems right but should we do the wrapping here too/instead?
+  cpp11::stop("to_datum: Not implemented for type %s", Rf_type2char(TYPEOF(x)));
+  return arrow::Datum();
+}
+}  // namespace cpp11
+
+SEXP from_datum(arrow::Datum datum) {
+  switch (datum.kind()) {
+    case arrow::Datum::SCALAR:
+      return cpp11::as_sexp(datum.scalar());
+
+    case arrow::Datum::ARRAY:
+      return cpp11::as_sexp(datum.make_array());
+
+    case arrow::Datum::CHUNKED_ARRAY:
+      return cpp11::as_sexp(datum.chunked_array());
+
+    case arrow::Datum::RECORD_BATCH:
+      return cpp11::as_sexp(datum.record_batch());
+
+    case arrow::Datum::TABLE:
+      return cpp11::as_sexp(datum.table());
+
+    default:
+      break;
+  }
+
+  auto str = datum.ToString();
+  cpp11::stop("from_datum: Not implemented for Datum %s", str.c_str());
+  return R_NilValue;
+}
+
+std::shared_ptr<arrow::compute::FunctionOptions> make_compute_options(
+    std::string func_name, cpp11::list options) {
+  if (func_name == "filter") {
+    using Options = arrow::compute::FilterOptions;
+    auto out = std::make_shared<Options>(Options::Defaults());
+    SEXP keep_na = options["keep_na"];
+    if (!Rf_isNull(keep_na) && cpp11::as_cpp<bool>(keep_na)) {
+      out->null_selection_behavior = Options::EMIT_NULL;
+    }
+    return out;
+  }
+
+  if (func_name == "take") {
+    using Options = arrow::compute::TakeOptions;
+    auto out = std::make_shared<Options>(Options::Defaults());
+    return out;
+  }
+
+  if (func_name == "min_max") {
+    using Options = arrow::compute::MinMaxOptions;
+    auto out = std::make_shared<Options>(Options::Defaults());
+    out->null_handling =
+        cpp11::as_cpp<bool>(options["na.rm"]) ? Options::SKIP : Options::EMIT_NULL;
+    return out;
+  }
+
+  return nullptr;
 }
 
 // [[arrow::export]]
-std::shared_ptr<arrow::RecordBatch> RecordBatch__Filter(
-    const std::shared_ptr<arrow::RecordBatch>& batch,
-    const std::shared_ptr<arrow::Array>& filter, bool keep_na) {
-  arrow::compute::FunctionContext context;
-  arrow::compute::Datum out;
-  // Use the EMIT_NULL filter option to match R's behavior in [
-  arrow::compute::FilterOptions options;
-  if (keep_na) {
-    options.null_selection_behavior = arrow::compute::FilterOptions::EMIT_NULL;
-  }
-  STOP_IF_NOT_OK(arrow::compute::Filter(&context, batch, filter, options, &out));
-  return out.record_batch();
+SEXP compute__CallFunction(std::string func_name, cpp11::list args, cpp11::list options) {
+  auto opts = make_compute_options(func_name, options);
+  auto datum_args = arrow::r::from_r_list<arrow::Datum>(args);
+  auto out = ValueOrStop(
+      arrow::compute::CallFunction(func_name, datum_args, opts.get(), gc_context()));
+  return from_datum(out);
 }
 
-// [[arrow::export]]
-std::shared_ptr<arrow::ChunkedArray> ChunkedArray__Filter(
-    const std::shared_ptr<arrow::ChunkedArray>& values,
-    const std::shared_ptr<arrow::Array>& filter, bool keep_na) {
-  arrow::compute::FunctionContext context;
-  arrow::compute::Datum out;
-  // Use the EMIT_NULL filter option to match R's behavior in [
-  arrow::compute::FilterOptions options;
-  if (keep_na) {
-    options.null_selection_behavior = arrow::compute::FilterOptions::EMIT_NULL;
-  }
-  STOP_IF_NOT_OK(arrow::compute::Filter(&context, values, filter, options, &out));
-  return out.chunked_array();
-}
-
-// [[arrow::export]]
-std::shared_ptr<arrow::ChunkedArray> ChunkedArray__FilterChunked(
-    const std::shared_ptr<arrow::ChunkedArray>& values,
-    const std::shared_ptr<arrow::ChunkedArray>& filter, bool keep_na) {
-  arrow::compute::FunctionContext context;
-  arrow::compute::Datum out;
-  // Use the EMIT_NULL filter option to match R's behavior in [
-  arrow::compute::FilterOptions options;
-  if (keep_na) {
-    options.null_selection_behavior = arrow::compute::FilterOptions::EMIT_NULL;
-  }
-  STOP_IF_NOT_OK(arrow::compute::Filter(&context, values, filter, options, &out));
-  return out.chunked_array();
-}
-
-// [[arrow::export]]
-std::shared_ptr<arrow::Table> Table__Filter(const std::shared_ptr<arrow::Table>& table,
-                                            const std::shared_ptr<arrow::Array>& filter,
-                                            bool keep_na) {
-  arrow::compute::FunctionContext context;
-  arrow::compute::Datum out;
-  // Use the EMIT_NULL filter option to match R's behavior in [
-  arrow::compute::FilterOptions options;
-  if (keep_na) {
-    options.null_selection_behavior = arrow::compute::FilterOptions::EMIT_NULL;
-  }
-  STOP_IF_NOT_OK(arrow::compute::Filter(&context, table, filter, options, &out));
-  std::shared_ptr<arrow::Table> tab = out.table();
-  if (tab->num_rows() == 0) {
-    // Slight hack: if there are no rows in the result, instead do a 0-length
-    // slice so that we get chunked arrays with 1 chunk (itself length 0).
-    // We need that because the Arrow-to-R converter fails when there are 0 chunks.
-    return table->Slice(0, 0);
-  }
-  return tab;
-}
-
-// [[arrow::export]]
-std::shared_ptr<arrow::Table> Table__FilterChunked(
-    const std::shared_ptr<arrow::Table>& table,
-    const std::shared_ptr<arrow::ChunkedArray>& filter, bool keep_na) {
-  arrow::compute::FunctionContext context;
-  arrow::compute::Datum out;
-  // Use the EMIT_NULL filter option to match R's behavior in [
-  arrow::compute::FilterOptions options;
-  if (keep_na) {
-    options.null_selection_behavior = arrow::compute::FilterOptions::EMIT_NULL;
-  }
-  STOP_IF_NOT_OK(arrow::compute::Filter(&context, table, filter, options, &out));
-  std::shared_ptr<arrow::Table> tab = out.table();
-  if (tab->num_rows() == 0) {
-    // Slight hack: if there are no rows in the result, instead do a 0-length
-    // slice so that we get chunked arrays with 1 chunk (itself length 0).
-    // We need that because the Arrow-to-R converter fails when there are 0 chunks.
-    return table->Slice(0, 0);
-  }
-  return tab;
-}
 #endif

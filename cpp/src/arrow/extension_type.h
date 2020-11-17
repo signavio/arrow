@@ -23,8 +23,14 @@
 #include <memory>
 #include <string>
 
-#include "arrow/array.h"
+#include "arrow/array/array_base.h"
+#include "arrow/array/data.h"
+#include "arrow/result.h"
+#include "arrow/status.h"
 #include "arrow/type.h"
+#include "arrow/type_fwd.h"
+#include "arrow/util/checked_cast.h"
+#include "arrow/util/macros.h"
 #include "arrow/util/visibility.h"
 
 namespace arrow {
@@ -69,16 +75,20 @@ class ARROW_EXPORT ExtensionType : public DataType {
       std::shared_ptr<DataType> storage_type,
       const std::string& serialized_data) const = 0;
 
-  ARROW_DEPRECATED("Use Result-returning version")
-  Status Deserialize(std::shared_ptr<DataType> storage_type,
-                     const std::string& serialized_data,
-                     std::shared_ptr<DataType>* out) const;
-
   /// \brief Create a serialized representation of the extension type's
   /// metadata. The storage type will be handled automatically in IPC code
   /// paths
   /// \return the serialized representation
   virtual std::string Serialize() const = 0;
+
+  /// \brief Wrap the given storage array as an extension array
+  static std::shared_ptr<Array> WrapArray(const std::shared_ptr<DataType>& ext_type,
+                                          const std::shared_ptr<Array>& storage);
+
+  /// \brief Wrap the given chunked storage array as a chunked extension array
+  static std::shared_ptr<ChunkedArray> WrapArray(
+      const std::shared_ptr<DataType>& ext_type,
+      const std::shared_ptr<ChunkedArray>& storage);
 
  protected:
   explicit ExtensionType(std::shared_ptr<DataType> storage_type)

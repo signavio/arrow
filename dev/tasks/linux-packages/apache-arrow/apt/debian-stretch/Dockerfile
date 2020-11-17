@@ -37,22 +37,12 @@ RUN \
     /etc/apt/sources.list.d/backports-sloppy.list
 
 ARG DEBUG
-ARG LLVM
 RUN \
   quiet=$([ "${DEBUG}" = "yes" ] || echo "-qq") && \
   apt update ${quiet} && \
   apt install -y -V ${quiet} \
-    apt-transport-https \
-    ca-certificates \
-    gnupg \
-    wget && \
-  wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
-  echo "deb https://apt.llvm.org/stretch/ llvm-toolchain-stretch-${LLVM} main" > \
-    /etc/apt/sources.list.d/llvm.list && \
-  apt update ${quiet} && \
-  apt install -y -V ${quiet} \
     build-essential \
-    clang-${LLVM} \
+    clang-7 \
     cmake \
     devscripts \
     fakeroot \
@@ -64,6 +54,7 @@ RUN \
     libbrotli-dev \
     libbz2-dev \
     libc-ares-dev \
+    libcurl4-openssl-dev \
     libgirepository1.0-dev \
     libglib2.0-doc \
     libgoogle-glog-dev \
@@ -71,8 +62,9 @@ RUN \
     libre2-dev \
     libsnappy-dev \
     libssl-dev \
+    libutf8proc-dev \
     libzstd-dev \
-    llvm-${LLVM}-dev \
+    llvm-7-dev \
     lsb-release \
     ninja-build \
     pkg-config \

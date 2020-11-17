@@ -19,29 +19,20 @@ add_custom_target(arrow_flight)
 
 arrow_install_all_headers("arrow/flight")
 
-set(ARROW_FLIGHT_STATIC_LINK_LIBS
-    ${ARROW_PROTOBUF_LIBPROTOBUF}
-    gRPC::grpc++
-    gRPC::grpc
-    gRPC::gpr
-    c-ares::cares)
+set(ARROW_FLIGHT_STATIC_LINK_LIBS ${ARROW_PROTOBUF_LIBPROTOBUF} gRPC::grpc++ c-ares::cares
+                                  ZLIB::ZLIB)
 
 if(WIN32)
-  list(APPEND ARROW_FLIGHT_STATIC_LINK_LIBS Ws2_32.lib)
-endif()
-
-if(GRPC_HAS_ADDRESS_SORTING)
-  list(APPEND ARROW_FLIGHT_STATIC_LINK_LIBS gRPC::address_sorting)
+  list(APPEND ARROW_FLIGHT_STATIC_LINK_LIBS ws2_32.lib)
 endif()
 
 if(ARROW_TEST_LINKAGE STREQUAL "static")
   set(ARROW_FLIGHT_TEST_LINK_LIBS arrow_flight_static arrow_flight_testing_static
-                                  ${ARROW_TEST_STATIC_LINK_LIBS}
-                                  ${ARROW_FLIGHT_STATIC_LINK_LIBS})
+                                  ${ARROW_FLIGHT_STATIC_LINK_LIBS}
+                                  ${ARROW_TEST_LINK_LIBS})
 else()
   set(ARROW_FLIGHT_TEST_LINK_LIBS arrow_flight_shared arrow_flight_testing_shared
-                                  ${ARROW_TEST_SHARED_LINK_LIBS}
-                                  ${ARROW_FLIGHT_STATIC_LINK_LIBS})
+                                  ${ARROW_TEST_LINK_LIBS})
 endif()
 
 # TODO(wesm): Protobuf shared vs static linking
@@ -54,7 +45,7 @@ set(FLIGHT_GENERATED_PROTO_FILES "${CMAKE_CURRENT_BINARY_DIR}/Flight.pb.cc"
                                  "${CMAKE_CURRENT_BINARY_DIR}/Flight.grpc.pb.cc"
                                  "${CMAKE_CURRENT_BINARY_DIR}/Flight.grpc.pb.h")
 
-set(PROTO_DEPENDS ${FLIGHT_PROTO} ${ARROW_PROTOBUF_LIBPROTOBUF} gRPC::grpc)
+set(PROTO_DEPENDS ${FLIGHT_PROTO} ${ARROW_PROTOBUF_LIBPROTOBUF} gRPC::grpc_cpp_plugin)
 
 add_custom_command(OUTPUT ${FLIGHT_GENERATED_PROTO_FILES}
                    COMMAND ${ARROW_PROTOBUF_PROTOC} "-I${FLIGHT_PROTO_PATH}"
@@ -69,6 +60,57 @@ add_custom_command(OUTPUT ${FLIGHT_GENERATED_PROTO_FILES}
 set_source_files_properties(${FLIGHT_GENERATED_PROTO_FILES} PROPERTIES GENERATED TRUE)
 
 add_custom_target(flight_grpc_gen ALL DEPENDS ${FLIGHT_GENERATED_PROTO_FILES})
+
+# <KLUDGE> -Werror / /WX cause try_compile to fail because there seems to be no
+# way to pass -isystem $GRPC_INCLUDE_DIR instead of -I$GRPC_INCLUDE_DIR
+set(CMAKE_CXX_FLAGS_BACKUP "${CMAKE_CXX_FLAGS}")
+string(REPLACE "/WX" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+string(REPLACE "-Werror " " " CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+
+# Probe the version of gRPC being used to see if it supports disabling server
+# verification when using TLS.
+if(NOT DEFINED HAS_GRPC_132)
+  message(STATUS "Checking support for TlsCredentialsOptions...")
+  get_property(CURRENT_INCLUDE_DIRECTORIES
+               DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+               PROPERTY INCLUDE_DIRECTORIES)
+  try_compile(HAS_GRPC_132 ${CMAKE_CURRENT_BINARY_DIR}/try_compile SOURCES
+              "${CMAKE_CURRENT_SOURCE_DIR}/try_compile/check_tls_opts_132.cc"
+              CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${CURRENT_INCLUDE_DIRECTORIES}"
+              LINK_LIBRARIES gRPC::grpc
+              OUTPUT_VARIABLE TSL_CREDENTIALS_OPTIONS_CHECK_OUTPUT CXX_STANDARD 11)
+
+  if(HAS_GRPC_132)
+    message(STATUS "TlsCredentialsOptions found in grpc::experimental.")
+    add_definitions(-DGRPC_NAMESPACE_FOR_TLS_CREDENTIALS_OPTIONS=grpc::experimental)
+  else()
+    message(STATUS "TlsCredentialsOptions not found in grpc::experimental.")
+    message(DEBUG "Build output:")
+    list(APPEND CMAKE_MESSAGE_INDENT "check_tls_opts_132.cc: ")
+    message(DEBUG ${TSL_CREDENTIALS_OPTIONS_CHECK_OUTPUT})
+    list(REMOVE_AT CMAKE_MESSAGE_INDENT -1)
+
+    try_compile(HAS_GRPC_127 ${CMAKE_CURRENT_BINARY_DIR}/try_compile SOURCES
+                "${CMAKE_CURRENT_SOURCE_DIR}/try_compile/check_tls_opts_127.cc"
+                CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${CURRENT_INCLUDE_DIRECTORIES}"
+                OUTPUT_VARIABLE TSL_CREDENTIALS_OPTIONS_CHECK_OUTPUT CXX_STANDARD 11)
+
+    if(HAS_GRPC_127)
+      message(STATUS "TlsCredentialsOptions found in grpc_impl::experimental.")
+      add_definitions(
+        -DGRPC_NAMESPACE_FOR_TLS_CREDENTIALS_OPTIONS=grpc_impl::experimental)
+    else()
+      message(STATUS "TlsCredentialsOptions not found in grpc_impl::experimental.")
+      message(DEBUG "Build output:")
+      list(APPEND CMAKE_MESSAGE_INDENT "check_tls_opts_127.cc: ")
+      message(DEBUG ${TSL_CREDENTIALS_OPTIONS_CHECK_OUTPUT})
+      list(REMOVE_AT CMAKE_MESSAGE_INDENT -1)
+    endif()
+  endif()
+endif()
+
+# </KLUDGE> Restore the CXXFLAGS that were modified above
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_BACKUP}")
 
 # Note, we do not compile the generated Protobuf sources directly, instead
 # compiling then via protocol_internal.cc which contains some gRPC template
@@ -110,7 +152,7 @@ foreach(LIB_TARGET ${ARROW_FLIGHT_LIBRARIES})
 endforeach()
 
 # Define arrow_flight_testing library
-if(ARROW_BUILD_TESTS OR ARROW_BUILD_BENCHMARKS OR ARROW_BUILD_INTEGRATION)
+if(ARROW_TESTING)
   add_arrow_lib(arrow_flight_testing
                 CMAKE_PACKAGE_NAME
                 ArrowFlightTesting
@@ -119,6 +161,7 @@ if(ARROW_BUILD_TESTS OR ARROW_BUILD_BENCHMARKS OR ARROW_BUILD_INTEGRATION)
                 OUTPUTS
                 ARROW_FLIGHT_TESTING_LIBRARIES
                 SOURCES
+                test_integration.cc
                 test_util.cc
                 DEPENDENCIES
                 GTest::gtest
@@ -138,11 +181,12 @@ if(ARROW_BUILD_TESTS OR ARROW_BUILD_BENCHMARKS OR ARROW_BUILD_INTEGRATION)
 endif()
 
 foreach(LIB_TARGET ${ARROW_FLIGHT_TESTING_LIBRARIES})
-  target_compile_definitions(${LIB_TARGET} PRIVATE ARROW_FLIGHT_EXPORTING)
+  target_compile_definitions(${LIB_TARGET} PRIVATE ARROW_FLIGHT_EXPORTING
+                             ${ARROW_BOOST_PROCESS_COMPILE_DEFINITIONS})
 endforeach()
 
 add_arrow_test(flight_test
-               EXTRA_LINK_LIBS
+               STATIC_LINK_LIBS
                ${ARROW_FLIGHT_TEST_LINK_LIBS}
                LABELS
                "arrow_flight")

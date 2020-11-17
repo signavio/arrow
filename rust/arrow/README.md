@@ -21,21 +21,24 @@
 
 [![Coverage Status](https://coveralls.io/repos/github/apache/arrow/badge.svg)](https://coveralls.io/github/apache/arrow)
 
-## Status
+This crate contains a native Rust implementation of the [Arrow columnar format](https://arrow.apache.org/docs/format/Columnar.html). It uses nightly Rust.
 
-This is a native Rust implementation of Apache Arrow. Currently the project
-is developed and tested against nightly Rust. The current status is:
+## Developer's guide
 
-- [x] Primitive Arrays
-- [x] List Arrays
-- [x] Struct Arrays
-- [x] CSV Reader
-- [X] CSV Writer
-- [X] JSON Reader
-- [ ] Parquet Reader
-- [ ] Parquet Writer
-- [X] Arrow IPC
-- [ ] Interop tests with other implementations
+Refer to [lib.rs](src/lib.rs) for an introduction to this crate and current functionality.
+
+### How to run the tests
+
+The tests of this crate depend on two environment variables to be defined.
+Assuming that you are in this crates' current directory:
+
+```bash
+export PARQUET_TEST_DATA=../../cpp/submodules/parquet-testing/data
+export ARROW_TEST_DATA=../../testing/data
+cargo test
+```
+
+runs all the tests.
 
 ## Examples
 
@@ -64,15 +67,18 @@ The above script will run the `flatc` compiler and perform some adjustments to t
 - Remove `org::apache::arrow::flatbuffers` namespace
 - Add includes to each generated file
 
-## SIMD (Single Instruction Multiple Data)
+## Features
 
-Arrow uses the [packed_simd](https://crates.io/crates/packed_simd) crate to optimize many of the implementations in the
-[compute](https://github.com/apache/arrow/tree/master/rust/arrow/src/compute) module using SIMD intrinsics.  These
-optimizations are enabled by the `simd` feature flag and are turned on by default, but can be disabled, for example:
+Arrow uses the following features:
 
-```bash
-cargo build --no-default-features
-```
+* `simd` - Arrow uses the [packed_simd](https://crates.io/crates/packed_simd) crate to optimize many of the
+ implementations in the [compute](https://github.com/apache/arrow/tree/master/rust/arrow/src/compute) module using SIMD
+ intrinsics. These optimizations are turned *off* by default.
+* `flight` which contains useful functions to convert between the Flight wire format and Arrow data
+* `prettyprint` which is a utility for printing record batches
+
+Other than `simd` all the other features are enabled by default. Disabling `prettyprint` might be necessary in order to
+compile Arrow to the `wasm32-unknown-unknown` WASM target.
 
 # Publishing to crates.io
 

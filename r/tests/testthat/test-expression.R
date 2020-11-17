@@ -18,60 +18,51 @@
 context("Expressions")
 
 test_that("Can create an expression", {
-  expect_is(Array$create(1:5) + 4, "array_expression")
-})
-
-test_that("Recursive expression generation", {
-  a <- Array$create(1:5)
-  expect_is(a == 4 | a == 3, "array_expression")
+  expect_is(build_array_expression(">", Array$create(1:5), 4), "array_expression")
 })
 
 test_that("as.vector(array_expression)", {
-  a <- Array$create(1:5)
-  expect_equal(as.vector(a + 4), 5:9)
-  expect_equal(as.vector(a == 4 | a == 3), c(FALSE, FALSE, TRUE, TRUE, FALSE))
+  expect_equal(as.vector(build_array_expression(">", Array$create(1:5), 4)), c(FALSE, FALSE, FALSE, FALSE, TRUE))
 })
 
 test_that("array_expression print method", {
-  a <- Array$create(1:5)
   expect_output(
-    print(a == 4 | a == 3),
-    capture.output(print(c(FALSE, FALSE, TRUE, TRUE, FALSE))),
+    print(build_array_expression(">", Array$create(1:5), 4)),
+    # Not ideal but it is informative
+    "greater(<Array>, 4L)",
     fixed = TRUE
   )
 })
 
 test_that("C++ expressions", {
-  f <- FieldExpression$create("f")
-  g <- FieldExpression$create("g")
-  date <- ScalarExpression$create(as.Date("2020-01-15"))
-  ts <- ScalarExpression$create(as.POSIXct("2020-01-17 11:11:11"))
-  i64 <- ScalarExpression$create(bit64::as.integer64(42))
-  time <- ScalarExpression$create(hms::hms(56, 34, 12))
-  dict <- ScalarExpression$create(factor("a"))
+  f <- Expression$field_ref("f")
+  g <- Expression$field_ref("g")
+  date <- Expression$scalar(as.Date("2020-01-15"))
+  ts <- Expression$scalar(as.POSIXct("2020-01-17 11:11:11"))
+  i64 <- Expression$scalar(bit64::as.integer64(42))
+  time <- Expression$scalar(hms::hms(56, 34, 12))
 
-  expect_is(f == g, "ComparisonExpression")
-  expect_is(f == 4, "ComparisonExpression")
-  expect_is(f == "", "ComparisonExpression")
-  expect_is(f == NULL, "ComparisonExpression")
-  expect_is(f == date, "ComparisonExpression")
-  expect_is(f == i64, "ComparisonExpression")
-  expect_is(f == time, "ComparisonExpression")
-  expect_is(f == dict, "ComparisonExpression")
-  # can't seem to make this work right now
-  # expect_is(f == as.Date("2020-01-15"), "ComparisonExpression")
-  expect_is(f == ts, "ComparisonExpression")
-  expect_is(f <= 2L, "ComparisonExpression")
-  expect_is(f != FALSE, "ComparisonExpression")
-  expect_is(f > 4, "ComparisonExpression")
-  expect_is(f < 4 & f > 2, "AndExpression")
-  expect_is(f < 4 | f > 2, "OrExpression")
-  expect_is(!(f < 4), "NotExpression")
+  expect_is(f == g, "Expression")
+  expect_is(f == 4, "Expression")
+  expect_is(f == "", "Expression")
+  expect_is(f == NULL, "Expression")
+  expect_is(f == date, "Expression")
+  expect_is(f == i64, "Expression")
+  expect_is(f == time, "Expression")
+  # can't seem to make this work right now because of R Ops.method dispatch
+  # expect_is(f == as.Date("2020-01-15"), "Expression")
+  expect_is(f == ts, "Expression")
+  expect_is(f <= 2L, "Expression")
+  expect_is(f != FALSE, "Expression")
+  expect_is(f > 4, "Expression")
+  expect_is(f < 4 & f > 2, "Expression")
+  expect_is(f < 4 | f > 2, "Expression")
+  expect_is(!(f < 4), "Expression")
   expect_output(
     print(f > 4),
-    'ComparisonExpression\n(f > 4:double)',
+    'Expression\n(f > 4:double)',
     fixed = TRUE
   )
-
-  expect_error(f == c(1L, 2L))
+  # Interprets that as a list type
+  expect_is(f == c(1L, 2L), "Expression")
 })

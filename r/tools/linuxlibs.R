@@ -20,10 +20,6 @@ VERSION <- args[1]
 dst_dir <- paste0("libarrow/arrow-", VERSION)
 
 arrow_repo <- "https://dl.bintray.com/ursalabs/arrow-r/libarrow/"
-apache_src_url <- paste0(
-  "https://archive.apache.org/dist/arrow/arrow-", VERSION,
-  "/apache-arrow-", VERSION, ".tar.gz"
-)
 
 options(.arrow.cleanup = character()) # To collect dirs to rm on exit
 on.exit(unlink(getOption(".arrow.cleanup")))
@@ -40,18 +36,31 @@ binary_ok <- !identical(tolower(Sys.getenv("LIBARROW_BINARY", "false")), "false"
 # For local debugging, set ARROW_R_DEV=TRUE to make this script print more
 quietly <- !env_is("ARROW_R_DEV", "true")
 
+try_download <- function(from_url, to_file) {
+  status <- try(
+    suppressWarnings(
+      download.file(from_url, to_file, quiet = quietly)
+    ),
+    silent = quietly
+  )
+  # Return whether the download was successful
+  !inherits(status, "try-error") && status == 0
+}
+
 download_binary <- function(os = identify_os()) {
   libfile <- tempfile()
   if (!is.null(os)) {
     # See if we can map this os-version to one we have binaries for
     os <- find_available_binary(os)
     binary_url <- paste0(arrow_repo, "bin/", os, "/arrow-", VERSION, ".zip")
-    try(
-      download.file(binary_url, libfile, quiet = quietly),
-      silent = quietly
-    )
-    if (file.exists(libfile)) {
+    if (try_download(binary_url, libfile)) {
       cat(sprintf("*** Successfully retrieved C++ binaries for %s\n", os))
+      if (!identical(os, "centos-7")) {
+        # centos-7 uses gcc 4.8 so the binary doesn't have ARROW_S3=ON but the others do
+        # TODO: actually check for system requirements?
+        cat("**** Binary package requires libcurl and openssl\n")
+        cat("**** If installation fails, retry after installing those system requirements\n")
+      }
     } else {
       cat(sprintf("*** No C++ binaries found for %s\n", os))
       libfile <- NULL
@@ -78,44 +87,102 @@ identify_os <- function(os = Sys.getenv("LIBARROW_BINARY", Sys.getenv("LIBARROW_
     return(os)
   }
 
-  if (nzchar(Sys.which("lsb_release"))) {
-    distro <- tolower(system("lsb_release -is", intern = TRUE))
-    os_version <- system("lsb_release -rs", intern = TRUE)
-    # In the future, we may be able to do some mapping of distro-versions to
-    # versions we built for, since there's no way we'll build for everything.
-    os <- paste0(distro, "-", os_version)
-  } else if (file.exists("/etc/os-release")) {
-    os_release <- readLines("/etc/os-release")
-    vals <- sub("^.*=(.*)$", "\\1", os_release)
-    names(vals) <- sub("^(.*)=.*$", "\\1", os_release)
-    distro <- gsub('"', '', vals["ID"])
-    os_version <- "unknown" # default value
-    if ("VERSION_ID" %in% names(vals)) {
-      if (distro == "ubuntu") {
-        # Keep major.minor version
-        version_regex <- '^"?([0-9]+\\.[0-9]+).*"?.*$'
-      } else {
-        # Only major version number
-        version_regex <- '^"?([0-9]+).*"?.*$'
-      }
-      os_version <- sub(version_regex, "\\1", vals["VERSION_ID"])
-    } else if ("PRETTY_NAME" %in% names(vals) && grepl("bullseye", vals["PRETTY_NAME"])) {
-      # debian unstable doesn't include a number but we can map from pretty name
-      os_version <- "11"
-    }
-    os <- paste0(distro, "-", os_version)
-  } else if (file.exists("/etc/system-release")) {
-    # Something like "CentOS Linux release 7.7.1908 (Core)"
-    system_release <- tolower(utils::head(readLines("/etc/system-release"), 1))
-    # Extract from that the distro and the major version number
-    os <- sub("^([a-z]+) .* ([0-9]+).*$", "\\1-\\2", system_release)
-  } else {
+  linux <- distro()
+  if (is.null(linux)) {
     cat("*** Unable to identify current OS/version\n")
-    os <- NULL
+    return(NULL)
+  }
+  paste(linux$id, linux$short_version, sep = "-")
+}
+
+#### start distro ####
+
+distro <- function() {
+  out <- lsb_release()
+  if (is.null(out)) {
+    out <- os_release()
+    if (is.null(out)) {
+      out <- system_release()
+    }
+  }
+  if (is.null(out)) {
+    return(NULL)
   }
 
-  os
+  out$id <- tolower(out$id)
+  if (grepl("bullseye", out$codename)) {
+    # debian unstable doesn't include a number but we can map from pretty name
+    out$short_version <- "11"
+  } else if (out$id == "ubuntu") {
+    # Keep major.minor version
+    out$short_version <- sub('^"?([0-9]+\\.[0-9]+).*"?.*$', "\\1", out$version)
+  } else {
+    # Only major version number
+    out$short_version <- sub('^"?([0-9]+).*"?.*$', "\\1", out$version)
+  }
+  out
 }
+
+lsb_release <- function() {
+  if (have_lsb_release()) {
+    list(
+      id = call_lsb("-is"),
+      version = call_lsb("-rs"),
+      codename = call_lsb("-cs")
+    )
+  } else {
+    NULL
+  }
+}
+
+have_lsb_release <- function() nzchar(Sys.which("lsb_release"))
+call_lsb <- function(args) system(paste("lsb_release", args), intern = TRUE)
+
+os_release <- function() {
+  rel_data <- read_os_release()
+  if (!is.null(rel_data)) {
+    vals <- as.list(sub('^.*="?(.*?)"?$', "\\1", rel_data))
+    names(vals) <- sub("^(.*)=.*$", "\\1", rel_data)
+
+    out <- list(
+      id = vals[["ID"]],
+      version = vals[["VERSION_ID"]]
+    )
+    if ("VERSION_CODENAME" %in% names(vals)) {
+      out$codename <- vals[["VERSION_CODENAME"]]
+    } else {
+      # This probably isn't right, maybe could extract codename from pretty name?
+      out$codename = vals[["PRETTY_NAME"]]
+    }
+    out
+  } else {
+    NULL
+  }
+}
+
+read_os_release <- function() {
+  if (file.exists("/etc/os-release")) {
+    readLines("/etc/os-release")
+  }
+}
+
+system_release <- function() {
+  rel_data <- read_system_release()
+  if (!is.null(rel_data)) {
+    # Something like "CentOS Linux release 7.7.1908 (Core)"
+    list(
+      id = sub("^([a-zA-Z]+) .* ([0-9.]+).*$", "\\1", rel_data),
+      version = sub("^([a-zA-Z]+) .* ([0-9.]+).*$", "\\2", rel_data),
+      codename = NA
+    )
+  } else {
+    NULL
+  }
+}
+
+read_system_release <- function() utils::head(readLines("/etc/system-release"), 1)
+
+#### end distro ####
 
 find_available_binary <- function(os) {
   # Download a csv that maps one to the other, columns "actual" and "use_this"
@@ -133,31 +200,54 @@ find_available_binary <- function(os) {
 
 download_source <- function() {
   tf1 <- tempfile()
-  src_dir <- NULL
-  source_url <- paste0(arrow_repo, "src/arrow-", VERSION, ".zip")
-  try(
-    download.file(source_url, tf1, quiet = quietly),
-    silent = quietly
-  )
-  if (!file.exists(tf1)) {
-    # Try for an official release
-    try(
-      download.file(apache_src_url, tf1, quiet = quietly),
-      silent = quietly
-    )
-  }
-  if (file.exists(tf1)) {
+  src_dir <- tempfile()
+  if (bintray_download(tf1)) {
+    # First try from bintray
     cat("*** Successfully retrieved C++ source\n")
-    src_dir <- tempfile()
     unzip(tf1, exdir = src_dir)
     unlink(tf1)
-    # These scripts need to be executable
-    system(sprintf("chmod 755 %s/cpp/build-support/*.sh", src_dir))
-    options(.arrow.cleanup = c(getOption(".arrow.cleanup"), src_dir))
-    # The actual src is in cpp
     src_dir <- paste0(src_dir, "/cpp")
+  } else if (apache_download(tf1)) {
+    # If that fails, try for an official release
+    cat("*** Successfully retrieved C++ source\n")
+    untar(tf1, exdir = src_dir)
+    unlink(tf1)
+    src_dir <- paste0(src_dir, "/apache-arrow-", VERSION, "/cpp")
   }
-  src_dir
+
+  if (dir.exists(src_dir)) {
+    options(.arrow.cleanup = c(getOption(".arrow.cleanup"), src_dir))
+    # These scripts need to be executable
+    system(
+      sprintf("chmod 755 %s/build-support/*.sh", src_dir),
+      ignore.stdout = quietly, ignore.stderr = quietly
+    )
+    return(src_dir)
+  } else {
+    return(NULL)
+  }
+}
+
+bintray_download <- function(destfile) {
+  source_url <- paste0(arrow_repo, "src/arrow-", VERSION, ".zip")
+  try_download(source_url, destfile)
+}
+
+apache_download <- function(destfile, n_mirrors = 3) {
+  apache_path <- paste0("arrow/arrow-", VERSION, "/apache-arrow-", VERSION, ".tar.gz")
+  apache_urls <- c(
+    # This returns a different mirror each time
+    rep("https://www.apache.org/dyn/closer.lua?action=download&filename=", n_mirrors),
+    "https://downloads.apache.org/" # The backup
+  )
+  downloaded <- FALSE
+  for (u in apache_urls) {
+    downloaded <- try_download(paste0(u, apache_path), destfile)
+    if (downloaded) {
+      break
+    }
+  }
+  downloaded
 }
 
 find_local_source <- function(arrow_home = Sys.getenv("ARROW_HOME", "..")) {
@@ -172,11 +262,14 @@ find_local_source <- function(arrow_home = Sys.getenv("ARROW_HOME", "..")) {
 
 build_libarrow <- function(src_dir, dst_dir) {
   # We'll need to compile R bindings with these libs, so delete any .o files
-  system("rm src/*.o", ignore.stdout = quietly, ignore.stderr = quietly)
+  system("rm src/*.o", ignore.stdout = TRUE, ignore.stderr = TRUE)
   # Set up make for parallel building
   makeflags <- Sys.getenv("MAKEFLAGS")
   if (makeflags == "") {
-    makeflags <- sprintf("-j%s", parallel::detectCores())
+    # CRAN policy says not to use more than 2 cores during checks
+    # If you have more and want to use more, set MAKEFLAGS
+    ncores <- min(parallel::detectCores(), 2)
+    makeflags <- sprintf("-j%s", ncores)
     Sys.setenv(MAKEFLAGS = makeflags)
   }
   if (!quietly) {
@@ -186,36 +279,63 @@ build_libarrow <- function(src_dir, dst_dir) {
   # * cmake
   cmake <- ensure_cmake()
 
-  build_dir <- tempfile()
+  # Optionally build somewhere not in tmp so we can dissect the build if it fails
+  debug_dir <- Sys.getenv("LIBARROW_DEBUG_DIR")
+  if (nzchar(debug_dir)) {
+    build_dir <- debug_dir
+  } else {
+    # But normally we'll just build in a tmp dir
+    build_dir <- tempfile()
+  }
   options(.arrow.cleanup = c(getOption(".arrow.cleanup"), build_dir))
-  env_vars <- sprintf(
-    "SOURCE_DIR=%s BUILD_DIR=%s DEST_DIR=%s CMAKE=%s",
-    src_dir,       build_dir,   dst_dir,    cmake
+
+  R_CMD_config <- function(var) {
+    # cf. tools::Rcmd, introduced R 3.3
+    system2(file.path(R.home("bin"), "R"), c("CMD", "config", var), stdout = TRUE)
+  }
+  env_var_list <- c(
+    SOURCE_DIR = src_dir,
+    BUILD_DIR = build_dir,
+    DEST_DIR = dst_dir,
+    CMAKE = cmake,
+    # Make sure we build with the same compiler settings that R is using
+    CC = R_CMD_config("CC"),
+    CXX = paste(R_CMD_config("CXX11"), R_CMD_config("CXX11STD")),
+    # CXXFLAGS = R_CMD_config("CXX11FLAGS"), # We don't want the same debug symbols
+    LDFLAGS = R_CMD_config("LDFLAGS")
   )
+  env_vars <- paste0(names(env_var_list), '="', env_var_list, '"', collapse = " ")
+  env_vars <- with_s3_support(env_vars)
   cat("**** arrow", ifelse(quietly, "", paste("with", env_vars)), "\n")
-  system(
+  status <- system(
     paste(env_vars, "inst/build_arrow_static.sh"),
     ignore.stdout = quietly, ignore.stderr = quietly
   )
+  if (status != 0) {
+    # It failed :(
+    cat("**** Error building Arrow C++. Re-run with ARROW_R_DEV=true for debug information.\n")
+  }
+  invisible(status)
 }
 
 ensure_cmake <- function() {
-  cmake <- Sys.which("cmake")
-  # TODO: should check that cmake is of sufficient version
-  if (!nzchar(cmake)) {
+  cmake <- find_cmake(c(
+    Sys.getenv("CMAKE"),
+    Sys.which("cmake"),
+    Sys.which("cmake3")
+  ))
+
+  if (is.null(cmake)) {
     # If not found, download it
     cat("**** cmake\n")
-    CMAKE_VERSION <- Sys.getenv("CMAKE_VERSION", "3.16.2")
+    CMAKE_VERSION <- Sys.getenv("CMAKE_VERSION", "3.18.1")
     cmake_binary_url <- paste0(
       "https://github.com/Kitware/CMake/releases/download/v", CMAKE_VERSION,
       "/cmake-", CMAKE_VERSION, "-Linux-x86_64.tar.gz"
     )
     cmake_tar <- tempfile()
     cmake_dir <- tempfile()
-    try(
-      download.file(cmake_binary_url, cmake_tar, quiet = quietly),
-      silent = quietly
-    )
+    try_download(cmake_binary_url, cmake_tar)
     untar(cmake_tar, exdir = cmake_dir)
     unlink(cmake_tar)
     options(.arrow.cleanup = c(getOption(".arrow.cleanup"), cmake_dir))
@@ -226,6 +346,72 @@ ensure_cmake <- function() {
     )
   }
   cmake
+}
+
+find_cmake <- function(paths, version_required = 3.2) {
+  # Given a list of possible cmake paths, return the first one that exists and is new enough
+  for (path in paths) {
+    if (nzchar(path) && cmake_version(path) >= version_required) {
+      # Sys.which() returns a named vector, but that plays badly with c() later
+      names(path) <- NULL
+      return(path)
+    }
+  }
+  # If none found, return NULL
+  NULL
+}
+
+cmake_version <- function(cmd = "cmake") {
+  tryCatch(
+    {
+      raw_version <- system(paste(cmd, "--version"), intern = TRUE, ignore.stderr = TRUE)
+      pat <- ".* ([0-9\\.]+).*?"
+      which_line <- grep(pat, raw_version)
+      package_version(sub(pat, "\\1", raw_version[which_line]))
+    },
+    error = function(e) return(0)
+  )
+}
+
+with_s3_support <- function(env_vars) {
+  arrow_s3 <- toupper(Sys.getenv("ARROW_S3")) == "ON" || tolower(Sys.getenv("LIBARROW_MINIMAL")) == "false"
+  if (arrow_s3) {
+    # User wants S3 support. Let's make sure they're not on gcc < 4.9
+    # and make sure that we have curl and openssl system libs
+    info <- system(paste(env_vars, "&& $CMAKE --system-information"), intern = TRUE)
+    info <- grep("^[A-Z_]* .*$", info, value = TRUE)
+    vals <- as.list(sub('^.*? "?(.*?)"?$', "\\1", info))
+    names(vals) <- sub("^(.*?) .*$", "\\1", info)
+    if (vals[["CMAKE_CXX_COMPILER_ID"]] == "GNU" &&
+        package_version(vals[["CMAKE_CXX_COMPILER_VERSION"]]) < 4.9) {
+      cat("**** S3 support not available for gcc < 4.9; building with ARROW_S3=OFF\n")
+      arrow_s3 <- FALSE
+    } else if (!cmake_find_package("CURL", NULL, env_vars)) {
+      cat("**** S3 support requires libcurl-devel (rpm) or libcurl4-openssl-dev (deb); building with ARROW_S3=OFF\n")
+      arrow_s3 <- FALSE
+    } else if (!cmake_find_package("OpenSSL", "1.0.2", env_vars)) {
+      cat("**** S3 support requires openssl-devel (rpm) or libssl-dev (deb), version >= 1.0.2; building with ARROW_S3=OFF\n")
+      arrow_s3 <- FALSE
+    }
+  }
+  paste(env_vars, ifelse(arrow_s3, "ARROW_S3=ON", "ARROW_S3=OFF"))
+}
+
+cmake_find_package <- function(pkg, version = NULL, env_vars) {
+  td <- tempfile()
+  dir.create(td)
+  options(.arrow.cleanup = c(getOption(".arrow.cleanup"), td))
+  find_package <- paste0("find_package(", pkg, " ", version, " REQUIRED)")
+  writeLines(find_package, file.path(td, "CMakeLists.txt"))
+  cmake_cmd <- paste0(
+    env_vars,
+    " && cd ", td,
+    " && $CMAKE",
+    " -DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON",
+    " -DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON",
+    " ."
+  )
+  system(cmake_cmd, ignore.stdout = TRUE, ignore.stderr = TRUE) == 0
 }
 
 #####

@@ -332,7 +332,7 @@ garrow_record_batch_file_reader_finalize(GObject *object)
 {
   auto priv = GARROW_RECORD_BATCH_FILE_READER_GET_PRIVATE(object);
 
-  priv->record_batch_file_reader = nullptr;
+  priv->record_batch_file_reader.~shared_ptr();
 
   G_OBJECT_CLASS(garrow_record_batch_file_reader_parent_class)->finalize(object);
 }
@@ -372,6 +372,9 @@ garrow_record_batch_file_reader_get_property(GObject *object,
 static void
 garrow_record_batch_file_reader_init(GArrowRecordBatchFileReader *object)
 {
+  auto priv = GARROW_RECORD_BATCH_FILE_READER_GET_PRIVATE(object);
+  new(&priv->record_batch_file_reader)
+    std::shared_ptr<arrow::ipc::RecordBatchFileReader>;
 }
 
 static void
@@ -1181,7 +1184,7 @@ garrow_csv_read_options_add_schema(GArrowCSVReadOptions *options,
 {
   auto priv = GARROW_CSV_READ_OPTIONS_GET_PRIVATE(options);
   auto arrow_schema = garrow_schema_get_raw(schema);
-  for (const auto field : arrow_schema->fields()) {
+  for (const auto &field : arrow_schema->fields()) {
     priv->convert_options.column_types[field->name()] = field->type();
   }
 }
@@ -1203,7 +1206,7 @@ garrow_csv_read_options_get_column_types(GArrowCSVReadOptions *options)
                                             g_str_equal,
                                             g_free,
                                             g_object_unref);
-  for (const auto iter : priv->convert_options.column_types) {
+  for (const auto &iter : priv->convert_options.column_types) {
     auto arrow_name = iter.first;
     auto arrow_data_type = iter.second;
     g_hash_table_insert(types,
@@ -1683,10 +1686,10 @@ garrow_json_read_options_set_property(GObject *object,
     break;
   case PROP_JSON_READER_SCHEMA:
     {
+      auto schema = g_value_dup_object(value);
       if (priv->schema) {
         g_object_unref(priv->schema);
       }
-      auto schema = g_value_dup_object(value);
       if (schema) {
         priv->schema = GARROW_SCHEMA(schema);
         priv->parse_options.explicit_schema = garrow_schema_get_raw(priv->schema);
@@ -1961,25 +1964,23 @@ garrow_json_reader_new(GArrowInputStream *input,
 {
   auto arrow_input = garrow_input_stream_get_raw(input);
   arrow::Status status;
-  std::shared_ptr<arrow::json::TableReader> arrow_reader;
+
+  arrow::Result<std::shared_ptr<arrow::json::TableReader>> arrow_reader;
   if (options) {
     auto options_priv = GARROW_JSON_READ_OPTIONS_GET_PRIVATE(options);
-    status = arrow::json::TableReader::Make(arrow::default_memory_pool(),
-                                            arrow_input,
-                                            options_priv->read_options,
-                                            options_priv->parse_options,
-                                            &arrow_reader);
+    arrow_reader = arrow::json::TableReader::Make(arrow::default_memory_pool(),
+                                                  arrow_input,
+                                                  options_priv->read_options,
+                                                  options_priv->parse_options);
   } else {
-    status =
-      arrow::json::TableReader::Make(arrow::default_memory_pool(),
-                                     arrow_input,
-                                     arrow::json::ReadOptions::Defaults(),
-                                     arrow::json::ParseOptions::Defaults(),
-                                     &arrow_reader);
+    arrow_reader = arrow::json::TableReader::Make(arrow::default_memory_pool(),
+                                                  arrow_input,
+                                                  arrow::json::ReadOptions::Defaults(),
+                                                  arrow::json::ParseOptions::Defaults());
   }
 
-  if (garrow_error_check(error, status, "[json-reader][new]")) {
-    return garrow_json_reader_new_raw(&arrow_reader);
+  if (garrow::check(error, arrow_reader, "[json-reader][new]")) {
+    return garrow_json_reader_new_raw(&(arrow_reader.ValueOrDie()));
   } else {
     return NULL;
   }
@@ -1999,10 +2000,9 @@ garrow_json_reader_read(GArrowJSONReader *reader,
                         GError **error)
 {
   auto arrow_reader = garrow_json_reader_get_raw(reader);
-  std::shared_ptr<arrow::Table> arrow_table;
-  auto status = arrow_reader->Read(&arrow_table);
-  if (garrow_error_check(error, status, "[json-reader][read]")) {
-    return garrow_table_new_raw(&arrow_table);
+  auto arrow_table = arrow_reader->Read();
+  if (garrow::check(error, arrow_table, "[json-reader][read]")) {
+    return garrow_table_new_raw(&(arrow_table.ValueOrDie()));
   } else {
     return NULL;
   }

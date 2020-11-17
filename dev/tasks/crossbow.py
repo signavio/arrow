@@ -26,13 +26,11 @@ import logging
 import mimetypes
 import subprocess
 import textwrap
-import concurrent.futures
 from io import StringIO
 from pathlib import Path
 from textwrap import dedent
-from datetime import datetime, date
+from datetime import date
 from functools import partial
-from collections import namedtuple
 
 import click
 import toolz
@@ -66,19 +64,6 @@ requests_log.propagate = True
 
 
 CWD = Path(__file__).parent.absolute()
-
-
-NEW_FEATURE = 'New Features and Improvements'
-BUGFIX = 'Bug Fixes'
-
-
-def md(template, *args, **kwargs):
-    """Wraps string.format with naive markdown escaping"""
-    def escape(s):
-        for char in ('*', '#', '_', '~', '`', '>'):
-            s = s.replace(char, '\\' + char)
-        return s
-    return template.format(*map(escape, args), **toolz.valmap(escape, kwargs))
 
 
 def unflatten(mapping):
@@ -162,95 +147,6 @@ _default_tree = {
     '.travis.yml': _default_travis_yml,
     '.circleci/config.yml': _default_circle_yml
 }
-
-
-class JiraChangelog:
-
-    def __init__(self, version, username, password,
-                 server='https://issues.apache.org/jira'):
-        import jira.client
-        self.server = server
-        # clean version to the first numbers
-        self.version = '.'.join(version.split('.')[:3])
-        query = ("project=ARROW "
-                 "AND fixVersion='{0}' "
-                 "AND status = Resolved "
-                 "AND resolution in (Fixed, Done) "
-                 "ORDER BY issuetype DESC").format(self.version)
-        self.client = jira.client.JIRA({'server': server},
-                                       basic_auth=(username, password))
-        self.issues = self.client.search_issues(query, maxResults=9999)
-
-    def format_markdown(self):
-        out = StringIO()
-
-        issues_by_type = toolz.groupby(lambda i: i.fields.issuetype.name,
-                                       self.issues)
-        for typename, issues in sorted(issues_by_type.items()):
-            issues.sort(key=lambda x: x.key)
-
-            out.write(md('## {}\n\n', typename))
-            for issue in issues:
-                out.write(md('* {} - {}\n', issue.key, issue.fields.summary))
-            out.write('\n')
-
-        return out.getvalue()
-
-    def format_website(self):
-        # jira category => website category mapping
-        categories = {
-            'New Feature': 'feature',
-            'Improvement': 'feature',
-            'Wish': 'feature',
-            'Task': 'feature',
-            'Test': 'bug',
-            'Bug': 'bug',
-            'Sub-task': 'feature'
-        }
-        titles = {
-            'feature': 'New Features and Improvements',
-            'bugfix': 'Bug Fixes'
-        }
-
-        issues_by_category = toolz.groupby(
-            lambda issue: categories[issue.fields.issuetype.name],
-            self.issues
-        )
-
-        out = StringIO()
-
-        for category in ('feature', 'bug'):
-            title = titles[category]
-            issues = issues_by_category[category]
-            issues.sort(key=lambda x: x.key)
-
-            out.write(md('## {}\n\n', title))
-            for issue in issues:
-                link = md('[{0}]({1}/browse/{0})', issue.key, self.server)
-                out.write(md('* {} - {}\n', link, issue.fields.summary))
-            out.write('\n')
-
-        return out.getvalue()
-
-    def render(self, old_changelog, website=False):
-        old_changelog = old_changelog.splitlines()
-        if website:
-            new_changelog = self.format_website()
-        else:
-            new_changelog = self.format_markdown()
-
-        out = StringIO()
-
-        # Apache license header
-        out.write('\n'.join(old_changelog[:18]))
-
-        # Newly generated changelog
-        today = datetime.today().strftime('%d %B %Y')
-        out.write(md('\n\n# Apache Arrow {} ({})\n\n', self.version, today))
-        out.write(new_changelog)
-        out.write('\n'.join(old_changelog[19:]))
-
-        return out.getvalue().strip()
 
 
 class GitRemoteCallbacks(PygitRemoteCallbacks):
@@ -488,77 +384,16 @@ class Repo:
             self._github_repo = github.repository(username, reponame)
         return self._github_repo
 
-    def github_commit_status(self, commit):
-        """Combine the results from status and checks API to a single state.
-
-        Azure pipelines uses checks API which doesn't provide a combined
-        interface like status API does, so we need to manually combine
-        both the commit statuses and the commit checks coming from
-        different API endpoint
-
-        Status.state: error, failure, pending or success, default pending
-        CheckRun.status: queued, in_progress or completed, default: queued
-        CheckRun.conclusion: success, failure, neutral, cancelled, timed_out
-                             or action_required, only set if
-                             CheckRun.status == 'completed'
-
-        1. Convert CheckRun's status and conclusion to one of Status.state
-        2. Merge the states based on the following rules:
-           - failure if any of the contexts report as error or failure
-           - pending if there are no statuses or a context is pending
-           - success if the latest status for all contexts is success
-           error otherwise.
-
-        Parameters
-        ----------
-        commit : str
-            Commit to query the combined status for.
-
-        Returns
-        -------
-        combined_state: CombinedStatus(
-            state='error|failure|pending|success',
-            total_count='number of statuses and checks'
-        )
-        """
+    def github_commit(self, sha):
         repo = self.as_github_repo()
-        commit = repo.commit(commit)
-        states = []
+        return repo.commit(sha)
 
-        for status in commit.status().statuses:
-            states.append(status.state)
-
-        for check in commit.check_runs():
-            if check.status == 'completed':
-                if check.conclusion in {'success', 'failure'}:
-                    states.append(check.conclusion)
-                elif check.conclusion in {'cancelled', 'timed_out',
-                                          'action_required'}:
-                    states.append('error')
-                # omit `neutral` conclusion
-            else:
-                states.append('pending')
-
-        # it could be more effective, but the following is more descriptive
-        if any(state in {'error', 'failure'} for state in states):
-            combined_state = 'failure'
-        elif any(state == 'pending' for state in states):
-            combined_state = 'pending'
-        elif all(state == 'success' for state in states):
-            combined_state = 'success'
-        else:
-            combined_state = 'error'
-
-        return CombinedStatus(state=combined_state, total_count=len(states))
-
-    def github_release_assets(self, tag):
+    def github_release(self, tag):
         repo = self.as_github_repo()
         try:
-            release = repo.release_from_tag(tag)
+            return repo.release_from_tag(tag)
         except github3.exceptions.NotFoundError:
-            return {}
-        else:
-            return {a.name: a for a in release.assets()}
+            return None
 
     def github_upload_asset_requests(self, release, path, name, mime,
                                      max_retries=None, retry_backoff=None):
@@ -660,9 +495,6 @@ class Repo:
                     )
 
 
-CombinedStatus = namedtuple('CombinedStatus', ('state', 'total_count'))
-
-
 class Queue(Repo):
 
     def _latest_prefix_id(self, prefix):
@@ -750,7 +582,8 @@ class Queue(Repo):
             # adding CI's name to the end of the branch in order to use skip
             # patterns on travis and circleci
             task.branch = '{}-{}-{}'.format(job.branch, task.ci, task_name)
-            files = task.render_files(arrow=job.target,
+            files = task.render_files(**job.params,
+                                      arrow=job.target,
                                       queue_remote_url=self.remote_url)
             branch = self.create_branch(task.branch, files=files)
             self.create_tag(task.tag, branch.target)
@@ -766,13 +599,23 @@ def get_version(root, **kwargs):
     subprojects, e.g. apache-arrow-js-XXX tags.
     """
     from setuptools_scm.git import parse as parse_git_version
-    from setuptools_scm.version import guess_next_version
 
+    # query the calculated version based on the git tags
     kwargs['describe_command'] = (
         'git describe --dirty --tags --long --match "apache-arrow-[0-9].*"'
     )
     version = parse_git_version(root, **kwargs)
-    return version.format_next_version(guess_next_version)
+
+    # increment the minor version, because there can be patch releases created
+    # from maintenance branches where the tags are unreachable from the
+    # master's HEAD, so the git command above generates 0.17.0.dev300 even if
+    # arrow has a never 0.17.1 patch release
+    pattern = r"^(\d+)\.(\d+)\.(\d+)$"
+    match = re.match(pattern, str(version.tag))
+    major, minor, patch = map(int, match.groups())
+
+    # the bumped version number after 0.17.x will be 0.18.0.dev300
+    return "{}.{}.{}.dev{}".format(major, minor + 1, patch, version.distance)
 
 
 class Serializable:
@@ -799,6 +642,19 @@ class Target(Serializable):
         self.remote = remote
         self.version = version
         self.no_rc_version = re.sub(r'-rc\d+\Z', '', version)
+        # Semantic Versioning 1.0.0: https://semver.org/spec/v1.0.0.html
+        #
+        # > A pre-release version number MAY be denoted by appending an
+        # > arbitrary string immediately following the patch version and a
+        # > dash. The string MUST be comprised of only alphanumerics plus
+        # > dash [0-9A-Za-z-].
+        #
+        # Example:
+        #
+        #   '0.16.1.dev10' ->
+        #   '0.16.1-dev10'
+        self.no_rc_semver_version = \
+            re.sub(r'\.(dev\d+)\Z', r'-\1', self.no_rc_version)
 
     @classmethod
     def from_repo(cls, repo, head=None, branch=None, remote=None, version=None,
@@ -835,11 +691,16 @@ class Task(Serializable):
     submitting the job to a queue.
     """
 
-    def __init__(self, platform, ci, template, artifacts=None, params=None):
-        assert platform in {'win', 'osx', 'linux'}
-        assert ci in {'circle', 'travis', 'appveyor', 'azure', 'github'}
+    def __init__(self, ci, template, artifacts=None, params=None):
+        assert ci in {
+            'circle',
+            'travis',
+            'appveyor',
+            'azure',
+            'github',
+            'drone',
+        }
         self.ci = ci
-        self.platform = platform
         self.template = template
         self.artifacts = artifacts or []
         self.params = params or {}
@@ -847,13 +708,14 @@ class Task(Serializable):
         self.commit = None  # filled after adding to a queue
         self._queue = None  # set by the queue object after put or get
         self._status = None  # status cache
+        self._assets = None  # assets cache
 
-    def render_files(self, **extra_params):
+    def render_files(self, **params):
         from jinja2 import Template, StrictUndefined
         from jinja2.exceptions import TemplateError
 
         path = CWD / self.template
-        params = toolz.merge(self.params, extra_params)
+        params = toolz.merge(self.params, params)
         template = Template(path.read_text(), undefined=StrictUndefined)
         try:
             rendered = template.render(task=self, **params)
@@ -879,53 +741,152 @@ class Task(Serializable):
             'appveyor': 'appveyor.yml',
             'azure': 'azure-pipelines.yml',
             'github': '.github/workflows/crossbow.yml',
+            'drone': '.drone.yml',
         }
         return config_files[self.ci]
 
     def status(self, force_query=False):
-        # _status might be uninitialized because of yaml serialization
         _status = getattr(self, '_status', None)
         if force_query or _status is None:
-            self._status = self._queue.github_commit_status(self.commit)
+            github_commit = self._queue.github_commit(self.commit)
+            self._status = TaskStatus(github_commit)
         return self._status
 
-    def assets(self):
-        assets = self._queue.github_release_assets(self.tag)
+    def assets(self, force_query=False):
+        _assets = getattr(self, '_assets', None)
+        if force_query or _assets is None:
+            github_release = self._queue.github_release(self.tag)
+            self._assets = TaskAssets(github_release,
+                                      artifact_patterns=self.artifacts)
+        return self._assets
 
-        # validate the artifacts
-        artifacts = {}
-        for artifact in self.artifacts:
+
+class TaskStatus:
+    """Combine the results from status and checks API to a single state.
+
+    Azure pipelines uses checks API which doesn't provide a combined
+    interface like status API does, so we need to manually combine
+    both the commit statuses and the commit checks coming from
+    different API endpoint
+
+    Status.state: error, failure, pending or success, default pending
+    CheckRun.status: queued, in_progress or completed, default: queued
+    CheckRun.conclusion: success, failure, neutral, cancelled, timed_out
+                            or action_required, only set if
+                            CheckRun.status == 'completed'
+
+    1. Convert CheckRun's status and conclusion to one of Status.state
+    2. Merge the states based on the following rules:
+        - failure if any of the contexts report as error or failure
+        - pending if there are no statuses or a context is pending
+        - success if the latest status for all contexts is success
+        error otherwise.
+
+    Parameters
+    ----------
+    commit : github3.Commit
+        Commit to query the combined status for.
+
+    Returns
+    -------
+    TaskStatus(
+        combined_state='error|failure|pending|success',
+        github_status='original github status object',
+        github_check_runs='github checks associated with the commit',
+        total_count='number of statuses and checks'
+    )
+    """
+
+    def __init__(self, commit):
+        status = commit.status()
+        check_runs = commit.check_runs()
+
+        states = [s.state for s in status.statuses]
+
+        for check in check_runs:
+            if check.status == 'completed':
+                if check.conclusion in {'success', 'failure'}:
+                    states.append(check.conclusion)
+                elif check.conclusion in {'cancelled', 'timed_out',
+                                          'action_required'}:
+                    states.append('error')
+                # omit `neutral` conclusion
+            else:
+                states.append('pending')
+
+        # it could be more effective, but the following is more descriptive
+        if any(state in {'error', 'failure'} for state in states):
+            combined_state = 'failure'
+        elif any(state == 'pending' for state in states):
+            combined_state = 'pending'
+        elif all(state == 'success' for state in states):
+            combined_state = 'success'
+        else:
+            combined_state = 'error'
+
+        self.combined_state = combined_state
+        self.github_status = status
+        self.github_check_runs = check_runs
+        self.total_count = len(states)
+
+
+class TaskAssets(dict):
+
+    def __init__(self, github_release, artifact_patterns):
+        # HACK(kszucs): don't expect uploaded assets of no atifacts were
+        # defiened for the tasks in order to spare a bit of github rate limit
+        if not artifact_patterns:
+            return
+
+        if github_release is None:
+            github_assets = {}  # no assets have been uploaded for the task
+        else:
+            github_assets = {a.name: a for a in github_release.assets()}
+
+        for pattern in artifact_patterns:
             # artifact can be a regex pattern
-            pattern = re.compile(artifact)
-            matches = list(filter(None, map(pattern.match, assets.keys())))
+            compiled = re.compile(pattern)
+            matches = list(
+                filter(None, map(compiled.match, github_assets.keys()))
+            )
             num_matches = len(matches)
 
             # validate artifact pattern matches single asset
             if num_matches == 0:
-                artifacts[artifact] = None
+                self[pattern] = None
             elif num_matches == 1:
-                artifacts[artifact] = assets[matches[0].group(0)]
+                self[pattern] = github_assets[matches[0].group(0)]
             else:
                 raise ValueError(
                     'Only a single asset should match pattern `{}`, there are '
-                    'multiple ones: {}'.format(', '.join(matches))
+                    'multiple ones: {}'.format(pattern, ', '.join(matches))
                 )
 
-        return artifacts
+    def missing_patterns(self):
+        return [pattern for pattern, asset in self.items() if asset is None]
+
+    def uploaded_assets(self):
+        return [asset for asset in self.values() if asset is not None]
 
 
 class Job(Serializable):
     """Describes multiple tasks against a single target repository"""
 
-    def __init__(self, target, tasks):
+    def __init__(self, target, tasks, params=None):
         if not tasks:
             raise ValueError('no tasks were provided for the job')
         if not all(isinstance(task, Task) for task in tasks.values()):
             raise ValueError('each `tasks` mus be an instance of Task')
         if not isinstance(target, Target):
             raise ValueError('`target` must be an instance of Target')
+        if not isinstance(target, Target):
+            raise ValueError('`target` must be an instance of Target')
+        if not isinstance(params, dict):
+            raise ValueError('`params` must be an instance of dict')
+
         self.target = target
         self.tasks = tasks
+        self.params = params or {}  # additional parameters for the tasks
         self.branch = None  # filled after adding to a queue
         self._queue = None  # set by the queue object after put or get
 
@@ -957,7 +918,7 @@ class Job(Serializable):
         return self.queue.date_of(self)
 
     @classmethod
-    def from_config(cls, config, target, tasks=None, groups=None):
+    def from_config(cls, config, target, tasks=None, groups=None, params=None):
         """
         Intantiate a job from based on a config.
 
@@ -969,9 +930,11 @@ class Job(Serializable):
             Describes target repository and revision the builds run against.
         tasks : Optional[List[str]], default None
             List of glob patterns for matching task names.
-        groups : tasks : Optional[List[str]], default None
+        groups : Optional[List[str]], default None
             List of exact group names matching predefined task sets in the
             config.
+        params : Optional[Dict[str, str]], default None
+            Additional rendering parameters for the task templates.
 
         Returns
         -------
@@ -987,18 +950,19 @@ class Job(Serializable):
         # instantiate the tasks
         tasks = {}
         versions = {'version': target.version,
-                    'no_rc_version': target.no_rc_version}
+                    'no_rc_version': target.no_rc_version,
+                    'no_rc_semver_version': target.no_rc_semver_version}
         for task_name, task in task_definitions.items():
             artifacts = task.pop('artifacts', None) or []  # because of yaml
             artifacts = [fn.format(**versions) for fn in artifacts]
             tasks[task_name] = Task(artifacts=artifacts, **task)
 
-        return cls(target=target, tasks=tasks)
+        return cls(target=target, tasks=tasks, params=params)
 
     def is_finished(self):
         for task in self.tasks.values():
             status = task.status(force_query=True)
-            if status.state == 'pending':
+            if status.combined_state == 'pending':
                 return False
         return True
 
@@ -1019,30 +983,6 @@ class Job(Serializable):
             click.echo('Waiting {} minutes and then checking again'
                        .format(poll_interval_minutes))
             time.sleep(poll_interval_minutes * 60)
-
-    def query_assets(self, max_workers=None, ignore_prefix=None):
-        # cache the futures for later use
-        if not hasattr(self, '_assets'):
-            self._assets = []
-            max_workers = (
-                max_workers or os.environ.get('CROSSBOW_QUERY_PARALLELISM', 1)
-            )
-            with concurrent.futures.ThreadPoolExecutor(max_workers) as pool:
-                for task_name, task in sorted(self.tasks.items()):
-                    # HACK: spare some queries because of the rate limit, and
-                    # don't query tasks with specified prefix, e.g. "test-"
-                    if (ignore_prefix is not None and
-                            task_name.startswith(ignore_prefix)):
-                        continue
-                    self._assets.append((
-                        task_name,
-                        task,
-                        pool.submit(task.status),
-                        pool.submit(task.assets)
-                    ))
-
-        for task_name, task, status, assets in self._assets:
-            yield (task_name, task, status.result(), assets.result())
 
 
 class Config(dict):
@@ -1206,18 +1146,23 @@ class ConsoleReport(Report):
         echo(self.header())
 
         # write table's body
-        for task_name, task, status, assets in self.job.query_assets():
+        for task_name, task in sorted(self.job.tasks.items()):
             # write summary of the uploaded vs total assets
-            n_expected = len(assets)
-            n_uploaded = len(list(filter(None, assets.values())))
-            echo(self.lead(status.state, task.branch, n_uploaded, n_expected))
+            status = task.status()
+            assets = task.assets()
+
+            # mapping of artifact pattern to asset or None of not uploaded
+            n_expected = len(task.artifacts)
+            n_uploaded = len(assets.uploaded_assets())
+            echo(self.lead(status.combined_state, task.branch, n_uploaded,
+                           n_expected))
 
             # write per asset status
-            for artifact, asset in task.assets().items():
+            for artifact_pattern, asset in assets.items():
                 if asset_callback is not None:
                     asset_callback(task_name, task, asset)
-                # artifact is a pattern for the expected asset
-                echo(self.artifact(status.state, artifact, asset))
+                echo(self.artifact(status.combined_state, artifact_pattern,
+                                   asset))
 
 
 class EmailReport(Report):
@@ -1281,7 +1226,7 @@ class EmailReport(Report):
         buffer.write(self.header())
 
         tasks_by_state = toolz.groupby(
-            lambda tpl: tpl[1].status().state,
+            lambda name_task_pair: name_task_pair[1].status().combined_state,
             self.job.tasks.items()
         )
 
@@ -1346,10 +1291,9 @@ class GithubPage:
 
     def _is_failed(self, status, task_name):
         # for showing task statuses during the rendering procedure
-        if status.state == 'success':
+        if status.combined_state == 'success':
             msg = click.style('[  OK] {}'.format(task_name), fg='green')
             failed = False
-            click.echo(msg)
         else:
             msg = click.style('[FAIL] {}'.format(task_name), fg='yellow')
             failed = True
@@ -1359,31 +1303,37 @@ class GithubPage:
 
     def render_nightlies(self):
         click.echo('\n\nRENDERING NIGHTLIES')
-        files = {}
+        nightly_files = {}
+
         for job in self.jobs:
             click.echo('\nJOB: {}'.format(job.branch))
-            tasks = {}
+            job_files = {}
 
-            it = job.query_assets(ignore_prefix='test')
-            for task_name, task, status, assets in it:
-                links = {}
-                if self._is_failed(status, task_name):
-                    continue
-                for asset in assets.values():
-                    if asset is not None:
+            for task_name, task in sorted(job.tasks.items()):
+                # TODO: also render check runs?
+                status = task.status()
+
+                task_files = {'status.json': status.github_status.as_json()}
+                links = {'status.json': 'status.json'}
+
+                if not self._is_failed(status, task_name):
+                    # accumulate links to uploaded assets
+                    for asset in task.assets().uploaded_assets():
                         links[asset.name] = asset.browser_download_url
 
                 if links:
                     page_content = self._generate_page(links)
-                    tasks[task_name] = {'index.html': page_content}
+                    task_files['index.html'] = page_content
 
-            files[str(job.date)] = tasks
+                job_files[task_name] = task_files
+
+            nightly_files[str(job.date)] = job_files
 
         # write the most recent wheels under the latest directory
-        if 'latest' not in files:
-            files['latest'] = tasks
+        if 'latest' not in nightly_files:
+            nightly_files['latest'] = job_files
 
-        return files
+        return nightly_files
 
     def render_pypi_simple(self):
         click.echo('\n\nRENDERING PYPI')
@@ -1392,15 +1342,14 @@ class GithubPage:
         for job in self.jobs:
             click.echo('\nJOB: {}'.format(job.branch))
 
-            it = job.query_assets(ignore_prefix='test')
-            for task_name, task, status, assets in it:
+            for task_name, task in sorted(job.tasks.items()):
                 if not task_name.startswith('wheel'):
                     continue
+                status = task.status()
                 if self._is_failed(status, task_name):
                     continue
-                for asset in assets.values():
-                    if asset is not None:
-                        wheels[asset.name] = asset.browser_download_url
+                for asset in task.assets().uploaded_assets():
+                    wheels[asset.name] = asset.browser_download_url
 
         return {'pyarrow': {'index.html': self._generate_page(wheels)}}
 
@@ -1423,7 +1372,7 @@ yaml.register_class(Target)
 
 
 # define default paths
-DEFAULT_CONFIG_PATH = CWD / 'tasks.yml'
+DEFAULT_CONFIG_PATH = str(CWD / 'tasks.yml')
 DEFAULT_ARROW_PATH = CWD.parents[1]
 DEFAULT_QUEUE_PATH = CWD.parents[2] / 'crossbow'
 
@@ -1455,38 +1404,6 @@ def crossbow(ctx, github_token, arrow_path, queue_path, queue_remote,
 
 
 @crossbow.command()
-@click.option('--changelog-path', '-c', type=click.Path(exists=True),
-              default=str(DEFAULT_ARROW_PATH / 'CHANGELOG.md'),
-              help='Path of changelog to update')
-@click.option('--arrow-version', '-v', default=None,
-              help='Set target version explicitly')
-@click.option('--is-website', '-w', default=False, is_flag=True,
-              help='Whether to use website format for changelog. ')
-@click.option('--jira-username', '-u', default=None, help='JIRA username')
-@click.option('--jira-password', '-P', default=None, help='JIRA password')
-@click.option('--dry-run/--write', default=False,
-              help='Just display the new changelog, don\'t write it')
-@click.pass_obj
-def changelog(obj, changelog_path, arrow_version, is_website, jira_username,
-              jira_password, dry_run):
-    changelog_path = Path(changelog_path)
-    target = Target.from_repo(obj['arrow'])
-    version = arrow_version or target.version
-
-    changelog = JiraChangelog(version, username=jira_username,
-                              password=jira_password)
-    new_content = changelog.render(changelog_path.read_text(),
-                                   website=is_website)
-
-    if dry_run:
-        click.echo(new_content)
-    else:
-        changelog_path.write_text(new_content)
-        click.echo('New changelog successfully generated, see git diff for the'
-                   'changes')
-
-
-@crossbow.command()
 @click.option('--config-path', '-c',
               type=click.Path(exists=True), default=DEFAULT_CONFIG_PATH,
               help='Task configuration yml. Defaults to tasks.yml')
@@ -1500,6 +1417,8 @@ def check_config(config_path):
 @click.argument('tasks', nargs=-1, required=False)
 @click.option('--group', '-g', 'groups', multiple=True,
               help='Submit task groups as defined in task.yml')
+@click.option('--param', '-p', 'params', multiple=True,
+              help='Additional task parameters for rendering the CI templates')
 @click.option('--job-prefix', default='build',
               help='Arbitrary prefix for branch names, e.g. nightly')
 @click.option('--config-path', '-c',
@@ -1521,7 +1440,7 @@ def check_config(config_path):
               help='Just display the rendered CI configurations without '
                    'submitting them')
 @click.pass_obj
-def submit(obj, tasks, groups, job_prefix, config_path, arrow_version,
+def submit(obj, tasks, groups, params, job_prefix, config_path, arrow_version,
            arrow_remote, arrow_branch, arrow_sha, dry_run):
     output = obj['output']
     queue, arrow = obj['queue'], obj['arrow']
@@ -1540,9 +1459,12 @@ def submit(obj, tasks, groups, job_prefix, config_path, arrow_version,
     target = Target.from_repo(arrow, remote=arrow_remote, branch=arrow_branch,
                               head=arrow_sha, version=arrow_version)
 
+    # parse additional job parameters
+    params = dict([p.split("=") for p in params])
+
     # instantiate the job object
     job = Job.from_config(config=config, target=target, tasks=tasks,
-                          groups=groups)
+                          groups=groups, params=params)
 
     if dry_run:
         yaml.dump(job, output)

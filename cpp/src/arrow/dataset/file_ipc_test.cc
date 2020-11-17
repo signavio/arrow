@@ -22,15 +22,19 @@
 #include <vector>
 
 #include "arrow/dataset/dataset_internal.h"
+#include "arrow/dataset/discovery.h"
 #include "arrow/dataset/file_base.h"
 #include "arrow/dataset/filter.h"
 #include "arrow/dataset/partition.h"
 #include "arrow/dataset/test_util.h"
 #include "arrow/io/memory.h"
+#include "arrow/ipc/reader.h"
 #include "arrow/ipc/writer.h"
 #include "arrow/record_batch.h"
+#include "arrow/table.h"
 #include "arrow/testing/gtest_util.h"
 #include "arrow/testing/util.h"
+#include "arrow/util/key_value_metadata.h"
 
 namespace arrow {
 namespace dataset {
@@ -46,7 +50,7 @@ class ArrowIpcWriterMixin : public ::testing::Test {
   std::shared_ptr<Buffer> Write(RecordBatchReader* reader) {
     EXPECT_OK_AND_ASSIGN(auto sink, io::BufferOutputStream::Create());
 
-    EXPECT_OK_AND_ASSIGN(auto writer, ipc::NewFileWriter(sink.get(), reader->schema()));
+    EXPECT_OK_AND_ASSIGN(auto writer, ipc::MakeFileWriter(sink, reader->schema()));
 
     std::vector<std::shared_ptr<RecordBatch>> batches;
     ARROW_EXPECT_OK(reader->ReadAll(&batches));
@@ -62,7 +66,7 @@ class ArrowIpcWriterMixin : public ::testing::Test {
 
   std::shared_ptr<Buffer> Write(const Table& table) {
     EXPECT_OK_AND_ASSIGN(auto sink, io::BufferOutputStream::Create());
-    EXPECT_OK_AND_ASSIGN(auto writer, ipc::NewFileWriter(sink.get(), table.schema()));
+    EXPECT_OK_AND_ASSIGN(auto writer, ipc::MakeFileWriter(sink, table.schema()));
 
     ARROW_EXPECT_OK(writer->WriteTable(table));
 
@@ -86,10 +90,10 @@ class TestIpcFileFormat : public ArrowIpcWriterMixin {
                                     kBatchRepetitions);
   }
 
-  Result<FileSource> GetFileSink() {
+  Result<std::shared_ptr<io::BufferOutputStream>> GetFileSink() {
     ARROW_ASSIGN_OR_RAISE(std::shared_ptr<ResizableBuffer> buffer,
                           AllocateResizableBuffer(0));
-    return FileSource(std::move(buffer));
+    return std::make_shared<io::BufferOutputStream>(buffer);
   }
 
   RecordBatchIterator Batches(ScanTaskIterator scan_task_it) {
@@ -99,7 +103,7 @@ class TestIpcFileFormat : public ArrowIpcWriterMixin {
   }
 
   RecordBatchIterator Batches(Fragment* fragment) {
-    EXPECT_OK_AND_ASSIGN(auto scan_task_it, fragment->Scan(ctx_));
+    EXPECT_OK_AND_ASSIGN(auto scan_task_it, fragment->Scan(opts_, ctx_));
     return Batches(std::move(scan_task_it));
   }
 
@@ -115,12 +119,30 @@ TEST_F(TestIpcFileFormat, ScanRecordBatchReader) {
   auto source = GetFileSource(reader.get());
 
   opts_ = ScanOptions::Make(reader->schema());
-  ASSERT_OK_AND_ASSIGN(auto fragment, format_->MakeFragment(*source, opts_));
+  ASSERT_OK_AND_ASSIGN(auto fragment, format_->MakeFragment(*source));
 
   int64_t row_count = 0;
 
   for (auto maybe_batch : Batches(fragment.get())) {
-    ASSERT_OK_AND_ASSIGN(auto batch, std::move(maybe_batch));
+    ASSERT_OK_AND_ASSIGN(auto batch, maybe_batch);
+    row_count += batch->num_rows();
+  }
+
+  ASSERT_EQ(row_count, kNumRows);
+}
+
+TEST_F(TestIpcFileFormat, ScanRecordBatchReaderWithVirtualColumn) {
+  auto reader = GetRecordBatchReader();
+  auto source = GetFileSource(reader.get());
+
+  opts_ = ScanOptions::Make(schema({schema_->field(0), field("virtual", int32())}));
+  ASSERT_OK_AND_ASSIGN(auto fragment, format_->MakeFragment(*source));
+
+  int64_t row_count = 0;
+
+  for (auto maybe_batch : Batches(fragment.get())) {
+    ASSERT_OK_AND_ASSIGN(auto batch, maybe_batch);
+    AssertSchemaEqual(*batch->schema(), *schema_);
     row_count += batch->num_rows();
   }
 
@@ -130,95 +152,76 @@ TEST_F(TestIpcFileFormat, ScanRecordBatchReader) {
 TEST_F(TestIpcFileFormat, WriteRecordBatchReader) {
   std::shared_ptr<RecordBatchReader> reader = GetRecordBatchReader();
   auto source = GetFileSource(reader.get());
+  reader = GetRecordBatchReader();
 
   opts_ = ScanOptions::Make(reader->schema());
-  ASSERT_OK_AND_ASSIGN(auto fragment, format_->MakeFragment(*source, opts_));
 
   EXPECT_OK_AND_ASSIGN(auto sink, GetFileSink());
 
-  EXPECT_OK_AND_ASSIGN(auto write_task, format_->WriteFragment(sink, fragment, ctx_));
+  auto options = format_->DefaultWriteOptions();
+  EXPECT_OK_AND_ASSIGN(auto writer, format_->MakeWriter(sink, reader->schema(), options));
+  ASSERT_OK(writer->Write(reader.get()));
+  ASSERT_OK(writer->Finish());
 
-  ASSERT_OK(write_task->Execute());
+  EXPECT_OK_AND_ASSIGN(auto written, sink->Finish());
 
-  AssertBufferEqual(*sink.buffer(), *source->buffer());
+  AssertBufferEqual(*written, *source->buffer());
 }
 
-class TestIpcFileSystemDataset : public TestIpcFileFormat,
-                                 public MakeFileSystemDatasetMixin {};
+TEST_F(TestIpcFileFormat, WriteRecordBatchReaderCustomOptions) {
+  std::shared_ptr<RecordBatchReader> reader = GetRecordBatchReader();
+  auto source = GetFileSource(reader.get());
+  reader = GetRecordBatchReader();
 
-TEST_F(TestIpcFileSystemDataset, Write) {
-  MakeDatasetFromPathlist(R"(
-    old_root/i32=0/
-    old_root/i32=0/str=aaa/
-    old_root/i32=0/str=aaa/dat
-    old_root/i32=0/str=bbb/
-    old_root/i32=0/str=bbb/dat
-    old_root/i32=0/str=ccc/
-    old_root/i32=0/str=ccc/dat
+  opts_ = ScanOptions::Make(reader->schema());
 
-    old_root/i32=1/
-    old_root/i32=1/str=aaa/
-    old_root/i32=1/str=aaa/dat
-    old_root/i32=1/str=bbb/
-    old_root/i32=1/str=bbb/dat
-    old_root/i32=1/str=ccc/
-    old_root/i32=1/str=ccc/dat
-    )",
-                          scalar(true),
-                          {
-                              ("i32"_ == 0).Copy(),
-                              ("str"_ == "aaa").Copy(),
-                              scalar(true),
-                              ("str"_ == "bbb").Copy(),
-                              scalar(true),
-                              ("str"_ == "ccc").Copy(),
-                              scalar(true),
-                              ("i32"_ == 1).Copy(),
-                              ("str"_ == "aaa").Copy(),
-                              scalar(true),
-                              ("str"_ == "bbb").Copy(),
-                              scalar(true),
-                              ("str"_ == "ccc").Copy(),
-                              scalar(true),
-                          });
+  EXPECT_OK_AND_ASSIGN(auto sink, GetFileSink());
 
-  auto schema = arrow::schema({field("i32", int32()), field("str", utf8())});
-  opts_ = ScanOptions::Make(schema);
-
-  auto partitioning_factory = DirectoryPartitioning::MakeFactory({"str", "i32"});
-  ASSERT_OK_AND_ASSIGN(
-      auto plan, partitioning_factory->MakeWritePlan(dataset_->GetFragments(options_)));
-
-  plan.format = format_;
-  plan.filesystem = fs_;
-  plan.partition_base_dir = "new_root/";
-
-  ASSERT_OK_AND_ASSIGN(auto written, FileSystemDataset::Write(plan, ctx_));
-
-  using E = TestExpression;
-  std::vector<E> actual_partitions;
-  for (const auto& partition : written->partitions()) {
-    actual_partitions.emplace_back(partition);
+  auto ipc_options =
+      checked_pointer_cast<IpcFileWriteOptions>(format_->DefaultWriteOptions());
+  if (util::Codec::IsAvailable(Compression::ZSTD)) {
+    EXPECT_OK_AND_ASSIGN(ipc_options->options->codec,
+                         util::Codec::Create(Compression::ZSTD));
   }
-  EXPECT_THAT(actual_partitions,
-              testing::ElementsAre(E{"str"_ == "aaa"}, E{"i32"_ == 0}, E{scalar(true)},
-                                   E{"i32"_ == 1}, E{scalar(true)},
+  ipc_options->metadata = key_value_metadata({{"hello", "world"}});
+  EXPECT_OK_AND_ASSIGN(auto writer,
+                       format_->MakeWriter(sink, reader->schema(), ipc_options));
+  ASSERT_OK(writer->Write(reader.get()));
+  ASSERT_OK(writer->Finish());
 
-                                   E{"str"_ == "bbb"}, E{"i32"_ == 0}, E{scalar(true)},
-                                   E{"i32"_ == 1}, E{scalar(true)},
+  EXPECT_OK_AND_ASSIGN(auto written, sink->Finish());
+  EXPECT_OK_AND_ASSIGN(auto ipc_reader, ipc::RecordBatchFileReader::Open(
+                                            std::make_shared<io::BufferReader>(written)));
 
-                                   E{"str"_ == "ccc"}, E{"i32"_ == 0}, E{scalar(true)},
-                                   E{"i32"_ == 1}, E{scalar(true)}));
+  EXPECT_EQ(ipc_reader->metadata()->sorted_pairs(),
+            ipc_options->metadata->sorted_pairs());
+}
 
-  auto parent_directories = written->files();
-  for (auto& path : parent_directories) {
-    EXPECT_EQ(fs::internal::GetAbstractPathExtension(path), "ipc");
-    path = fs::internal::GetAbstractPathParent(path).first;
+class TestIpcFileSystemDataset : public testing::Test,
+                                 public WriteFileSystemDatasetMixin {
+ public:
+  void SetUp() override {
+    MakeSourceDataset();
+    auto ipc_format = std::make_shared<IpcFileFormat>();
+    format_ = ipc_format;
+    SetWriteOptions(ipc_format->DefaultWriteOptions());
   }
+};
 
-  EXPECT_THAT(parent_directories,
-              testing::ElementsAre("new_root/aaa/0", "new_root/aaa/1", "new_root/bbb/0",
-                                   "new_root/bbb/1", "new_root/ccc/0", "new_root/ccc/1"));
+TEST_F(TestIpcFileSystemDataset, WriteWithIdenticalPartitioningSchema) {
+  TestWriteWithIdenticalPartitioningSchema();
+}
+
+TEST_F(TestIpcFileSystemDataset, WriteWithUnrelatedPartitioningSchema) {
+  TestWriteWithUnrelatedPartitioningSchema();
+}
+
+TEST_F(TestIpcFileSystemDataset, WriteWithSupersetPartitioningSchema) {
+  TestWriteWithSupersetPartitioningSchema();
+}
+
+TEST_F(TestIpcFileSystemDataset, WriteWithEmptyPartitioningSchema) {
+  TestWriteWithEmptyPartitioningSchema();
 }
 
 TEST_F(TestIpcFileFormat, OpenFailureWithRelevantError) {
@@ -230,7 +233,7 @@ TEST_F(TestIpcFileFormat, OpenFailureWithRelevantError) {
   constexpr auto file_name = "herp/derp";
   ASSERT_OK_AND_ASSIGN(
       auto fs, fs::internal::MockFileSystem::Make(fs::kNoTime, {fs::File(file_name)}));
-  result = format_->Inspect({file_name, fs.get()});
+  result = format_->Inspect({file_name, fs});
   EXPECT_RAISES_WITH_MESSAGE_THAT(Invalid, testing::HasSubstr(file_name),
                                   result.status());
 }
@@ -249,12 +252,12 @@ TEST_F(TestIpcFileFormat, ScanRecordBatchReaderProjected) {
 
   auto reader = GetRecordBatchReader();
   auto source = GetFileSource(reader.get());
-  ASSERT_OK_AND_ASSIGN(auto fragment, format_->MakeFragment(*source, opts_));
+  ASSERT_OK_AND_ASSIGN(auto fragment, format_->MakeFragment(*source));
 
   int64_t row_count = 0;
 
   for (auto maybe_batch : Batches(fragment.get())) {
-    ASSERT_OK_AND_ASSIGN(auto batch, std::move(maybe_batch));
+    ASSERT_OK_AND_ASSIGN(auto batch, maybe_batch);
     row_count += batch->num_rows();
     AssertSchemaEqual(*batch->schema(), *expected_schema,
                       /*check_metadata=*/false);
@@ -282,7 +285,7 @@ TEST_F(TestIpcFileFormat, ScanRecordBatchReaderProjectedMissingCols) {
   auto readers = {reader.get(), reader_without_i32.get(), reader_without_f64.get()};
   for (auto reader : readers) {
     auto source = GetFileSource(reader);
-    ASSERT_OK_AND_ASSIGN(auto fragment, format_->MakeFragment(*source, opts_));
+    ASSERT_OK_AND_ASSIGN(auto fragment, format_->MakeFragment(*source));
 
     // NB: projector is applied by the scanner; Fragment does not evaluate it.
     // We will not drop "i32" even though it is not in the projector's schema.
@@ -301,7 +304,7 @@ TEST_F(TestIpcFileFormat, ScanRecordBatchReaderProjectedMissingCols) {
     int64_t row_count = 0;
 
     for (auto maybe_batch : Batches(fragment.get())) {
-      ASSERT_OK_AND_ASSIGN(auto batch, std::move(maybe_batch));
+      ASSERT_OK_AND_ASSIGN(auto batch, maybe_batch);
       row_count += batch->num_rows();
       AssertSchemaEqual(*batch->schema(), *expected_schema,
                         /*check_metadata=*/false);

@@ -29,18 +29,18 @@ from libc.stdint cimport int64_t, uint8_t, uintptr_t
 from cython.operator cimport dereference as deref, preincrement as inc
 from cpython.pycapsule cimport *
 
+from collections.abc import Sequence
 import random
 import socket
 import warnings
 
 import pyarrow
-from pyarrow.lib cimport Buffer, NativeFile, check_status, pyarrow_wrap_buffer
-from pyarrow.lib import ArrowException
+from pyarrow.lib cimport (Buffer, NativeFile, _Weakrefable,
+                          check_status, pyarrow_wrap_buffer)
+from pyarrow.lib import ArrowException, frombytes
 from pyarrow.includes.libarrow cimport (CBuffer, CMutableBuffer,
                                         CFixedSizeBufferWriter, CStatus)
 from pyarrow.includes.libplasma cimport *
-
-from pyarrow import compat
 
 PLASMA_WAIT_TIMEOUT = 2 ** 30
 
@@ -155,7 +155,7 @@ def make_object_id(object_id):
     return ObjectID(object_id)
 
 
-cdef class ObjectID:
+cdef class ObjectID(_Weakrefable):
     """
     An ObjectID represents a string of bytes used to identify Plasma objects.
     """
@@ -211,7 +211,7 @@ cdef class ObjectID:
         return ObjectID(random_id)
 
 
-cdef class ObjectNotAvailable:
+cdef class ObjectNotAvailable(_Weakrefable):
     """
     Placeholder for an object that was not available within the given timeout.
     """
@@ -278,7 +278,7 @@ cdef int plasma_check_status(const CStatus& status) nogil except -1:
         return 0
 
     with gil:
-        message = compat.frombytes(status.message())
+        message = frombytes(status.message())
         if IsPlasmaObjectExists(status):
             raise PlasmaObjectExists(message)
         elif IsPlasmaObjectNotFound(status):
@@ -289,7 +289,12 @@ cdef int plasma_check_status(const CStatus& status) nogil except -1:
     return check_status(status)
 
 
-cdef class PlasmaClient:
+def get_socket_from_fd(fileno, family, type):
+    import socket
+    return socket.socket(fileno=fileno, family=family, type=type)
+
+
+cdef class PlasmaClient(_Weakrefable):
     """
     The PlasmaClient is used to interface with a plasma store and manager.
 
@@ -530,7 +535,13 @@ cdef class PlasmaClient:
         """
         cdef ObjectID target_id = (object_id if object_id
                                    else ObjectID.from_random())
-        serialized = pyarrow.serialize(value, serialization_context)
+        if serialization_context is not None:
+            warnings.warn(
+                "'serialization_context' is deprecated and will be removed "
+                "in a future version.",
+                DeprecationWarning, stacklevel=2
+            )
+        serialized = pyarrow.lib._serialize(value, serialization_context)
         buffer = self.create(target_id, serialized.total_bytes)
         stream = pyarrow.FixedSizeBufferWriter(buffer)
         stream.set_memcopy_threads(memcopy_threads)
@@ -561,15 +572,21 @@ cdef class PlasmaClient:
             the object_ids and ObjectNotAvailable if the object was not
             available.
         """
-        if isinstance(object_ids, compat.Sequence):
+        if serialization_context is not None:
+            warnings.warn(
+                "'serialization_context' is deprecated and will be removed "
+                "in a future version.",
+                DeprecationWarning, stacklevel=2
+            )
+        if isinstance(object_ids, Sequence):
             results = []
             buffers = self.get_buffers(object_ids, timeout_ms)
             for i in range(len(object_ids)):
                 # buffers[i] is None if this object was not available within
                 # the timeout
                 if buffers[i]:
-                    val = pyarrow.deserialize(buffers[i],
-                                              serialization_context)
+                    val = pyarrow.lib._deserialize(buffers[i],
+                                                   serialization_context)
                     results.append(val)
                 else:
                     results.append(ObjectNotAvailable)
@@ -667,9 +684,9 @@ cdef class PlasmaClient:
         """
         Get the notification socket.
         """
-        return compat.get_socket_from_fd(self.notification_fd,
-                                         family=socket.AF_UNIX,
-                                         type=socket.SOCK_STREAM)
+        return get_socket_from_fd(self.notification_fd,
+                                  family=socket.AF_UNIX,
+                                  type=socket.SOCK_STREAM)
 
     def decode_notifications(self, const uint8_t* buf):
         """

@@ -17,6 +17,7 @@
 
 ARG base
 FROM ${base}
+ARG arch
 
 # Build R
 # [1] https://www.digitalocean.com/community/tutorials/how-to-install-r-on-ubuntu-18-04
@@ -30,10 +31,13 @@ RUN apt-get update -y && \
     apt-key adv \
         --keyserver keyserver.ubuntu.com \
         --recv-keys E298A3A825C0D65DFD57CBB651716619E084DAB9 && \
-    # NOTE: as of 2019-12, R 3.5 and 3.6 are available in the repos with -cran35 suffix
+    # NOTE: R 3.5 and 3.6 are available in the repos with -cran35 suffix
+    # for trusty, xenial, bionic, and eoan (as of May 2020)
+    # -cran40 has 4.0 versions for bionic and focal
     # R 3.2, 3.3, 3.4 are available without the suffix but only for trusty and xenial
     # TODO: make sure OS version and R version are valid together and conditionally set repo suffix
-    add-apt-repository 'deb https://cloud.r-project.org/bin/linux/ubuntu '$(lsb_release -cs)'-cran35/' && \
+    # This is a hack to turn 3.6 into 35 and 4.0 into 40:
+    add-apt-repository 'deb https://cloud.r-project.org/bin/linux/ubuntu '$(lsb_release -cs)'-cran'$(echo "${r}" | tr -d . | tr 6 5)'/' && \
     apt-get install -y \
         r-base=${r}* \
         # system libs needed by core R packages
@@ -61,11 +65,15 @@ RUN apt-get update -y && \
 COPY ci/etc/rprofile /arrow/ci/etc/
 RUN cat /arrow/ci/etc/rprofile >> $(R RHOME)/etc/Rprofile.site
 # Also ensure parallel compilation of C/C++ code
-RUN echo "MAKEFLAGS=-j$(R --slave -e 'cat(parallel::detectCores())')" >> $(R RHOME)/etc/Makeconf
+RUN echo "MAKEFLAGS=-j$(R -s -e 'cat(parallel::detectCores())')" >> $(R RHOME)/etc/Makeconf
 
 COPY ci/scripts/r_deps.sh /arrow/ci/scripts/
 COPY r/DESCRIPTION /arrow/r/
 RUN /arrow/ci/scripts/r_deps.sh /arrow
+
+COPY ci/scripts/install_minio.sh \
+     /arrow/ci/scripts/
+RUN /arrow/ci/scripts/install_minio.sh ${arch} linux latest /usr/local
 
 # Set up Python 3 and its dependencies
 RUN ln -s /usr/bin/python3 /usr/local/bin/python && \
@@ -86,6 +94,7 @@ ENV \
     ARROW_PARQUET=ON \
     ARROW_PLASMA=OFF \
     ARROW_PYTHON=ON \
+    ARROW_S3=ON \
     ARROW_USE_CCACHE=ON \
     ARROW_USE_GLOG=OFF \
     LC_ALL=en_US.UTF-8

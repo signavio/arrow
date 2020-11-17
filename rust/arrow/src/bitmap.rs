@@ -21,6 +21,7 @@
 use crate::buffer::Buffer;
 use crate::error::Result;
 use crate::util::bit_util;
+use std::mem;
 
 use std::ops::{BitAnd, BitOr};
 
@@ -38,17 +39,17 @@ impl Bitmap {
         } else {
             num_bytes + 64 - r
         };
-        let mut v = Vec::with_capacity(len);
-        for _ in 0..len {
-            v.push(255); // 1 is not null
-        }
         Bitmap {
-            bits: Buffer::from(&v[..]),
+            bits: Buffer::from(&vec![0xFF; len]),
         }
     }
 
     pub fn len(&self) -> usize {
         self.bits.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bits.is_empty()
     }
 
     pub fn is_set(&self, i: usize) -> bool {
@@ -60,8 +61,18 @@ impl Bitmap {
         &self.bits
     }
 
-    pub fn to_buffer(self) -> Buffer {
+    pub fn into_buffer(self) -> Buffer {
         self.bits
+    }
+
+    /// Returns the total number of bytes of memory occupied by the buffers owned by this [Bitmap].
+    pub fn get_buffer_memory_size(&self) -> usize {
+        self.bits.capacity()
+    }
+
+    /// Returns the total number of bytes of memory occupied physically by this [Bitmap].
+    pub fn get_array_memory_size(&self) -> usize {
+        self.bits.capacity() + mem::size_of_val(self)
     }
 }
 
@@ -96,7 +107,7 @@ impl PartialEq for Bitmap {
         if self_len != other_len {
             return false;
         }
-        &self.bits.data()[..self_len] == &other.bits.data()[..self_len]
+        self.bits.data()[..self_len] == other.bits.data()[..self_len]
     }
 }
 

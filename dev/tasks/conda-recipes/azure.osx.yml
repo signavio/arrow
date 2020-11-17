@@ -5,6 +5,7 @@ jobs:
   timeoutInMinutes: 360
   variables:
     CONFIG: {{ config }}
+    R_CONFIG: {{ r_config|default("") }}
     ARROW_VERSION: {{ arrow.no_rc_version }}
     UPLOAD_PACKAGES: False
   steps:
@@ -23,8 +24,8 @@ jobs:
 
   - script: |
       source activate base
-      conda install -n base -c conda-forge --quiet --yes conda-forge-ci-setup=2 conda-build
-    displayName: 'Add conda-forge-ci-setup=2'
+      conda install -n base -c conda-forge --quiet --yes conda-forge-ci-setup=3 conda-build
+    displayName: 'Add conda-forge-ci-setup=3'
 
   - script: |
       git clone --no-checkout {{ arrow.remote }} arrow
@@ -61,10 +62,16 @@ jobs:
 
   - script: |
       source activate base
-      conda build arrow-cpp parquet-cpp pyarrow \
+      conda build arrow-cpp parquet-cpp \
         -m ./.ci_support/${CONFIG}.yaml \
         --clobber-file ./.ci_support/clobber_${CONFIG}.yaml \
         --output-folder ./build_artifacts
+
+      if [ ! -z "${R_CONFIG}" ]; then
+        conda build r-arrow \
+          -m ./.ci_support/r/${R_CONFIG}.yaml \
+          --output-folder ./build_artifacts
+      fi
     workingDirectory: arrow/dev/tasks/conda-recipes
     displayName: Build recipes
 

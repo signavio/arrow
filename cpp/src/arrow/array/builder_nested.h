@@ -17,14 +17,21 @@
 
 #pragma once
 
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include "arrow/array.h"
+#include "arrow/array/array_nested.h"
 #include "arrow/array/builder_base.h"
+#include "arrow/array/data.h"
+#include "arrow/buffer.h"
 #include "arrow/buffer_builder.h"
+#include "arrow/status.h"
+#include "arrow/type.h"
+#include "arrow/util/macros.h"
+#include "arrow/util/visibility.h"
 
 namespace arrow {
 
@@ -44,7 +51,7 @@ class BaseListBuilder : public ArrayBuilder {
       : ArrayBuilder(pool),
         offsets_builder_(pool),
         value_builder_(value_builder),
-        value_field_(type->child(0)->WithType(NULLPTR)) {}
+        value_field_(type->field(0)->WithType(NULLPTR)) {}
 
   BaseListBuilder(MemoryPool* pool, std::shared_ptr<ArrayBuilder> const& value_builder)
       : BaseListBuilder(pool, value_builder, list(value_builder->type())) {}
@@ -93,8 +100,21 @@ class BaseListBuilder : public ArrayBuilder {
 
   Status AppendNulls(int64_t length) final {
     ARROW_RETURN_NOT_OK(Reserve(length));
-    ARROW_RETURN_NOT_OK(CheckNextOffset());
+    ARROW_RETURN_NOT_OK(ValidateOverflow(0));
     UnsafeAppendToBitmap(length, false);
+    const int64_t num_values = value_builder_->length();
+    for (int64_t i = 0; i < length; ++i) {
+      offsets_builder_.UnsafeAppend(static_cast<offset_type>(num_values));
+    }
+    return Status::OK();
+  }
+
+  Status AppendEmptyValue() final { return Append(true); }
+
+  Status AppendEmptyValues(int64_t length) final {
+    ARROW_RETURN_NOT_OK(Reserve(length));
+    ARROW_RETURN_NOT_OK(ValidateOverflow(0));
+    UnsafeAppendToBitmap(length, true);
     const int64_t num_values = value_builder_->length();
     for (int64_t i = 0; i < length; ++i) {
       offsets_builder_.UnsafeAppend(static_cast<offset_type>(num_values));
@@ -124,6 +144,16 @@ class BaseListBuilder : public ArrayBuilder {
     return Status::OK();
   }
 
+  Status ValidateOverflow(int64_t new_elements) const {
+    auto new_length = value_builder_->length() + new_elements;
+    if (ARROW_PREDICT_FALSE(new_length > maximum_elements())) {
+      return Status::CapacityError("List array cannot contain more than ",
+                                   maximum_elements(), " elements, have ", new_elements);
+    } else {
+      return Status::OK();
+    }
+  }
+
   ArrayBuilder* value_builder() const { return value_builder_.get(); }
 
   // Cannot make this a static attribute because of linking issues
@@ -140,17 +170,8 @@ class BaseListBuilder : public ArrayBuilder {
   std::shared_ptr<ArrayBuilder> value_builder_;
   std::shared_ptr<Field> value_field_;
 
-  Status CheckNextOffset() const {
-    const int64_t num_values = value_builder_->length();
-    ARROW_RETURN_IF(
-        num_values > maximum_elements(),
-        Status::CapacityError("List array cannot contain more than ", maximum_elements(),
-                              " child elements,", " have ", num_values));
-    return Status::OK();
-  }
-
   Status AppendNextOffset() {
-    ARROW_RETURN_NOT_OK(CheckNextOffset());
+    ARROW_RETURN_NOT_OK(ValidateOverflow(0));
     const int64_t num_values = value_builder_->length();
     return offsets_builder_.Append(static_cast<offset_type>(num_values));
   }
@@ -162,7 +183,7 @@ class BaseListBuilder : public ArrayBuilder {
 /// To use this class, you must append values to the child array builder and use
 /// the Append function to delimit each distinct list value (once the values
 /// have been appended to the child array) or use the bulk API to append
-/// a sequence of offests and null values.
+/// a sequence of offsets and null values.
 ///
 /// A note on types.  Per arrow/type.h all types in the c++ implementation are
 /// logical so even though this class always builds list array, this can
@@ -203,7 +224,7 @@ class ARROW_EXPORT LargeListBuilder : public BaseListBuilder<LargeListType> {
 ///
 /// To use this class, you must append values to the key and item array builders
 /// and use the Append function to delimit each distinct map (once the keys and items
-/// have been appended) or use the bulk API to append a sequence of offests and null
+/// have been appended) or use the bulk API to append a sequence of offsets and null
 /// maps.
 ///
 /// Key uniqueness and ordering are not validated.
@@ -219,6 +240,9 @@ class ARROW_EXPORT MapBuilder : public ArrayBuilder {
   /// item_builder has indeterminate type, this builder will also.
   MapBuilder(MemoryPool* pool, const std::shared_ptr<ArrayBuilder>& key_builder,
              const std::shared_ptr<ArrayBuilder>& item_builder, bool keys_sorted = false);
+
+  MapBuilder(MemoryPool* pool, const std::shared_ptr<ArrayBuilder>& item_builder,
+             const std::shared_ptr<DataType>& type);
 
   Status Resize(int64_t capacity) override;
   void Reset() override;
@@ -247,6 +271,10 @@ class ARROW_EXPORT MapBuilder : public ArrayBuilder {
 
   Status AppendNulls(int64_t length) final;
 
+  Status AppendEmptyValue() final;
+
+  Status AppendEmptyValues(int64_t length) final;
+
   /// \brief Get builder to append keys.
   ///
   /// Append a key with this builder should be followed by appending
@@ -267,6 +295,10 @@ class ARROW_EXPORT MapBuilder : public ArrayBuilder {
 
   std::shared_ptr<DataType> type() const override {
     return map(key_builder_->type(), item_builder_->type(), keys_sorted_);
+  }
+
+  Status ValidateOverflow(int64_t new_elements) {
+    return list_builder_->ValidateOverflow(new_elements);
   }
 
  protected:
@@ -336,10 +368,21 @@ class ARROW_EXPORT FixedSizeListBuilder : public ArrayBuilder {
   /// automatically.
   Status AppendNulls(int64_t length) final;
 
+  Status ValidateOverflow(int64_t new_elements);
+
+  Status AppendEmptyValue() final;
+
+  Status AppendEmptyValues(int64_t length) final;
+
   ArrayBuilder* value_builder() const { return value_builder_.get(); }
 
   std::shared_ptr<DataType> type() const override {
     return fixed_size_list(value_field_->WithType(value_builder_->type()), list_size_);
+  }
+
+  // Cannot make this a static attribute because of linking issues
+  static constexpr int64_t maximum_elements() {
+    return std::numeric_limits<FixedSizeListType::offset_type>::max() - 1;
   }
 
  protected:
@@ -388,9 +431,41 @@ class ARROW_EXPORT StructBuilder : public ArrayBuilder {
     return Status::OK();
   }
 
-  Status AppendNull() final { return Append(false); }
+  /// \brief Append a null value. Automatically appends an empty value to each child
+  /// builder.
+  Status AppendNull() final {
+    for (const auto& field : children_) {
+      ARROW_RETURN_NOT_OK(field->AppendEmptyValue());
+    }
+    return Append(false);
+  }
 
-  Status AppendNulls(int64_t length) final;
+  /// \brief Append multiple null values. Automatically appends empty values to each
+  /// child builder.
+  Status AppendNulls(int64_t length) final {
+    for (const auto& field : children_) {
+      ARROW_RETURN_NOT_OK(field->AppendEmptyValues(length));
+    }
+    ARROW_RETURN_NOT_OK(Reserve(length));
+    UnsafeAppendToBitmap(length, false);
+    return Status::OK();
+  }
+
+  Status AppendEmptyValue() final {
+    for (const auto& field : children_) {
+      ARROW_RETURN_NOT_OK(field->AppendEmptyValue());
+    }
+    return Append(true);
+  }
+
+  Status AppendEmptyValues(int64_t length) final {
+    for (const auto& field : children_) {
+      ARROW_RETURN_NOT_OK(field->AppendEmptyValues(length));
+    }
+    ARROW_RETURN_NOT_OK(Reserve(length));
+    UnsafeAppendToBitmap(length, true);
+    return Status::OK();
+  }
 
   void Reset() override;
 

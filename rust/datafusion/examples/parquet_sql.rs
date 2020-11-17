@@ -15,13 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use arrow::util::pretty;
+
 use datafusion::error::Result;
-use datafusion::execution::context::ExecutionContext;
-use datafusion::utils;
+use datafusion::prelude::*;
 
 /// This example demonstrates executing a simple query against an Arrow data source (Parquet) and
 /// fetching results
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // create local execution context
     let mut ctx = ExecutionContext::new();
 
@@ -34,19 +36,16 @@ fn main() -> Result<()> {
         &format!("{}/alltypes_plain.parquet", testdata),
     )?;
 
-    // simple selection
-    let sql = "SELECT int_col, double_col, CAST(date_string_col as VARCHAR) FROM alltypes_plain WHERE id > 1 AND tinyint_col < double_col";
-
-    // create the query plan
-    let plan = ctx.create_logical_plan(&sql)?;
-    let plan = ctx.optimize(&plan)?;
-    let plan = ctx.create_physical_plan(&plan, 1024 * 1024)?;
-
     // execute the query
-    let results = ctx.collect(plan.as_ref())?;
+    let df = ctx.sql(
+        "SELECT int_col, double_col, CAST(date_string_col as VARCHAR) \
+        FROM alltypes_plain \
+        WHERE id > 1 AND tinyint_col < double_col",
+    )?;
+    let results = df.collect().await?;
 
     // print the results
-    utils::print_batches(&results)?;
+    pretty::print_batches(&results)?;
 
     Ok(())
 }

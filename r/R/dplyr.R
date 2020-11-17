@@ -38,7 +38,7 @@ arrow_dplyr_query <- function(.data) {
       # * vector names are the names they should be in the end (i.e. this
       #   records any renaming)
       selected_columns = set_names(names(.data)),
-      # filtered_rows will be a ComparisonExpression
+      # filtered_rows will be an Expression
       filtered_rows = TRUE,
       # group_by_vars is a character vector of columns (as renamed)
       # in the data. They will be kept when data is pulled into R.
@@ -59,7 +59,12 @@ print.arrow_dplyr_query <- function(x, ...) {
   cat(fields, "\n", sep = "")
   cat("\n")
   if (!isTRUE(x$filtered_rows)) {
-    cat("* Filter: ", x$filtered_rows$ToString(), "\n", sep = "")
+    if (query_on_dataset(x)) {
+      filter_string <- x$filtered_rows$ToString()
+    } else {
+      filter_string <- .format_array_expression(x$filtered_rows)
+    }
+    cat("* Filter: ", filter_string, "\n", sep = "")
   }
   if (length(x$group_by_vars)) {
     cat("* Grouped by ", paste(x$group_by_vars, collapse = ", "), "\n", sep = "")
@@ -74,19 +79,66 @@ names.arrow_dplyr_query <- function(x) names(x$selected_columns)
 
 #' @export
 dim.arrow_dplyr_query <- function(x) {
+  cols <- length(names(x))
+
   if (isTRUE(x$filtered)) {
     rows <- x$.data$num_rows
+  } else if (query_on_dataset(x)) {
+    warning("Number of rows unknown; returning NA", call. = FALSE)
+    # TODO: https://issues.apache.org/jira/browse/ARROW-9697
+    rows <- NA_integer_
   } else {
-    warning(
-      "For arrow dplyr queries that call filter(), ",
-      "dim() returns NA for the number of rows.\n",
-      "Call collect() to pull data into R to access the number of rows.",
+    # Evaluate the filter expression to a BooleanArray and count
+    rows <- as.integer(sum(eval_array_expression(x$filtered_rows), na.rm = TRUE))
+  }
+  c(rows, cols)
+}
+
+#' @export
+as.data.frame.arrow_dplyr_query <- function(x, row.names = NULL, optional = FALSE, ...) {
+  collect.arrow_dplyr_query(x, as_data_frame = TRUE, ...)
+}
+
+#' @export
+head.arrow_dplyr_query <- function(x, n = 6L, ...) {
+  if (query_on_dataset(x)) {
+    head.Dataset(x, n, ...)
+  } else {
+    out <- collect.arrow_dplyr_query(x, as_data_frame = FALSE)
+    if (inherits(out, "arrow_dplyr_query")) {
+      out$.data <- head(out$.data, n)
+    } else {
+      out <- head(out, n)
+    }
+    out
+  }
+}
+
+#' @export
+tail.arrow_dplyr_query <- function(x, n = 6L, ...) {
+  if (query_on_dataset(x)) {
+    tail.Dataset(x, n, ...)
+  } else {
+    out <- collect.arrow_dplyr_query(x, as_data_frame = FALSE)
+    if (inherits(out, "arrow_dplyr_query")) {
+      out$.data <- tail(out$.data, n)
+    } else {
+      out <- tail(out, n)
+    }
+    out
+  }
+}
+
+#' @export
+`[.arrow_dplyr_query` <- function(x, i, j, ..., drop = FALSE) {
+  if (query_on_dataset(x)) {
+    `[.Dataset`(x, i, j, ..., drop = FALSE)
+  } else {
+    stop(
+      "[ method not implemented for queries. Call 'collect(x, as_data_frame = FALSE)' first",
       call. = FALSE
     )
-    rows <- NA_integer_
   }
-  cols <- length(names(x))
-  c(rows, cols)
 }
 
 # The following S3 methods are registered on load if dplyr is present
@@ -198,17 +250,17 @@ filter_mask <- function(.data) {
       force(operator)
       function(e1, e2) make_expression(operator, e1, e2)
     }
-    var_binder <- function(x) FieldExpression$create(x)
+    var_binder <- function(x) Expression$field_ref(x)
   } else {
     comp_func <- function(operator) {
       force(operator)
-      function(e1, e2) array_expression(operator, e1, e2)
+      function(e1, e2) build_array_expression(operator, e1, e2)
     }
     var_binder <- function(x) .data$.data[[x]]
   }
 
   # First add the functions
-  func_names <- set_names(c(names(comparison_function_map), "&", "|", "%in%"))
+  func_names <- set_names(names(.array_function_map))
   env_bind(f_env, !!!lapply(func_names, comp_func))
   # Then add the column references
   # Renaming is handled automatically by the named list
@@ -228,7 +280,7 @@ set_filters <- function(.data, expressions) {
   .data
 }
 
-collect.arrow_dplyr_query <- function(x, ...) {
+collect.arrow_dplyr_query <- function(x, as_data_frame = TRUE, ...) {
   x <- ensure_group_vars(x)
   # Pull only the selected rows and cols into R
   if (query_on_dataset(x)) {
@@ -238,7 +290,9 @@ collect.arrow_dplyr_query <- function(x, ...) {
     # This is a Table/RecordBatch. See record-batch.R for the [ method
     df <- x$.data[x$filtered_rows, x$selected_columns, keep_na = FALSE]
   }
-  df <- as.data.frame(df)
+  if (as_data_frame) {
+    df <- as.data.frame(df)
+  }
   restore_dplyr_features(df, x)
 }
 collect.Table <- as.data.frame.Table
@@ -256,15 +310,24 @@ ensure_group_vars <- function(x) {
 
 restore_dplyr_features <- function(df, query) {
   # An arrow_dplyr_query holds some attributes that Arrow doesn't know about
-  # After pulling data into a data.frame, make sure these features are carried over
+  # After calling collect(), make sure these features are carried over
 
-  # In case variables were renamed, apply those names
-  if (ncol(df)) {
-    names(df) <- names(query)
-  }
-  # Preserve groupings, if present
-  if (length(query$group_by_vars)) {
-    df <- dplyr::grouped_df(df, dplyr::groups(query))
+  grouped <- length(query$group_by_vars) > 0
+  renamed <- !identical(names(df), names(query))
+  if (is.data.frame(df)) {
+    # In case variables were renamed, apply those names
+    if (renamed && ncol(df)) {
+      names(df) <- names(query)
+    }
+    # Preserve groupings, if present
+    if (grouped) {
+      df <- dplyr::grouped_df(df, dplyr::group_vars(query))
+    }
+  } else if (grouped || renamed) {
+    # This is a Table, via collect(as_data_frame = FALSE)
+    df <- arrow_dplyr_query(df)
+    names(df$selected_columns) <- names(query)
+    df$group_by_vars <- query$group_by_vars
   }
   df
 }
@@ -294,9 +357,15 @@ summarise.arrow_dplyr_query <- function(.data, ...) {
 }
 summarise.Dataset <- summarise.Table <- summarise.RecordBatch <- summarise.arrow_dplyr_query
 
-group_by.arrow_dplyr_query <- function(.data, ..., add = FALSE) {
+group_by.arrow_dplyr_query <- function(.data, ..., .add = FALSE, add = .add) {
   .data <- arrow_dplyr_query(.data)
-  .data$group_by_vars <- dplyr::group_by_prepare(.data, ..., add = add)$group_names
+  if (".add" %in% names(formals(dplyr::group_by))) {
+    # dplyr >= 1.0
+    gv <- dplyr::group_by_prepare(.data, ..., .add = .add)$group_names
+  } else {
+    gv <- dplyr::group_by_prepare(.data, ..., add = add)$group_names
+  }
+  .data$group_by_vars <- gv
   .data
 }
 group_by.Dataset <- group_by.Table <- group_by.RecordBatch <- group_by.arrow_dplyr_query
@@ -324,7 +393,6 @@ mutate.arrow_dplyr_query <- function(.data, ...) {
   dplyr::mutate(dplyr::collect(.data), ...)
 }
 mutate.Dataset <- mutate.Table <- mutate.RecordBatch <- mutate.arrow_dplyr_query
-# transmute() "just works" because it calls mutate() internally
 # TODO: add transmute() that does what summarise() does (select only the vars we need)
 
 arrange.arrow_dplyr_query <- function(.data, ...) {

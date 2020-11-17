@@ -17,6 +17,7 @@
 
 ARG arch=amd64
 FROM ${arch}/debian:10
+ARG arch
 
 ENV DEBIAN_FRONTEND noninteractive
 
@@ -27,8 +28,16 @@ RUN \
 ARG llvm
 RUN apt-get update -y -q && \
     apt-get install -y -q --no-install-recommends \
-        autoconf \
+        apt-transport-https \
         ca-certificates \
+        gnupg \
+        wget && \
+    wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
+    echo "deb https://apt.llvm.org/buster/ llvm-toolchain-buster-${llvm} main" > \
+        /etc/apt/sources.list.d/llvm.list && \
+    apt-get update -y -q && \
+    apt-get install -y -q --no-install-recommends \
+        autoconf \
         ccache \
         clang-${llvm} \
         cmake \
@@ -41,6 +50,7 @@ RUN apt-get update -y -q && \
         libbrotli-dev \
         libbz2-dev \
         libc-ares-dev \
+        libcurl4-openssl-dev \
         libgflags-dev \
         libgmock-dev \
         libgoogle-glog-dev \
@@ -50,6 +60,7 @@ RUN apt-get update -y -q && \
         libsnappy-dev \
         libssl-dev \
         libthrift-dev \
+        libutf8proc-dev \
         libzstd-dev \
         llvm-${llvm}-dev \
         make \
@@ -58,10 +69,13 @@ RUN apt-get update -y -q && \
         protobuf-compiler \
         rapidjson-dev \
         tzdata \
-        zlib1g-dev \
-        wget && \
+        zlib1g-dev && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+COPY ci/scripts/install_minio.sh \
+     /arrow/ci/scripts/
+RUN /arrow/ci/scripts/install_minio.sh ${arch} linux latest /usr/local
 
 ENV ARROW_BUILD_TESTS=ON \
     ARROW_DEPENDENCY_SOURCE=SYSTEM \
@@ -72,6 +86,7 @@ ENV ARROW_BUILD_TESTS=ON \
     ARROW_ORC=ON \
     ARROW_PARQUET=ON \
     ARROW_PLASMA=ON \
+    ARROW_S3=ON \
     ARROW_USE_CCACHE=ON \
     ARROW_WITH_BROTLI=ON \
     ARROW_WITH_BZ2=ON \
@@ -79,6 +94,7 @@ ENV ARROW_BUILD_TESTS=ON \
     ARROW_WITH_SNAPPY=ON \
     ARROW_WITH_ZLIB=ON \
     ARROW_WITH_ZSTD=ON \
+    AWSSDK_SOURCE=BUNDLED \
     cares_SOURCE=BUNDLED \
     CC=gcc \
     CXX=g++ \

@@ -79,7 +79,7 @@ def randdecimal(precision, scale):
     Returns
     -------
     decimal_value : decimal.Decimal
-        A random decimal.Decimal object with the specifed precision and scale.
+        A random decimal.Decimal object with the specified precision and scale.
     """
     assert 1 <= precision <= 38, 'precision must be between 1 and 38 inclusive'
     if scale < 0:
@@ -194,3 +194,29 @@ def invoke_script(script_name, *args):
     cmd.extend(args)
 
     subprocess.check_call(cmd, env=subprocess_env)
+
+
+@contextlib.contextmanager
+def changed_environ(name, value):
+    """
+    Temporarily set environment variable *name* to *value*.
+    """
+    orig_value = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        yield
+    finally:
+        if orig_value is None:
+            del os.environ[name]
+        else:
+            os.environ[name] = orig_value
+
+
+@contextlib.contextmanager
+def change_cwd(path):
+    curdir = os.getcwd()
+    os.chdir(str(path))
+    try:
+        yield
+    finally:
+        os.chdir(curdir)

@@ -21,21 +21,33 @@ on:
   push:
     paths:
       - '.github/workflows/ruby.yml'
-      - 'ci/**'
-      - 'cpp/**'
+      - 'ci/docker/**'
+      - 'ci/scripts/c_glib_*'
+      - 'ci/scripts/cpp_*'
+      - 'ci/scripts/msys2_*'
+      - 'ci/scripts/ruby_*'
+      - 'ci/scripts/util_*'
       - 'c_glib/**'
+      - 'cpp/**'
       - 'ruby/**'
   pull_request:
     paths:
       - '.github/workflows/ruby.yml'
-      - 'ci/**'
-      - 'cpp/**'
+      - 'ci/docker/**'
+      - 'ci/scripts/c_glib_*'
+      - 'ci/scripts/cpp_*'
+      - 'ci/scripts/msys2_*'
+      - 'ci/scripts/ruby_*'
+      - 'ci/scripts/util_*'
       - 'c_glib/**'
+      - 'cpp/**'
       - 'ruby/**'
 
 env:
   DOCKER_BUILDKIT: 0
   COMPOSE_DOCKER_CLI_BUILD: 1
+  ARCHERY_DOCKER_USER: ${{ secrets.DOCKERHUB_USER }}
+  ARCHERY_DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
 jobs:
 
@@ -60,30 +72,31 @@ jobs:
       - name: Fetch Submodules and Tags
         shell: bash
         run: ci/scripts/util_checkout.sh
-      - name: Docker Pull
+      - name: Free Up Disk Space
         shell: bash
+        run: ci/scripts/util_cleanup.sh
+      - name: Cache Docker Volumes
+        uses: actions/cache@v1
+        with:
+          path: .docker
+          key: ubuntu-${{ matrix.ubuntu }}-ruby-${{ hashFiles('cpp/**') }}
+          restore-keys: ubuntu-${{ matrix.ubuntu }}-ruby-
+      - name: Setup Python
+        uses: actions/setup-python@v1
+        with:
+          python-version: 3.8
+      - name: Setup Archery
+        run: pip install -e dev/archery[docker]
+      - name: Execute Docker Build
         run: |
-          docker-compose pull --ignore-pull-failures ubuntu-cpp
-          docker-compose pull --ignore-pull-failures ubuntu-c-glib
-          docker-compose pull --ignore-pull-failures ubuntu-ruby
-      - name: Docker Build
-        shell: bash
-        run: |
-          docker-compose build ubuntu-cpp
-          docker-compose build ubuntu-c-glib
-          docker-compose build ubuntu-ruby
-      - name: Docker Run
-        shell: bash
-        run: docker-compose run ubuntu-ruby
+          sudo sysctl -w kernel.core_pattern="core.%e.%p"
+          ulimit -c unlimited
+          archery docker run ubuntu-ruby
       - name: Docker Push
         if: success() && github.event_name == 'push' && github.repository == 'apache/arrow'
         continue-on-error: true
         shell: bash
-        run: |
-          docker login -u ${{ secrets.DOCKERHUB_USER }} \
-                       -p ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-compose push ubuntu-c-glib
-          docker-compose push ubuntu-ruby
+        run: archery docker push ubuntu-ruby
 
   macos:
     name: AMD64 MacOS 10.15 GLib & Ruby
@@ -117,7 +130,7 @@ jobs:
       - name: Install Dependencies
         shell: bash
         run: |
-          brew update
+          brew update --preinstall
           brew bundle --file=cpp/Brewfile
           brew bundle --file=c_glib/Brewfile
           bundle install --gemfile c_glib/Gemfile
@@ -151,15 +164,17 @@ jobs:
     env:
       ARROW_BUILD_SHARED: ON
       ARROW_BUILD_STATIC: OFF
-      ARROW_BUILD_TYPE: release
       ARROW_BUILD_TESTS: OFF
+      ARROW_BUILD_TYPE: release
       ARROW_DATASET: ON
       ARROW_FLIGHT: ON
+      ARROW_GANDIVA: ON
       ARROW_HDFS: OFF
       ARROW_HOME: /mingw${{ matrix.mingw-n-bits }}
       ARROW_JEMALLOC: OFF
       ARROW_PARQUET: ON
       ARROW_PYTHON: OFF
+      ARROW_S3: ON
       ARROW_USE_GLOG: OFF
       ARROW_WITH_BROTLI: ON
       ARROW_WITH_BZ2: ON
@@ -173,7 +188,6 @@ jobs:
       CMAKE_ARGS: >-
         -DARROW_PACKAGE_PREFIX=/mingw${{ matrix.mingw-n-bits }}
         -DBoost_NO_BOOST_CMAKE=ON
-      CMAKE_GENERATOR: MSYS Makefiles
       CMAKE_UNITY_BUILD: ON
     steps:
       - name: Disable Crash Dialogs
@@ -195,10 +209,23 @@ jobs:
         uses: actions/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby-version }}
+      - name: Upgrade MSYS2 (phase1)
+        run: |
+          ridk exec bash ci\scripts\msys2_system_upgrade_phase1.sh
+          taskkill /F /FI "MODULES eq msys-2.0.dll"
+      - name: Upgrade MSYS2 (phase2)
+        run: |
+          ridk exec bash ci\scripts\msys2_system_upgrade_phase2.sh
+          taskkill /F /FI "MODULES eq msys-2.0.dll"
       - name: Setup MSYS2
         run: |
-          ridk exec bash ci\scripts\msys2_system_upgrade.sh
           ridk exec bash ci\scripts\msys2_setup.sh ruby
+      - name: Cache ccache
+        uses: actions/cache@v1
+        with:
+          path: ccache
+          key: ruby-ccache-mingw${{ matrix.mingw-n-bits }}-${{ hashFiles('cpp/**') }}
+          restore-keys: ruby-ccache-mingw${{ matrix.mingw-n-bits }}-
       - name: Build C++
         run: |
           $Env:CMAKE_BUILD_PARALLEL_LEVEL = $Env:NUMBER_OF_PROCESSORS

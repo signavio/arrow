@@ -18,6 +18,7 @@
 #include "arrow/c/bridge.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -37,8 +38,8 @@
 #include "arrow/util/key_value_metadata.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/macros.h"
-#include "arrow/util/parsing.h"
 #include "arrow/util/string_view.h"
+#include "arrow/util/value_parsing.h"
 #include "arrow/visitor_inline.h"
 
 namespace arrow {
@@ -171,7 +172,7 @@ struct SchemaExporter {
 
     const DataType& type = *field.type();
     RETURN_NOT_OK(ExportFormat(type));
-    RETURN_NOT_OK(ExportChildren(type.children()));
+    RETURN_NOT_OK(ExportChildren(type.fields()));
     RETURN_NOT_OK(ExportMetadata(field.metadata().get()));
     return Status::OK();
   }
@@ -180,7 +181,7 @@ struct SchemaExporter {
     flags_ = ARROW_FLAG_NULLABLE;
 
     RETURN_NOT_OK(ExportFormat(type));
-    RETURN_NOT_OK(ExportChildren(type.children()));
+    RETURN_NOT_OK(ExportChildren(type.fields()));
     return Status::OK();
   }
 
@@ -303,9 +304,16 @@ struct SchemaExporter {
     return SetFormat("w:" + std::to_string(type.byte_width()));
   }
 
-  Status Visit(const Decimal128Type& type) {
-    return SetFormat("d:" + std::to_string(type.precision()) + "," +
-                     std::to_string(type.scale()));
+  Status Visit(const DecimalType& type) {
+    if (type.bit_width() == 128) {
+      // 128 is the default bit-width
+      return SetFormat("d:" + std::to_string(type.precision()) + "," +
+                       std::to_string(type.scale()));
+    } else {
+      return SetFormat("d:" + std::to_string(type.precision()) + "," +
+                       std::to_string(type.scale()) + "," +
+                       std::to_string(type.bit_width()));
+    }
   }
 
   Status Visit(const BinaryType& type) { return SetFormat("z"); }
@@ -503,6 +511,10 @@ void ReleaseExportedArray(struct ArrowArray* array) {
 
 struct ArrayExporter {
   Status Export(const std::shared_ptr<ArrayData>& data) {
+    // Force computing null count.
+    // This is because ARROW-9037 is in version 0.17 and 0.17.1, and they are
+    // not able to import arrays without a null bitmap and null_count == -1.
+    data->GetNullCount();
     // Store buffer pointers
     export_.buffers_.resize(data->buffers.size());
     std::transform(data->buffers.begin(), data->buffers.end(), export_.buffers_.begin(),
@@ -513,7 +525,7 @@ struct ArrayExporter {
     // Export dictionary
     if (data->dictionary != nullptr) {
       dict_exporter_.reset(new ArrayExporter());
-      RETURN_NOT_OK(dict_exporter_->Export(data->dictionary->data()));
+      RETURN_NOT_OK(dict_exporter_->Export(data->dictionary));
     }
 
     // Export children
@@ -652,9 +664,8 @@ class FormatStringParser {
   template <typename IntType = int32_t>
   Result<IntType> ParseInt(util::string_view v) {
     using ArrowIntType = typename CTypeTraits<IntType>::ArrowType;
-    internal::StringConverter<ArrowIntType> converter;
     IntType value;
-    if (!converter(v.data(), v.size(), &value)) {
+    if (!internal::ParseValue<ArrowIntType>(v.data(), v.size(), &value)) {
       return Invalid();
     }
     return value;
@@ -714,7 +725,7 @@ Result<std::shared_ptr<KeyValueMetadata>> DecodeMetadata(const char* metadata) {
     int32_t v;
     memcpy(&v, metadata, 4);
     metadata += 4;
-    *out = BitUtil::FromLittleEndian(v);
+    *out = v;
     if (*out < 0) {
       return Status::Invalid("Invalid encoded metadata string");
     }
@@ -776,7 +787,7 @@ struct SchemaImporter {
           type_->ToString());
     }
     ARROW_ASSIGN_OR_RAISE(auto metadata, DecodeMetadata(c_struct_->metadata));
-    return schema(type_->children(), std::move(metadata));
+    return schema(type_->fields(), std::move(metadata));
   }
 
   Result<std::shared_ptr<DataType>> MakeType() const { return type_; }
@@ -814,13 +825,9 @@ struct SchemaImporter {
     // Import dictionary type
     if (c_struct_->dictionary != nullptr) {
       // Check this index type
-      bool indices_ok = false;
-      if (is_integer(type_->id())) {
-        indices_ok = checked_cast<const IntegerType&>(*type_).is_signed();
-      }
-      if (!indices_ok) {
+      if (!is_integer(type_->id())) {
         return Status::Invalid(
-            "ArrowSchema struct has a dictionary but is not a signed integer type: ",
+            "ArrowSchema struct has a dictionary but is not an integer type: ",
             type_->ToString());
       }
       SchemaImporter dict_importer;
@@ -973,13 +980,20 @@ struct SchemaImporter {
   Status ProcessDecimal() {
     RETURN_NOT_OK(f_parser_.CheckNext(':'));
     ARROW_ASSIGN_OR_RAISE(auto prec_scale, f_parser_.ParseInts(f_parser_.Rest()));
-    if (prec_scale.size() != 2) {
+    // 3 elements indicates bit width was communicated as well.
+    if (prec_scale.size() != 2 && prec_scale.size() != 3) {
       return f_parser_.Invalid();
     }
     if (prec_scale[0] <= 0 || prec_scale[1] <= 0) {
       return f_parser_.Invalid();
     }
-    type_ = decimal(prec_scale[0], prec_scale[1]);
+    if (prec_scale.size() == 2 || prec_scale[2] == 128) {
+      type_ = decimal(prec_scale[0], prec_scale[1]);
+    } else if (prec_scale[2] == 256) {
+      type_ = decimal256(prec_scale[0], prec_scale[1]);
+    } else {
+      return f_parser_.Invalid();
+    }
     return Status::OK();
   }
 
@@ -1007,13 +1021,13 @@ struct SchemaImporter {
       return Status::Invalid("Imported map array has unexpected child field type: ",
                              field->ToString());
     }
-    if (value_type->num_children() != 2) {
+    if (value_type->num_fields() != 2) {
       return Status::Invalid("Imported map array has unexpected child field type: ",
                              field->ToString());
     }
 
     bool keys_sorted = (c_struct_->flags & ARROW_FLAG_MAP_KEYS_SORTED);
-    type_ = map(value_type->child(0)->type(), value_type->child(1)->type(), keys_sorted);
+    type_ = map(value_type->field(0)->type(), value_type->field(1)->type(), keys_sorted);
     return Status::OK();
   }
 
@@ -1064,7 +1078,11 @@ struct SchemaImporter {
                                c_struct_->format, "'");
       }
     }
-    type_ = union_(std::move(fields), std::move(type_codes), mode);
+    if (mode == UnionMode::SPARSE) {
+      type_ = sparse_union(std::move(fields), std::move(type_codes));
+    } else {
+      type_ = dense_union(std::move(fields), std::move(type_codes));
+    }
     return Status::OK();
   }
 
@@ -1192,9 +1210,14 @@ struct ArrayImporter {
     return ::arrow::MakeArray(data_);
   }
 
+  std::shared_ptr<ArrayData> GetArrayData() {
+    DCHECK_NE(data_, nullptr);
+    return data_;
+  }
+
   Result<std::shared_ptr<RecordBatch>> MakeRecordBatch(std::shared_ptr<Schema> schema) {
     DCHECK_NE(data_, nullptr);
-    if (data_->null_count != 0) {
+    if (data_->GetNullCount() != 0) {
       return Status::Invalid(
           "ArrowArray struct has non-zero null count, "
           "cannot be imported as RecordBatch");
@@ -1232,7 +1255,7 @@ struct ArrayImporter {
 
   Status DoImport() {
     // First import children (required for reconstituting parent array data)
-    const auto& fields = type_->children();
+    const auto& fields = type_->fields();
     if (c_struct_->n_children != static_cast<int64_t>(fields.size())) {
       return Status::Invalid("ArrowArray struct has ", c_struct_->n_children,
                              " children, expected ", fields.size(), " for type ",
@@ -1258,7 +1281,7 @@ struct ArrayImporter {
       // Import dictionary values
       ArrayImporter dict_importer(dict_type.value_type());
       RETURN_NOT_OK(dict_importer.ImportDict(this, c_struct_->dictionary));
-      ARROW_ASSIGN_OR_RAISE(data_->dictionary, dict_importer.MakeArray());
+      data_->dictionary = dict_importer.GetArrayData();
     } else {
       if (is_dict_type) {
         return Status::Invalid("Import type is ", type_->ToString(),
@@ -1314,14 +1337,16 @@ struct ArrayImporter {
 
   Status Visit(const UnionType& type) {
     auto mode = type.mode();
-    RETURN_NOT_OK(CheckNumBuffers(3));
+    if (mode == UnionMode::SPARSE) {
+      RETURN_NOT_OK(CheckNumBuffers(2));
+    } else {
+      RETURN_NOT_OK(CheckNumBuffers(3));
+    }
     RETURN_NOT_OK(AllocateArrayData());
     RETURN_NOT_OK(ImportNullBitmap());
     RETURN_NOT_OK(ImportFixedSizeBuffer(1, sizeof(int8_t)));
     if (mode == UnionMode::DENSE) {
       RETURN_NOT_OK(ImportFixedSizeBuffer(2, sizeof(int32_t)));
-    } else {
-      RETURN_NOT_OK(ImportUnusedBuffer(2));
     }
     return Status::OK();
   }
@@ -1397,7 +1422,7 @@ struct ArrayImporter {
 
   Status ImportNullBitmap(int32_t buffer_id = 0) {
     RETURN_NOT_OK(ImportBitsBuffer(buffer_id));
-    if (data_->null_count != 0 && data_->buffers[buffer_id] == nullptr) {
+    if (data_->null_count > 0 && data_->buffers[buffer_id] == nullptr) {
       return Status::Invalid(
           "ArrowArray struct has null bitmap buffer but non-zero null_count ",
           data_->null_count);
@@ -1410,8 +1435,6 @@ struct ArrayImporter {
     int64_t buffer_size = BitUtil::BytesForBits(c_struct_->length + c_struct_->offset);
     return ImportBuffer(buffer_id, buffer_size);
   }
-
-  Status ImportUnusedBuffer(int32_t buffer_id) { return ImportBuffer(buffer_id, 0); }
 
   Status ImportFixedSizeBuffer(int32_t buffer_id, int64_t byte_width) {
     // Compute visible size of buffer
@@ -1491,6 +1514,199 @@ Result<std::shared_ptr<RecordBatch>> ImportRecordBatch(struct ArrowArray* array,
     return maybe_schema.status();
   }
   return ImportRecordBatch(array, *maybe_schema);
+}
+
+//////////////////////////////////////////////////////////////////////////
+// C stream export
+
+namespace {
+
+class ExportedArrayStream {
+ public:
+  struct PrivateData {
+    explicit PrivateData(std::shared_ptr<RecordBatchReader> reader)
+        : reader_(std::move(reader)) {}
+
+    std::shared_ptr<RecordBatchReader> reader_;
+    std::string last_error_;
+
+    PrivateData() = default;
+    ARROW_DISALLOW_COPY_AND_ASSIGN(PrivateData);
+  };
+
+  explicit ExportedArrayStream(struct ArrowArrayStream* stream) : stream_(stream) {}
+
+  Status GetSchema(struct ArrowSchema* out_schema) {
+    return ExportSchema(*reader()->schema(), out_schema);
+  }
+
+  Status GetNext(struct ArrowArray* out_array) {
+    std::shared_ptr<RecordBatch> batch;
+    RETURN_NOT_OK(reader()->ReadNext(&batch));
+    if (batch == nullptr) {
+      // End of stream
+      ArrowArrayMarkReleased(out_array);
+      return Status::OK();
+    } else {
+      return ExportRecordBatch(*batch, out_array);
+    }
+  }
+
+  const char* GetLastError() {
+    const auto& last_error = private_data()->last_error_;
+    return last_error.empty() ? nullptr : last_error.c_str();
+  }
+
+  void Release() {
+    if (ArrowArrayStreamIsReleased(stream_)) {
+      return;
+    }
+    DCHECK_NE(private_data(), nullptr);
+    delete private_data();
+
+    ArrowArrayStreamMarkReleased(stream_);
+  }
+
+  // C-compatible callbacks
+
+  static int StaticGetSchema(struct ArrowArrayStream* stream,
+                             struct ArrowSchema* out_schema) {
+    ExportedArrayStream self{stream};
+    return self.ToCError(self.GetSchema(out_schema));
+  }
+
+  static int StaticGetNext(struct ArrowArrayStream* stream,
+                           struct ArrowArray* out_array) {
+    ExportedArrayStream self{stream};
+    return self.ToCError(self.GetNext(out_array));
+  }
+
+  static void StaticRelease(struct ArrowArrayStream* stream) {
+    ExportedArrayStream{stream}.Release();
+  }
+
+  static const char* StaticGetLastError(struct ArrowArrayStream* stream) {
+    return ExportedArrayStream{stream}.GetLastError();
+  }
+
+ private:
+  int ToCError(const Status& status) {
+    if (ARROW_PREDICT_TRUE(status.ok())) {
+      private_data()->last_error_.clear();
+      return 0;
+    }
+    private_data()->last_error_ = status.ToString();
+    switch (status.code()) {
+      case StatusCode::IOError:
+        return EIO;
+      case StatusCode::NotImplemented:
+        return ENOSYS;
+      case StatusCode::OutOfMemory:
+        return ENOMEM;
+      default:
+        return EINVAL;  // Fallback for Invalid, TypeError, etc.
+    }
+  }
+
+  PrivateData* private_data() {
+    return reinterpret_cast<PrivateData*>(stream_->private_data);
+  }
+
+  const std::shared_ptr<RecordBatchReader>& reader() { return private_data()->reader_; }
+
+  struct ArrowArrayStream* stream_;
+};
+
+}  // namespace
+
+Status ExportRecordBatchReader(std::shared_ptr<RecordBatchReader> reader,
+                               struct ArrowArrayStream* out) {
+  out->get_schema = ExportedArrayStream::StaticGetSchema;
+  out->get_next = ExportedArrayStream::StaticGetNext;
+  out->get_last_error = ExportedArrayStream::StaticGetLastError;
+  out->release = ExportedArrayStream::StaticRelease;
+  out->private_data = new ExportedArrayStream::PrivateData{std::move(reader)};
+  return Status::OK();
+}
+
+//////////////////////////////////////////////////////////////////////////
+// C stream import
+
+namespace {
+
+class ArrayStreamBatchReader : public RecordBatchReader {
+ public:
+  explicit ArrayStreamBatchReader(struct ArrowArrayStream* stream) {
+    ArrowArrayStreamMove(stream, &stream_);
+    DCHECK(!ArrowArrayStreamIsReleased(&stream_));
+  }
+
+  ~ArrayStreamBatchReader() {
+    ArrowArrayStreamRelease(&stream_);
+    DCHECK(ArrowArrayStreamIsReleased(&stream_));
+  }
+
+  std::shared_ptr<Schema> schema() const override { return CacheSchema(); }
+
+  Status ReadNext(std::shared_ptr<RecordBatch>* batch) override {
+    struct ArrowArray c_array;
+    RETURN_NOT_OK(StatusFromCError(stream_.get_next(&stream_, &c_array)));
+    if (ArrowArrayIsReleased(&c_array)) {
+      // End of stream
+      batch->reset();
+      return Status::OK();
+    } else {
+      return ImportRecordBatch(&c_array, CacheSchema()).Value(batch);
+    }
+  }
+
+ private:
+  std::shared_ptr<Schema> CacheSchema() const {
+    if (!schema_) {
+      struct ArrowSchema c_schema;
+      ARROW_CHECK_OK(StatusFromCError(stream_.get_schema(&stream_, &c_schema)));
+      schema_ = ImportSchema(&c_schema).ValueOrDie();
+    }
+    return schema_;
+  }
+
+  Status StatusFromCError(int errno_like) const {
+    if (ARROW_PREDICT_TRUE(errno_like == 0)) {
+      return Status::OK();
+    }
+    StatusCode code;
+    switch (errno_like) {
+      case EDOM:
+      case EINVAL:
+      case ERANGE:
+        code = StatusCode::Invalid;
+        break;
+      case ENOMEM:
+        code = StatusCode::OutOfMemory;
+        break;
+      case ENOSYS:
+        code = StatusCode::NotImplemented;
+      default:
+        code = StatusCode::IOError;
+        break;
+    }
+    const char* last_error = stream_.get_last_error(&stream_);
+    return Status(code, last_error ? std::string(last_error) : "");
+  }
+
+  mutable struct ArrowArrayStream stream_;
+  mutable std::shared_ptr<Schema> schema_;
+};
+
+}  // namespace
+
+Result<std::shared_ptr<RecordBatchReader>> ImportRecordBatchReader(
+    struct ArrowArrayStream* stream) {
+  if (ArrowArrayStreamIsReleased(stream)) {
+    return Status::Invalid("Cannot import released ArrowArrayStream");
+  }
+  // XXX should we call get_schema() here to avoid crashing on error?
+  return std::make_shared<ArrayStreamBatchReader>(stream);
 }
 
 }  // namespace arrow

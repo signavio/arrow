@@ -17,18 +17,22 @@
 
 package org.apache.arrow.vector.compare;
 
+import static org.apache.arrow.memory.util.LargeMemoryUtil.checkedCastToInt;
+
 import java.util.List;
 import java.util.function.BiFunction;
 
 import org.apache.arrow.memory.util.ByteFunctionHelpers;
 import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.vector.BaseFixedWidthVector;
+import org.apache.arrow.vector.BaseLargeVariableWidthVector;
 import org.apache.arrow.vector.BaseVariableWidthVector;
 import org.apache.arrow.vector.NullVector;
 import org.apache.arrow.vector.ValueVector;
 import org.apache.arrow.vector.complex.BaseRepeatedValueVector;
 import org.apache.arrow.vector.complex.DenseUnionVector;
 import org.apache.arrow.vector.complex.FixedSizeListVector;
+import org.apache.arrow.vector.complex.LargeListVector;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.NonNullableStructVector;
 import org.apache.arrow.vector.complex.UnionVector;
@@ -147,6 +151,14 @@ public class RangeEqualsVisitor implements VectorVisitor<Boolean, Range> {
   }
 
   @Override
+  public Boolean visit(BaseLargeVariableWidthVector left, Range range) {
+    if (!validate(left)) {
+      return false;
+    }
+    return compareBaseLargeVariableWidthVectors(range);
+  }
+
+  @Override
   public Boolean visit(ListVector left, Range range) {
     if (!validate(left)) {
       return false;
@@ -160,6 +172,14 @@ public class RangeEqualsVisitor implements VectorVisitor<Boolean, Range> {
       return false;
     }
     return compareFixedSizeListVectors(range);
+  }
+
+  @Override
+  public Boolean visit(LargeListVector left, Range range) {
+    if (!validate(left)) {
+      return false;
+    }
+    return compareLargeListVectors(range);
   }
 
   @Override
@@ -368,6 +388,39 @@ public class RangeEqualsVisitor implements VectorVisitor<Boolean, Range> {
     return true;
   }
 
+  protected boolean compareBaseLargeVariableWidthVectors(Range range) {
+    BaseLargeVariableWidthVector leftVector = (BaseLargeVariableWidthVector) left;
+    BaseLargeVariableWidthVector rightVector = (BaseLargeVariableWidthVector) right;
+
+    for (int i = 0; i < range.getLength(); i++) {
+      int leftIndex = range.getLeftStart() + i;
+      int rightIndex = range.getRightStart() + i;
+
+      boolean isNull = leftVector.isNull(leftIndex);
+      if (isNull != rightVector.isNull(rightIndex)) {
+        return false;
+      }
+
+      int offsetWidth = BaseLargeVariableWidthVector.OFFSET_WIDTH;
+
+      if (!isNull) {
+        final long startIndexLeft = leftVector.getOffsetBuffer().getLong((long) leftIndex * offsetWidth);
+        final long endIndexLeft = leftVector.getOffsetBuffer().getLong((long) (leftIndex + 1) * offsetWidth);
+
+        final long startIndexRight = rightVector.getOffsetBuffer().getLong((long) rightIndex * offsetWidth);
+        final long endIndexRight = rightVector.getOffsetBuffer().getLong((long) (rightIndex + 1) * offsetWidth);
+
+        int ret = ByteFunctionHelpers.equal(leftVector.getDataBuffer(), startIndexLeft, endIndexLeft,
+            rightVector.getDataBuffer(), startIndexRight, endIndexRight);
+
+        if (ret == 0) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   protected boolean compareListVectors(Range range) {
     ListVector leftVector = (ListVector) left;
     ListVector rightVector = (ListVector) right;
@@ -445,6 +498,48 @@ public class RangeEqualsVisitor implements VectorVisitor<Boolean, Range> {
 
         innerRange = innerRange.setLeftStart(startIndexLeft)
             .setRightStart(startIndexRight);
+        if (!innerVisitor.rangeEquals(innerRange)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  protected boolean compareLargeListVectors(Range range) {
+    LargeListVector leftVector = (LargeListVector) left;
+    LargeListVector rightVector = (LargeListVector) right;
+
+    RangeEqualsVisitor innerVisitor =
+        createInnerVisitor(leftVector.getDataVector(), rightVector.getDataVector(), /*type comparator*/ null);
+    Range innerRange = new Range();
+
+    for (int i = 0; i < range.getLength(); i++) {
+      int leftIndex = range.getLeftStart() + i;
+      int rightIndex = range.getRightStart() + i;
+
+      boolean isNull = leftVector.isNull(leftIndex);
+      if (isNull != rightVector.isNull(rightIndex)) {
+        return false;
+      }
+
+      long offsetWidth = LargeListVector.OFFSET_WIDTH;
+
+      if (!isNull) {
+        final long startIndexLeft = leftVector.getOffsetBuffer().getLong((long) leftIndex * offsetWidth);
+        final long endIndexLeft = leftVector.getOffsetBuffer().getLong((long) (leftIndex + 1) * offsetWidth);
+
+        final long startIndexRight = rightVector.getOffsetBuffer().getLong((long) rightIndex * offsetWidth);
+        final long endIndexRight = rightVector.getOffsetBuffer().getLong((long) (rightIndex + 1) * offsetWidth);
+
+        if ((endIndexLeft - startIndexLeft) != (endIndexRight - startIndexRight)) {
+          return false;
+        }
+
+        innerRange = innerRange // TODO revisit these casts when long indexing is finished
+            .setRightStart(checkedCastToInt(startIndexRight))
+            .setLeftStart(checkedCastToInt(startIndexLeft))
+            .setLength(checkedCastToInt(endIndexLeft - startIndexLeft));
         if (!innerVisitor.rangeEquals(innerRange)) {
           return false;
         }

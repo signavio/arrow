@@ -17,287 +17,104 @@
 
 #pragma once
 
+#include <cpp11/R.hpp>
+
+#include "./arrow_cpp11.h"
+
+#if defined(ARROW_R_WITH_ARROW)
+
+#include <arrow/buffer.h>  // for RBuffer definition below
+#include <arrow/c/bridge.h>
+#include <arrow/result.h>
+#include <arrow/type_fwd.h>
+
 #include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include <RcppCommon.h>
-#undef Free
-
-namespace arrow {
-namespace r {
-struct symbols {
-  static SEXP units;
-  static SEXP tzone;
-  static SEXP xp;
-  static SEXP dot_Internal;
-  static SEXP inspect;
-  static SEXP row_names;
-};
-
-struct data {
-  static SEXP classes_POSIXct;
-};
-
-}  // namespace r
-}  // namespace arrow
-
-#define STOP_IF_NOT(TEST, MSG)    \
-  do {                            \
-    if (!(TEST)) Rcpp::stop(MSG); \
-  } while (0)
-
-#define STOP_IF_NOT_OK(status) StopIfNotOk(status)
-#define VALUE_OR_STOP(result) ValueOrStop(result)
-
-template <typename T>
-struct NoDelete {
-  inline void operator()(T* ptr) {}
-};
-
-namespace Rcpp {
-namespace internal {
-
-template <typename Pointer>
-Pointer r6_to_smart_pointer(SEXP self) {
-  return reinterpret_cast<Pointer>(
-      EXTPTR_PTR(Rf_findVarInFrame(self, arrow::r::symbols::xp)));
-}
-
-}  // namespace internal
-
-template <typename T>
-class ConstReferenceSmartPtrInputParameter {
- public:
-  using const_reference = const T&;
-
-  explicit ConstReferenceSmartPtrInputParameter(SEXP self)
-      : ptr(internal::r6_to_smart_pointer<const T*>(self)) {}
-
-  inline operator const_reference() { return *ptr; }
-
- private:
-  const T* ptr;
-};
-
-template <typename T>
-class ConstReferenceVectorSmartPtrInputParameter {
- public:
-  using const_reference = const std::vector<T>&;
-
-  explicit ConstReferenceVectorSmartPtrInputParameter(SEXP self) : vec() {
-    R_xlen_t n = XLENGTH(self);
-    for (R_xlen_t i = 0; i < n; i++) {
-      vec.push_back(*internal::r6_to_smart_pointer<const T*>(VECTOR_ELT(self, i)));
-    }
-  }
-
-  inline operator const_reference() { return vec; }
-
- private:
-  std::vector<T> vec;
-};
-
-namespace traits {
-
-template <typename T>
-struct input_parameter<const std::shared_ptr<T>&> {
-  typedef typename Rcpp::ConstReferenceSmartPtrInputParameter<std::shared_ptr<T>> type;
-};
-
-template <typename T>
-struct input_parameter<const std::unique_ptr<T>&> {
-  typedef typename Rcpp::ConstReferenceSmartPtrInputParameter<std::unique_ptr<T>> type;
-};
-
-template <typename T>
-struct input_parameter<const std::vector<std::shared_ptr<T>>&> {
-  typedef typename Rcpp::ConstReferenceVectorSmartPtrInputParameter<std::shared_ptr<T>>
-      type;
-};
-
-struct wrap_type_shared_ptr_tag {};
-struct wrap_type_unique_ptr_tag {};
-
-template <typename T>
-struct wrap_type_traits<std::shared_ptr<T>> {
-  using wrap_category = wrap_type_shared_ptr_tag;
-};
-
-template <typename T>
-struct wrap_type_traits<std::unique_ptr<T>> {
-  using wrap_category = wrap_type_unique_ptr_tag;
-};
-
-}  // namespace traits
-
-namespace internal {
-
-template <typename T>
-inline SEXP wrap_dispatch(const T& x, Rcpp::traits::wrap_type_shared_ptr_tag);
-
-template <typename T>
-inline SEXP wrap_dispatch(const T& x, Rcpp::traits::wrap_type_unique_ptr_tag);
-
-}  // namespace internal
-}  // namespace Rcpp
-
-#include <Rcpp.h>
-
-namespace Rcpp {
-namespace internal {
-
-template <typename T>
-inline SEXP wrap_dispatch(const T& x, Rcpp::traits::wrap_type_shared_ptr_tag) {
-  return Rcpp::XPtr<std::shared_ptr<typename T::element_type>>(
-      new std::shared_ptr<typename T::element_type>(x));
-}
-
-template <typename T>
-inline SEXP wrap_dispatch(const T& x, Rcpp::traits::wrap_type_unique_ptr_tag) {
-  return Rcpp::XPtr<std::unique_ptr<typename T::element_type>>(
-      new std::unique_ptr<typename T::element_type>(const_cast<T&>(x).release()));
-}
-
-}  // namespace internal
-
-}  // namespace Rcpp
-
-namespace Rcpp {
-using NumericVector_ = Rcpp::Vector<REALSXP, Rcpp::NoProtectStorage>;
-using IntegerVector_ = Rcpp::Vector<INTSXP, Rcpp::NoProtectStorage>;
-using LogicalVector_ = Rcpp::Vector<LGLSXP, Rcpp::NoProtectStorage>;
-using StringVector_ = Rcpp::Vector<STRSXP, Rcpp::NoProtectStorage>;
-using CharacterVector_ = StringVector_;
-using RawVector_ = Rcpp::Vector<RAWSXP, Rcpp::NoProtectStorage>;
-using List_ = Rcpp::Vector<VECSXP, Rcpp::NoProtectStorage>;
-
-template <int RTYPE>
-inline constexpr typename Rcpp::Vector<RTYPE>::stored_type default_value() {
-  return Rcpp::Vector<RTYPE>::get_na();
-}
-template <>
-inline constexpr Rbyte default_value<RAWSXP>() {
-  return 0;
-}
-
-}  // namespace Rcpp
-
-namespace arrow {
-namespace r {
-
-template <typename T>
-inline std::shared_ptr<T> extract(SEXP x) {
-  return Rcpp::ConstReferenceSmartPtrInputParameter<std::shared_ptr<T>>(x);
-}
-
-}  // namespace r
-}  // namespace arrow
-
-#if defined(ARROW_R_WITH_ARROW)
-#include <arrow/api.h>
-#include <arrow/c/bridge.h>
-#include <arrow/compute/api.h>
-#include <arrow/csv/reader.h>
-#include <arrow/dataset/api.h>
-#include <arrow/filesystem/filesystem.h>
-#include <arrow/filesystem/localfs.h>
-#include <arrow/io/compressed.h>
-#include <arrow/io/file.h>
-#include <arrow/io/memory.h>
-#include <arrow/ipc/feather.h>
-#include <arrow/ipc/reader.h>
-#include <arrow/ipc/writer.h>
-#include <arrow/json/reader.h>
-#include <arrow/result.h>
-#include <arrow/type.h>
-#include <arrow/type_fwd.h>
-#include <arrow/util/checked_cast.h>
-#include <arrow/util/compression.h>
-#include <arrow/util/iterator.h>
-#include <arrow/util/ubsan.h>
-#include <arrow/visitor_inline.h>
-#include <parquet/arrow/reader.h>
-#include <parquet/arrow/writer.h>
-#include <parquet/exception.h>
-
-RCPP_EXPOSED_ENUM_NODECL(arrow::Type::type)
-RCPP_EXPOSED_ENUM_NODECL(arrow::DateUnit)
-RCPP_EXPOSED_ENUM_NODECL(arrow::TimeUnit::type)
-RCPP_EXPOSED_ENUM_NODECL(arrow::StatusCode)
-RCPP_EXPOSED_ENUM_NODECL(arrow::io::FileMode::type)
-RCPP_EXPOSED_ENUM_NODECL(arrow::ipc::Message::Type)
-RCPP_EXPOSED_ENUM_NODECL(arrow::Compression::type)
-RCPP_EXPOSED_ENUM_NODECL(arrow::fs::FileType)
-RCPP_EXPOSED_ENUM_NODECL(parquet::ParquetVersion::type)
-
 SEXP ChunkedArray__as_vector(const std::shared_ptr<arrow::ChunkedArray>& chunked_array);
 SEXP Array__as_vector(const std::shared_ptr<arrow::Array>& array);
 std::shared_ptr<arrow::Array> Array__from_vector(SEXP x, SEXP type);
 std::shared_ptr<arrow::RecordBatch> RecordBatch__from_arrays(SEXP, SEXP);
-std::shared_ptr<arrow::RecordBatch> RecordBatch__from_dataframe(Rcpp::DataFrame tbl);
-
-namespace ds = ::arrow::dataset;
-namespace fs = ::arrow::fs;
+arrow::MemoryPool* gc_memory_pool();
 
 namespace arrow {
 
-template <typename R>
-auto ValueOrStop(R&& result) -> decltype(std::forward<R>(result).ValueOrDie()) {
-  STOP_IF_NOT_OK(result.status());
-  return std::forward<R>(result).ValueOrDie();
-}
-
 static inline void StopIfNotOk(const Status& status) {
   if (!(status.ok())) {
-    Rcpp::stop(status.ToString());
+    cpp11::stop(status.ToString());
   }
 }
 
+template <typename R>
+auto ValueOrStop(R&& result) -> decltype(std::forward<R>(result).ValueOrDie()) {
+  StopIfNotOk(result.status());
+  return std::forward<R>(result).ValueOrDie();
+}
+
 namespace r {
+
+std::shared_ptr<arrow::DataType> InferArrowType(SEXP x);
 
 Status count_fields(SEXP lst, int* out);
 
 std::shared_ptr<arrow::Array> Array__from_vector(
     SEXP x, const std::shared_ptr<arrow::DataType>& type, bool type_inferred);
 
-template <typename T>
-std::vector<std::shared_ptr<T>> List_to_shared_ptr_vector(SEXP x) {
-  std::vector<std::shared_ptr<T>> vec;
-  R_xlen_t n = Rf_xlength(x);
-  for (R_xlen_t i = 0; i < n; i++) {
-    Rcpp::ConstReferenceSmartPtrInputParameter<std::shared_ptr<T>> ptr(VECTOR_ELT(x, i));
-    vec.push_back(ptr);
-  }
-  return vec;
-}
-
 void inspect(SEXP obj);
 
 // the integer64 sentinel
 constexpr int64_t NA_INT64 = std::numeric_limits<int64_t>::min();
 
-template <int RTYPE, typename Vec = Rcpp::Vector<RTYPE>>
+template <typename RVector>
 class RBuffer : public MutableBuffer {
  public:
-  explicit RBuffer(Vec vec)
-      : MutableBuffer(reinterpret_cast<uint8_t*>(vec.begin()),
-                      vec.size() * sizeof(typename Vec::stored_type)),
+  explicit RBuffer(RVector vec)
+      : MutableBuffer(reinterpret_cast<uint8_t*>(DATAPTR(vec)),
+                      vec.size() * sizeof(typename RVector::value_type),
+                      arrow::CPUDevice::memory_manager(gc_memory_pool())),
         vec_(vec) {}
 
  private:
   // vec_ holds the memory
-  Vec vec_;
+  RVector vec_;
 };
 
 std::shared_ptr<arrow::DataType> InferArrowTypeFromFactor(SEXP);
 
-void validate_slice_offset(int offset, int len);
+void validate_slice_offset(R_xlen_t offset, int64_t len);
 
-void validate_slice_length(int length, int available);
+void validate_slice_length(R_xlen_t length, int64_t available);
 
 void validate_index(int i, int len);
+
+template <typename Lambda>
+void TraverseDots(cpp11::list dots, int num_fields, Lambda lambda) {
+  cpp11::strings names(dots.attr(R_NamesSymbol));
+
+  for (R_xlen_t i = 0, j = 0; j < num_fields; i++) {
+    auto name_i = names[i];
+
+    if (name_i.size() == 0) {
+      cpp11::list x_i = dots[i];
+      cpp11::strings names_x_i(x_i.attr(R_NamesSymbol));
+      R_xlen_t n_i = x_i.size();
+      for (R_xlen_t k = 0; k < n_i; k++, j++) {
+        lambda(j, x_i[k], names_x_i[k]);
+      }
+    } else {
+      lambda(j, dots[i], name_i);
+      j++;
+    }
+  }
+}
+
+arrow::Status InferSchemaFromDots(SEXP lst, SEXP schema_sxp, int num_fields,
+                                  std::shared_ptr<arrow::Schema>& schema);
+
+arrow::Status AddMetadataFromDots(SEXP lst, int num_fields,
+                                  std::shared_ptr<arrow::Schema>& schema);
 
 }  // namespace r
 }  // namespace arrow

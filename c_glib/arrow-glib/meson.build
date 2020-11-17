@@ -26,6 +26,7 @@ sources = files(
   'codec.cpp',
   'composite-array.cpp',
   'composite-data-type.cpp',
+  'datum.cpp',
   'decimal128.cpp',
   'error.cpp',
   'field.cpp',
@@ -48,6 +49,7 @@ sources += files(
 )
 
 sources += files(
+  'ipc-options.cpp',
   'metadata-version.cpp',
   'reader.cpp',
   'writer.cpp',
@@ -80,6 +82,7 @@ c_headers = files(
   'composite-array.h',
   'composite-data-type.h',
   'data-type.h',
+  'datum.h',
   'decimal128.h',
   'error.h',
   'field.h',
@@ -104,6 +107,7 @@ c_headers += files(
 )
 
 c_headers += files(
+  'ipc-options.h',
   'metadata-version.h',
   'reader.h',
   'writer.h',
@@ -135,6 +139,7 @@ cpp_headers = files(
   'chunked-array.hpp',
   'codec.hpp',
   'data-type.hpp',
+  'datum.hpp',
   'decimal128.hpp',
   'error.hpp',
   'field.hpp',
@@ -157,6 +162,7 @@ cpp_headers += files(
 )
 
 cpp_headers += files(
+  'ipc-options.hpp',
   'metadata-version.hpp',
   'reader.hpp',
   'writer.hpp',

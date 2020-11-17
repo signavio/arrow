@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "arrow/util/value_parsing.h"
 #include "gandiva/engine.h"
 #include "gandiva/exported_funcs.h"
 #include "gandiva/in_holder.h"
@@ -57,7 +58,7 @@ int64_t gdv_fn_to_date_utf8_utf8_int32(int64_t context_ptr, int64_t holder_ptr,
   gandiva::ExecutionContext* context =
       reinterpret_cast<gandiva::ExecutionContext*>(context_ptr);
   gandiva::ToDateHolder* holder = reinterpret_cast<gandiva::ToDateHolder*>(holder_ptr);
-  return (*holder)(context, std::string(data, data_len), in1_validity, out_valid);
+  return (*holder)(context, data, data_len, in1_validity, out_valid);
 }
 
 bool gdv_fn_in_expr_lookup_int32(int64_t ptr, int32_t value, bool in_validity) {
@@ -83,7 +84,7 @@ bool gdv_fn_in_expr_lookup_utf8(int64_t ptr, const char* data, int data_len,
   }
   gandiva::InHolder<std::string>* holder =
       reinterpret_cast<gandiva::InHolder<std::string>*>(ptr);
-  return holder->HasValue(std::string(data, data_len));
+  return holder->HasValue(arrow::util::string_view(data, data_len));
 }
 
 int32_t gdv_fn_populate_varlen_vector(int64_t context_ptr, int8_t* data_ptr,
@@ -140,6 +141,37 @@ char* gdv_fn_dec_to_string(int64_t context, int64_t x_high, uint64_t x_low,
   memcpy(ret, dec_str.data(), *dec_str_len);
   return ret;
 }
+
+#define CAST_NUMERIC_FROM_STRING(OUT_TYPE, ARROW_TYPE, TYPE_NAME)                    \
+  GANDIVA_EXPORT                                                                     \
+  OUT_TYPE gdv_fn_cast##TYPE_NAME##_utf8(int64_t context, const char* data,          \
+                                         int32_t len) {                              \
+    OUT_TYPE val = 0;                                                                \
+    /* trim leading and trailing spaces */                                           \
+    int32_t trimmed_len;                                                             \
+    int32_t start = 0, end = len - 1;                                                \
+    while (start <= end && data[start] == ' ') {                                     \
+      ++start;                                                                       \
+    }                                                                                \
+    while (end >= start && data[end] == ' ') {                                       \
+      --end;                                                                         \
+    }                                                                                \
+    trimmed_len = end - start + 1;                                                   \
+    const char* trimmed_data = data + start;                                         \
+    if (!arrow::internal::ParseValue<ARROW_TYPE>(trimmed_data, trimmed_len, &val)) { \
+      std::string err =                                                              \
+          "Failed to cast the string " + std::string(data, len) + " to " #OUT_TYPE;  \
+      gdv_fn_context_set_error_msg(context, err.c_str());                            \
+    }                                                                                \
+    return val;                                                                      \
+  }
+
+CAST_NUMERIC_FROM_STRING(int32_t, arrow::Int32Type, INT)
+CAST_NUMERIC_FROM_STRING(int64_t, arrow::Int64Type, BIGINT)
+CAST_NUMERIC_FROM_STRING(float, arrow::FloatType, FLOAT4)
+CAST_NUMERIC_FROM_STRING(double, arrow::DoubleType, FLOAT8)
+
+#undef CAST_NUMERIC_FROM_STRING
 }
 
 namespace gandiva {
@@ -252,6 +284,34 @@ void ExportedStubFunctions::AddMappings(Engine* engine) const {
   args = {types->i64_type(), types->i32_type(), types->i1_type()};
   engine->AddGlobalMappingForFunc("gdv_fn_random_with_seed", types->double_type(), args,
                                   reinterpret_cast<void*>(gdv_fn_random_with_seed));
+
+  args = {types->i64_type(),     // int64_t context_ptr
+          types->i8_ptr_type(),  // const char* data
+          types->i32_type()};    // int32_t lenr
+
+  engine->AddGlobalMappingForFunc("gdv_fn_castINT_utf8", types->i32_type(), args,
+                                  reinterpret_cast<void*>(gdv_fn_castINT_utf8));
+
+  args = {types->i64_type(),     // int64_t context_ptr
+          types->i8_ptr_type(),  // const char* data
+          types->i32_type()};    // int32_t lenr
+
+  engine->AddGlobalMappingForFunc("gdv_fn_castBIGINT_utf8", types->i64_type(), args,
+                                  reinterpret_cast<void*>(gdv_fn_castBIGINT_utf8));
+
+  args = {types->i64_type(),     // int64_t context_ptr
+          types->i8_ptr_type(),  // const char* data
+          types->i32_type()};    // int32_t lenr
+
+  engine->AddGlobalMappingForFunc("gdv_fn_castFLOAT4_utf8", types->float_type(), args,
+                                  reinterpret_cast<void*>(gdv_fn_castFLOAT4_utf8));
+
+  args = {types->i64_type(),     // int64_t context_ptr
+          types->i8_ptr_type(),  // const char* data
+          types->i32_type()};    // int32_t lenr
+
+  engine->AddGlobalMappingForFunc("gdv_fn_castFLOAT8_utf8", types->double_type(), args,
+                                  reinterpret_cast<void*>(gdv_fn_castFLOAT8_utf8));
 }
 
 }  // namespace gandiva

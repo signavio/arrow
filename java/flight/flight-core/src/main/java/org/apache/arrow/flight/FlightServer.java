@@ -36,11 +36,16 @@ import java.util.function.Consumer;
 
 import org.apache.arrow.flight.auth.ServerAuthHandler;
 import org.apache.arrow.flight.auth.ServerAuthInterceptor;
+import org.apache.arrow.flight.auth2.Auth2Constants;
+import org.apache.arrow.flight.auth2.CallHeaderAuthenticator;
+import org.apache.arrow.flight.auth2.ServerCallHeaderAuthMiddleware;
 import org.apache.arrow.flight.grpc.ServerInterceptorAdapter;
 import org.apache.arrow.flight.grpc.ServerInterceptorAdapter.KeyFactory;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.util.VisibleForTesting;
+
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
@@ -162,6 +167,7 @@ public class FlightServer implements AutoCloseable {
     private FlightProducer producer;
     private final Map<String, Object> builderOptions;
     private ServerAuthHandler authHandler = ServerAuthHandler.NO_OP;
+    private CallHeaderAuthenticator headerAuthenticator = CallHeaderAuthenticator.NO_OP;
     private ExecutorService executor = null;
     private int maxInboundMessageSize = MAX_GRPC_MESSAGE_SIZE;
     private InputStream certChain;
@@ -185,6 +191,14 @@ public class FlightServer implements AutoCloseable {
 
     /** Create the server for this builder. */
     public FlightServer build() {
+      // Add the auth middleware if applicable.
+      if (headerAuthenticator != CallHeaderAuthenticator.NO_OP) {
+        this.middleware(FlightServerMiddleware.Key.of(Auth2Constants.AUTHORIZATION_HEADER),
+            new ServerCallHeaderAuthMiddleware.Factory(headerAuthenticator));
+      }
+
+      this.middleware(FlightConstants.HEADER_KEY, new ServerHeaderMiddleware.Factory());
+
       final NettyServerBuilder builder;
       switch (location.getUri().getScheme()) {
         case LocationSchemes.GRPC_DOMAIN_SOCKET: {
@@ -243,7 +257,9 @@ public class FlightServer implements AutoCloseable {
         exec = executor;
         grpcExecutor = null;
       } else {
-        exec = Executors.newCachedThreadPool();
+        exec = Executors.newCachedThreadPool(
+            // Name threads for better debuggability
+            new ThreadFactoryBuilder().setNameFormat("flight-server-default-executor-%d").build());
         grpcExecutor = exec;
       }
       final FlightBindingService flightService = new FlightBindingService(allocator, producer, authHandler, exec);
@@ -327,6 +343,14 @@ public class FlightServer implements AutoCloseable {
      */
     public Builder authHandler(ServerAuthHandler authHandler) {
       this.authHandler = authHandler;
+      return this;
+    }
+
+    /**
+     * Set the header-based authentication mechanism.
+     */
+    public Builder headerAuthenticator(CallHeaderAuthenticator headerAuthenticator) {
+      this.headerAuthenticator = headerAuthenticator;
       return this;
     }
 

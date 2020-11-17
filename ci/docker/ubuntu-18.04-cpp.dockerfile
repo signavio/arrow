@@ -15,8 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
-ARG arch=amd64
-FROM ${arch}/ubuntu:18.04
+ARG base=amd64/ubuntu:18.04
+FROM ${base}
 
 # pipefail is enabled for proper error detection in the `wget | apt-key add`
 # step
@@ -31,6 +31,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG clang_tools
 ARG llvm
 RUN apt-get update -y -q && \
+    apt-get install -y -q --no-install-recommends \
+       apt-transport-https \
+       ca-certificates \
+       gnupg \
+       wget && \
+    wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
+    echo "deb https://apt.llvm.org/bionic/ llvm-toolchain-bionic-${llvm} main" > \
+       /etc/apt/sources.list.d/llvm.list && \
+    if [ "${clang_tools}" != "${llvm}" -a "${clang_tools}" -ge 10 ]; then \
+      echo "deb https://apt.llvm.org/bionic/ llvm-toolchain-bionic-${clang_tools} main" > \
+         /etc/apt/sources.list.d/clang-tools.list; \
+    fi && \
+    apt-get update -y -q && \
     apt-get install -y -q --no-install-recommends \
         clang-${clang_tools} \
         clang-${llvm} \
@@ -57,6 +70,7 @@ RUN apt-get update -y -q && \
         libboost-system-dev \
         libbrotli-dev \
         libbz2-dev \
+        libcurl4-openssl-dev \
         libgflags-dev \
         libgoogle-glog-dev \
         liblz4-dev \
@@ -65,6 +79,7 @@ RUN apt-get update -y -q && \
         libre2-dev \
         libsnappy-dev \
         libssl-dev \
+        libutf8proc-dev \
         libzstd-dev \
         ninja-build \
         pkg-config \
@@ -82,6 +97,7 @@ RUN apt-get update -y -q && \
 # - libgtest-dev only provide sources
 # - libprotobuf-dev only provide sources
 # - thrift is too old
+# - s3 tests would require boost-asio that is included since Boost 1.66.0
 ENV ARROW_BUILD_TESTS=ON \
     ARROW_DEPENDENCY_SOURCE=SYSTEM \
     ARROW_DATASET=ON \
@@ -103,6 +119,7 @@ ENV ARROW_BUILD_TESTS=ON \
     ARROW_WITH_SNAPPY=ON \
     ARROW_WITH_ZLIB=ON \
     ARROW_WITH_ZSTD=ON \
+    AWSSDK_SOURCE=BUNDLED \
     GTest_SOURCE=BUNDLED \
     ORC_SOURCE=BUNDLED \
     PARQUET_BUILD_EXECUTABLES=ON \

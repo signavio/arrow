@@ -15,15 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#include <string>
-#include <utility>
-#include <vector>
+#include "arrow/json/parser.h"
 
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest.h>
 
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "arrow/json/options.h"
-#include "arrow/json/parser.h"
 #include "arrow/json/test_common.h"
 #include "arrow/status.h"
 #include "arrow/testing/gtest_util.h"
@@ -75,8 +76,8 @@ void AssertUnconvertedStructArraysEqual(const StructArray& expected,
                                         const StructArray& actual) {
   ASSERT_EQ(expected.num_fields(), actual.num_fields());
   for (int i = 0; i < expected.num_fields(); ++i) {
-    auto expected_name = expected.type()->child(i)->name();
-    auto actual_name = actual.type()->child(i)->name();
+    auto expected_name = expected.type()->field(i)->name();
+    auto actual_name = actual.type()->field(i)->name();
     ASSERT_EQ(expected_name, actual_name);
     AssertUnconvertedArraysEqual(*expected.field(i), *actual.field(i));
   }
@@ -188,7 +189,7 @@ TEST(BlockParserWithSchema, Nested) {
                       field("nuf", struct_({field("ps", utf8())}))},
                      {"[\"thing\", null, \"\xe5\xbf\x8d\", null]",
                       R"([["1", "2", "3"], ["2"], [], null])",
-                      R"([{"ps":null}, null, {"ps":"78"}, {"ps":"90"}])"});
+                      R"([{"ps":null}, {}, {"ps":"78"}, {"ps":"90"}])"});
 }
 
 TEST(BlockParserWithSchema, FailOnIncompleteJson) {
@@ -217,7 +218,7 @@ TEST(BlockParser, Nested) {
                       field("nuf", struct_({field("ps", utf8())}))},
                      {"[\"thing\", null, \"\xe5\xbf\x8d\", null]",
                       R"([["1", "2", "3"], ["2"], [], null])",
-                      R"([{"ps":null}, null, {"ps":"78"}, {"ps":"90"}])"});
+                      R"([{"ps":null}, {}, {"ps":"78"}, {"ps":"90"}])"});
 }
 
 TEST(BlockParser, AdHoc) {

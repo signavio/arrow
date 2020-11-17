@@ -17,27 +17,21 @@
 
 //! Data source traits
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use arrow::datatypes::Schema;
-
+use crate::arrow::datatypes::SchemaRef;
 use crate::error::Result;
-use crate::execution::physical_plan::BatchIterator;
-
-/// Returned by implementors of `Table#scan`, this `BatchIterator` is wrapped with
-/// an `Arc` and `Mutex` so that it can be shared across threads as it is used.
-pub type ScanResult = Arc<Mutex<dyn BatchIterator>>;
+use crate::physical_plan::ExecutionPlan;
 
 /// Source table
 pub trait TableProvider {
     /// Get a reference to the schema for this table
-    fn schema(&self) -> Arc<Schema>;
+    fn schema(&self) -> SchemaRef;
 
-    /// Perform a scan of a table and return a sequence of iterators over the data (one
-    /// iterator per partition)
+    /// Create an ExecutionPlan that will scan the table.
     fn scan(
         &self,
         projection: &Option<Vec<usize>>,
         batch_size: usize,
-    ) -> Result<Vec<ScanResult>>;
+    ) -> Result<Arc<dyn ExecutionPlan>>;
 }

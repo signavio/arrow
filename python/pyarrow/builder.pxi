@@ -15,10 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from pyarrow.compat import tobytes
 
-
-cdef class StringBuilder:
+cdef class StringBuilder(_Weakrefable):
     """
     Builder class for UTF8 strings.
 

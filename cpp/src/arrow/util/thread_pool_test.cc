@@ -21,8 +21,6 @@
 #endif
 
 #include <algorithm>
-#include <chrono>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -128,7 +126,7 @@ class AddTester {
 
 class TestThreadPool : public ::testing::Test {
  public:
-  void TearDown() {
+  void TearDown() override {
     fflush(stdout);
     fflush(stderr);
   }

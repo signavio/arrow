@@ -40,11 +40,10 @@ write_ipc_stream <- function(x, sink, ...) {
   if (is.data.frame(x)) {
     x <- Table$create(x)
   }
-  if (is.string(sink)) {
-    sink <- FileOutputStream$create(sink)
+  if (!inherits(sink, "OutputStream")) {
+    sink <- make_output_stream(sink)
     on.exit(sink$close())
   }
-  assert_is(sink, "OutputStream")
 
   writer <- RecordBatchStreamWriter$create(sink, x$schema)
   writer$write(x)
@@ -82,11 +81,15 @@ write_to_raw <- function(x, format = c("stream", "file")) {
 #' `read_arrow()`, a wrapper around `read_ipc_stream()` and `read_feather()`,
 #' is deprecated. You should explicitly choose
 #' the function that will read the desired IPC format (stream or file) since
-#' a file or `InputStream` may contain either. `read_table()`, a wrapper around
-#' `read_arrow()`, is also deprecated
+#' a file or `InputStream` may contain either.
 #'
-#' @param x A character file name, `raw` vector, or an Arrow input stream
-#' @inheritParams read_delim_arrow
+#' @param file A character file name or URI, `raw` vector, an Arrow input stream,
+#' or a `FileSystem` with path (`SubTreeFileSystem`).
+#' If a file name or URI, an Arrow [InputStream] will be opened and
+#' closed when finished. If an input stream is provided, it will be left
+#' open.
+#' @param as_data_frame Should the function return a `data.frame` (default) or
+#' an Arrow [Table]?
 #' @param ... extra parameters passed to `read_feather()`.
 #'
 #' @return A `data.frame` if `as_data_frame` is `TRUE` (the default), or an
@@ -94,19 +97,15 @@ write_to_raw <- function(x, format = c("stream", "file")) {
 #' @seealso [read_feather()] for writing IPC files. [RecordBatchReader] for a
 #' lower-level interface.
 #' @export
-read_ipc_stream <- function(x, as_data_frame = TRUE, ...) {
-  if (inherits(x, "raw")) {
-    x <- BufferReader$create(x)
-    on.exit(x$close())
-  } else if (is.string(x)) {
-    x <- ReadableFile$create(x)
-    on.exit(x$close())
+read_ipc_stream <- function(file, as_data_frame = TRUE, ...) {
+  if (!inherits(file, "InputStream")) {
+    file <- make_readable_file(file)
+    on.exit(file$close())
   }
-  assert_is(x, "InputStream")
 
   # TODO: this could take col_select, like the other readers
   # https://issues.apache.org/jira/browse/ARROW-6830
-  out <- RecordBatchStreamReader$create(x)$read_table()
+  out <- RecordBatchStreamReader$create(file)$read_table()
   if (as_data_frame) {
     out <- as.data.frame(out)
   }

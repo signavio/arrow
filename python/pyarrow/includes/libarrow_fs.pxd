@@ -17,11 +17,8 @@
 
 # distutils: language = c++
 
-from libcpp.functional cimport function
-
 from pyarrow.includes.common cimport *
 from pyarrow.includes.libarrow cimport *
-
 
 cdef extern from "arrow/filesystem/api.h" namespace "arrow::fs" nogil:
 
@@ -65,6 +62,8 @@ cdef extern from "arrow/filesystem/api.h" namespace "arrow::fs" nogil:
         CResult[vector[CFileInfo]] GetFileInfo(const CFileSelector& select)
         CStatus CreateDir(const c_string& path, c_bool recursive)
         CStatus DeleteDir(const c_string& path)
+        CStatus DeleteDirContents(const c_string& path)
+        CStatus DeleteRootDirContents()
         CStatus DeleteFile(const c_string& path)
         CStatus DeleteFiles(const vector[c_string]& paths)
         CStatus Move(const c_string& src, const c_string& dest)
@@ -85,6 +84,14 @@ cdef extern from "arrow/filesystem/api.h" namespace "arrow::fs" nogil:
     CResult[shared_ptr[CFileSystem]] CFileSystemFromUriOrPath \
         "arrow::fs::FileSystemFromUriOrPath"(const c_string& uri,
                                              c_string* out_path)
+
+    cdef cppclass CFileSystemGlobalOptions \
+            "arrow::fs::FileSystemGlobalOptions":
+        c_string tls_ca_file_path
+        c_string tls_ca_dir_path
+
+    CStatus CFileSystemsInitialize "arrow::fs::Initialize" \
+        (const CFileSystemGlobalOptions& options)
 
     cdef cppclass CLocalFileSystemOptions "arrow::fs::LocalFileSystemOptions":
         c_bool use_mmap
@@ -123,23 +130,41 @@ cdef extern from "arrow/filesystem/api.h" namespace "arrow::fs" nogil:
         c_string endpoint_override
         c_string scheme
         c_bool background_writes
+        c_string role_arn
+        c_string session_name
+        c_string external_id
+        int load_frequency
         void ConfigureDefaultCredentials()
         void ConfigureAccessKey(const c_string& access_key,
-                                const c_string& secret_key)
+                                const c_string& secret_key,
+                                const c_string& session_token)
         c_string GetAccessKey()
         c_string GetSecretKey()
+        c_string GetSessionToken()
         c_bool Equals(const CS3Options& other)
 
         @staticmethod
         CS3Options Defaults()
+
+        @staticmethod
+        CS3Options Anonymous()
+
         @staticmethod
         CS3Options FromAccessKey(const c_string& access_key,
-                                 const c_string& secret_key)
+                                 const c_string& secret_key,
+                                 const c_string& session_token)
+
+        @staticmethod
+        CS3Options FromAssumeRole(const c_string& role_arn,
+                                  const c_string& session_name,
+                                  const c_string& external_id,
+                                  const int load_frequency)
 
     cdef cppclass CS3FileSystem "arrow::fs::S3FileSystem"(CFileSystem):
         @staticmethod
         CResult[shared_ptr[CS3FileSystem]] Make(const CS3Options& options)
         CS3Options options()
+        c_string region()
 
     cdef CStatus CInitializeS3 "arrow::fs::InitializeS3"(
         const CS3GlobalOptions& options)
@@ -150,15 +175,18 @@ cdef extern from "arrow/filesystem/api.h" namespace "arrow::fs" nogil:
         int32_t buffer_size
         int16_t replication
         int64_t default_block_size
+
         @staticmethod
         CResult[CHdfsOptions] FromUriString "FromUri"(
             const c_string& uri_string)
-        void ConfigureEndPoint(const c_string& host, int port)
-        void ConfigureHdfsDriver(c_bool use_hdfs3)
-        void ConfigureHdfsReplication(int16_t replication)
-        void ConfigureHdfsUser(const c_string& user_name)
-        void ConfigureHdfsBufferSize(int32_t buffer_size)
-        void ConfigureHdfsBlockSize(int64_t default_block_size)
+        void ConfigureEndPoint(c_string host, int port)
+        void ConfigureDriver(c_bool use_hdfs3)
+        void ConfigureReplication(int16_t replication)
+        void ConfigureUser(c_string user_name)
+        void ConfigureBufferSize(int32_t buffer_size)
+        void ConfigureBlockSize(int64_t default_block_size)
+        void ConfigureKerberosTicketCachePath(c_string path)
+        void ConfigureExtraConf(c_string key, c_string value)
 
     cdef cppclass CHadoopFileSystem "arrow::fs::HadoopFileSystem"(CFileSystem):
         @staticmethod
@@ -169,3 +197,59 @@ cdef extern from "arrow/filesystem/api.h" namespace "arrow::fs" nogil:
     cdef cppclass CMockFileSystem "arrow::fs::internal::MockFileSystem"(
             CFileSystem):
         CMockFileSystem(CTimePoint current_time)
+
+
+# Callbacks for implementing Python filesystems
+# Use typedef to emulate syntax for std::function<void(..)>
+ctypedef void CallbackGetTypeName(object, c_string*)
+ctypedef c_bool CallbackEquals(object, const CFileSystem&)
+
+ctypedef void CallbackGetFileInfo(object, const c_string&, CFileInfo*)
+ctypedef void CallbackGetFileInfoVector(object, const vector[c_string]&,
+                                        vector[CFileInfo]*)
+ctypedef void CallbackGetFileInfoSelector(object, const CFileSelector&,
+                                          vector[CFileInfo]*)
+ctypedef void CallbackCreateDir(object, const c_string&, c_bool)
+ctypedef void CallbackDeleteDir(object, const c_string&)
+ctypedef void CallbackDeleteDirContents(object, const c_string&)
+ctypedef void CallbackDeleteRootDirContents(object)
+ctypedef void CallbackDeleteFile(object, const c_string&)
+ctypedef void CallbackMove(object, const c_string&, const c_string&)
+ctypedef void CallbackCopyFile(object, const c_string&, const c_string&)
+
+ctypedef void CallbackOpenInputStream(object, const c_string&,
+                                      shared_ptr[CInputStream]*)
+ctypedef void CallbackOpenInputFile(object, const c_string&,
+                                    shared_ptr[CRandomAccessFile]*)
+ctypedef void CallbackOpenOutputStream(object, const c_string&,
+                                       shared_ptr[COutputStream]*)
+ctypedef void CallbackNormalizePath(object, const c_string&, c_string*)
+
+cdef extern from "arrow/python/filesystem.h" namespace "arrow::py::fs" nogil:
+
+    cdef cppclass CPyFileSystemVtable "arrow::py::fs::PyFileSystemVtable":
+        PyFileSystemVtable()
+        function[CallbackGetTypeName] get_type_name
+        function[CallbackEquals] equals
+        function[CallbackGetFileInfo] get_file_info
+        function[CallbackGetFileInfoVector] get_file_info_vector
+        function[CallbackGetFileInfoSelector] get_file_info_selector
+        function[CallbackCreateDir] create_dir
+        function[CallbackDeleteDir] delete_dir
+        function[CallbackDeleteDirContents] delete_dir_contents
+        function[CallbackDeleteRootDirContents] delete_root_dir_contents
+        function[CallbackDeleteFile] delete_file
+        function[CallbackMove] move
+        function[CallbackCopyFile] copy_file
+        function[CallbackOpenInputStream] open_input_stream
+        function[CallbackOpenInputFile] open_input_file
+        function[CallbackOpenOutputStream] open_output_stream
+        function[CallbackOpenOutputStream] open_append_stream
+        function[CallbackNormalizePath] normalize_path
+
+    cdef cppclass CPyFileSystem "arrow::py::fs::PyFileSystem":
+        @staticmethod
+        shared_ptr[CPyFileSystem] Make(object handler,
+                                       CPyFileSystemVtable vtable)
+
+        PyObject* handler()

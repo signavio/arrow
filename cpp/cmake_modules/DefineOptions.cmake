@@ -67,11 +67,11 @@ macro(define_option_string name description default)
   set("${name}_OPTION_DESCRIPTION" ${description})
   set("${name}_OPTION_DEFAULT" "\"${default}\"")
   set("${name}_OPTION_TYPE" "string")
-  set("${name}_OPTION_ENUM" ${ARGN})
+  set("${name}_OPTION_POSSIBLE_VALUES" ${ARGN})
 
-  list_join("${name}_OPTION_ENUM" "|" "${name}_OPTION_ENUM")
+  list_join("${name}_OPTION_POSSIBLE_VALUES" "|" "${name}_OPTION_ENUM")
   if(NOT ("${${name}_OPTION_ENUM}" STREQUAL ""))
-    set_property(CACHE ${name} PROPERTY STRINGS ${ARGN})
+    set_property(CACHE ${name} PROPERTY STRINGS "${name}_OPTION_POSSIBLE_VALUES")
   endif()
 endmacro()
 
@@ -86,6 +86,15 @@ if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
 
   define_option(ARROW_BUILD_SHARED "Build shared libraries" ON)
 
+  define_option_string(ARROW_PACKAGE_KIND
+                       "Arbitrary string that identifies the kind of package;\
+(for informational purposes)" "")
+
+  define_option_string(ARROW_GIT_ID "The Arrow git commit id (if any)" "")
+
+  define_option_string(ARROW_GIT_DESCRIPTION "The Arrow git commit description (if any)"
+                       "")
+
   define_option(ARROW_NO_DEPRECATED_API "Exclude deprecated APIs from build" OFF)
 
   define_option(ARROW_USE_CCACHE "Use ccache when compiling (if available)" ON)
@@ -95,20 +104,33 @@ if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
   define_option(ARROW_USE_PRECOMPILED_HEADERS "Use precompiled headers when compiling"
                 OFF)
 
-  # Disable this option to exercise non-SIMD fallbacks
-  define_option(ARROW_USE_SIMD "Build with SIMD optimizations" ON)
-
   define_option_string(ARROW_SIMD_LEVEL
-                       "SIMD compiler optimization level"
+                       "Compile-time SIMD optimization level"
                        "SSE4_2" # default to SSE4.2
                        "NONE"
                        "SSE4_2"
                        "AVX2"
                        "AVX512")
 
+  define_option_string(ARROW_RUNTIME_SIMD_LEVEL
+                       "Max runtime SIMD optimization level"
+                       "MAX" # default to max supported by compiler
+                       "NONE"
+                       "SSE4_2"
+                       "AVX2"
+                       "AVX512"
+                       "MAX")
+
   # Arm64 architectures and extensions can lead to exploding combinations.
   # So set it directly through cmake command line.
-  define_option_string(ARROW_ARMV8_ARCH "Arm64 arch and extensions" "armv8-a+crc+crypto")
+  #
+  # If you change this, you need to change the definition in
+  # python/CMakeLists.txt too.
+  define_option_string(ARROW_ARMV8_ARCH
+                       "Arm64 arch and extensions"
+                       "armv8-a" # Default
+                       "armv8-a"
+                       "armv8-a+crc+crypto")
 
   define_option(ARROW_ALTIVEC "Build with Altivec if compiler has support" ON)
 
@@ -234,6 +256,8 @@ if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
 
   define_option(ARROW_TENSORFLOW "Build Arrow with TensorFlow support enabled" OFF)
 
+  define_option(ARROW_TESTING "Build the Arrow testing libraries" OFF)
+
   #----------------------------------------------------------------------
   set_option_category("Thirdparty toolchain")
 
@@ -274,18 +298,61 @@ if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
   define_option(ARROW_VERBOSE_THIRDPARTY_BUILD
                 "Show output from ExternalProjects rather than just logging to files" OFF)
 
-  define_option(ARROW_BOOST_USE_SHARED "Rely on boost shared libraries where relevant" ON)
+  define_option(ARROW_DEPENDENCY_USE_SHARED "Link to shared libraries" ON)
 
-  define_option(ARROW_PROTOBUF_USE_SHARED
-                "Rely on Protocol Buffers shared libraries where relevant" ON)
+  define_option(ARROW_BOOST_USE_SHARED "Rely on boost shared libraries where relevant"
+                ${ARROW_DEPENDENCY_USE_SHARED})
+
+  define_option(ARROW_BROTLI_USE_SHARED "Rely on Brotli shared libraries where relevant"
+                ${ARROW_DEPENDENCY_USE_SHARED})
+
+  define_option(ARROW_BZ2_USE_SHARED "Rely on Bz2 shared libraries where relevant"
+                ${ARROW_DEPENDENCY_USE_SHARED})
 
   define_option(ARROW_GFLAGS_USE_SHARED "Rely on GFlags shared libraries where relevant"
-                ON)
+                ${ARROW_DEPENDENCY_USE_SHARED})
 
-  define_option(ARROW_WITH_BACKTRACE "Build with backtrace support" ON)
+  define_option(ARROW_GRPC_USE_SHARED "Rely on gRPC shared libraries where relevant"
+                ${ARROW_DEPENDENCY_USE_SHARED})
+
+  define_option(ARROW_LZ4_USE_SHARED "Rely on lz4 shared libraries where relevant"
+                ${ARROW_DEPENDENCY_USE_SHARED})
+
+  define_option(ARROW_OPENSSL_USE_SHARED "Rely on OpenSSL shared libraries where relevant"
+                ${ARROW_DEPENDENCY_USE_SHARED})
+
+  define_option(ARROW_PROTOBUF_USE_SHARED
+                "Rely on Protocol Buffers shared libraries where relevant"
+                ${ARROW_DEPENDENCY_USE_SHARED})
+
+  if(WIN32)
+    # It seems that Thrift doesn't support DLL well yet.
+    # MSYS2, conda-forge and vcpkg don't build shared library.
+    set(ARROW_THRIFT_USE_SHARED_DEFAULT OFF)
+  else()
+    set(ARROW_THRIFT_USE_SHARED_DEFAULT ${ARROW_DEPENDENCY_USE_SHARED})
+  endif()
+  define_option(ARROW_THRIFT_USE_SHARED "Rely on thrift shared libraries where relevant"
+                ${ARROW_THRIFT_USE_SHARED_DEFAULT})
+
+  define_option(ARROW_UTF8PROC_USE_SHARED
+                "Rely on utf8proc shared libraries where relevant"
+                ${ARROW_DEPENDENCY_USE_SHARED})
+
+  define_option(ARROW_SNAPPY_USE_SHARED "Rely on snappy shared libraries where relevant"
+                ${ARROW_DEPENDENCY_USE_SHARED})
+
+  define_option(ARROW_UTF8PROC_USE_SHARED
+                "Rely on utf8proc shared libraries where relevant"
+                ${ARROW_DEPENDENCY_USE_SHARED})
+
+  define_option(ARROW_ZSTD_USE_SHARED "Rely on zstd shared libraries where relevant"
+                ${ARROW_DEPENDENCY_USE_SHARED})
 
   define_option(ARROW_USE_GLOG "Build libraries with glog support for pluggable logging"
                 OFF)
+
+  define_option(ARROW_WITH_BACKTRACE "Build with backtrace support" ON)
 
   define_option(ARROW_WITH_BROTLI "Build with Brotli compression" OFF)
   define_option(ARROW_WITH_BZ2 "Build with BZ2 compression" OFF)
@@ -294,8 +361,11 @@ if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
   define_option(ARROW_WITH_ZLIB "Build with zlib compression" OFF)
   define_option(ARROW_WITH_ZSTD "Build with zstd compression" OFF)
 
+  define_option(ARROW_WITH_UTF8PROC
+                "Build with support for Unicode properties using the utf8proc library" ON)
+
   #----------------------------------------------------------------------
-  if(MSVC)
+  if(MSVC_TOOLCHAIN)
     set_option_category("MSVC")
 
     define_option(MSVC_LINK_VERBOSE
@@ -311,8 +381,16 @@ if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
     define_option_string(RE2_MSVC_STATIC_LIB_SUFFIX
                          "re2 static lib suffix used on Windows with MSVC" "_static")
 
+    if(DEFINED ENV{CONDA_PREFIX})
+      # Conda package changes the output name.
+      # https://github.com/conda-forge/snappy-feedstock/blob/master/recipe/windows-static-lib-name.patch
+      set(SNAPPY_MSVC_STATIC_LIB_SUFFIX_DEFAULT "_static")
+    else()
+      set(SNAPPY_MSVC_STATIC_LIB_SUFFIX_DEFAULT "")
+    endif()
     define_option_string(SNAPPY_MSVC_STATIC_LIB_SUFFIX
-                         "Snappy static lib suffix used on Windows with MSVC" "_static")
+                         "Snappy static lib suffix used on Windows with MSVC"
+                         "${SNAPPY_MSVC_STATIC_LIB_SUFFIX_DEFAULT}")
 
     define_option_string(LZ4_MSVC_STATIC_LIB_SUFFIX
                          "Lz4 static lib suffix used on Windows with MSVC" "_static")
@@ -369,6 +447,27 @@ that have not been built" OFF)
   option(ARROW_BUILD_CONFIG_SUMMARY_JSON "Summarize build configuration in a JSON file"
          ON)
 endif()
+
+macro(validate_config)
+  foreach(category ${ARROW_OPTION_CATEGORIES})
+    set(option_names ${ARROW_${category}_OPTION_NAMES})
+
+    foreach(name ${option_names})
+      set(possible_values ${${name}_OPTION_POSSIBLE_VALUES})
+      set(value "${${name}}")
+      if(possible_values)
+        if(NOT CMAKE_VERSION VERSION_LESS "3.3")
+          if(NOT "${value}" IN_LIST possible_values)
+            message(
+              FATAL_ERROR "Configuration option ${name} got invalid value '${value}'. "
+                          "Allowed values: ${${name}_OPTION_ENUM}.")
+          endif()
+        endif()
+      endif()
+    endforeach()
+
+  endforeach()
+endmacro()
 
 macro(config_summary_message)
   message(STATUS "---------------------------------------------------------------------")
@@ -455,3 +554,20 @@ macro(config_summary_cmake_setters path)
   endforeach()
 
 endmacro()
+
+#----------------------------------------------------------------------
+# Compute default values for omitted variables
+
+if(NOT ARROW_GIT_ID)
+  execute_process(COMMAND "git" "log" "-n1" "--format=%H"
+                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                  OUTPUT_VARIABLE ARROW_GIT_ID
+                  OUTPUT_STRIP_TRAILING_WHITESPACE)
+endif()
+if(NOT ARROW_GIT_DESCRIPTION)
+  execute_process(COMMAND "git" "describe" "--tags" "--dirty"
+                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                  ERROR_QUIET
+                  OUTPUT_VARIABLE ARROW_GIT_DESCRIPTION
+                  OUTPUT_STRIP_TRAILING_WHITESPACE)
+endif()

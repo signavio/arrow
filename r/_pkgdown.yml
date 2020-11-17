@@ -61,6 +61,7 @@ reference:
 - title: Multi-file datasets
   contents:
   - open_dataset
+  - write_dataset
   - dataset_factory
   - hive_partition
   - Dataset
@@ -68,6 +69,7 @@ reference:
   - Expression
   - Scanner
   - FileFormat
+  - FileWriteOptions
   - map_batches
 - title: Reading and writing files
   contents:
@@ -101,10 +103,12 @@ reference:
   - record_batch
   - RecordBatch
   - Table
+  - Scalar
   - read_message
 - title: Arrow data types and schema
   contents:
   - Schema
+  - unify_schemas
   - type
   - dictionary
   - Field
@@ -114,6 +118,19 @@ reference:
   - DictionaryType
   - FixedWidthType
   - cast_options
+- title: Flight
+  contents:
+  - load_flight_server
+  - flight_connect
+  - push_data
+  - flight_get
+- title: File systems
+  contents:
+  - s3_bucket
+  - FileSystem
+  - FileInfo
+  - FileSelector
+  - copy_files
 - title: Input/Output
   contents:
   - InputStream
@@ -125,12 +142,9 @@ reference:
   - compression
   - Codec
   - codec_is_available
-  - MemoryPool
-  - default_memory_pool
-  - FileSystem
-  - FileInfo
-  - FileStats
-  - FileSelector
+- title: Configuration
+  contents:
+  - cpu_count
 - title: Installation helpers
   contents:
   - arrow_available

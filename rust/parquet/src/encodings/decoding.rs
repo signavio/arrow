@@ -17,7 +17,7 @@
 
 //! Contains all supported decoders for Parquet.
 
-use std::{cmp, marker::PhantomData, mem, slice::from_raw_parts_mut};
+use std::{cmp, marker::PhantomData, mem};
 
 use super::rle::RleDecoder;
 
@@ -28,7 +28,7 @@ use crate::data_type::*;
 use crate::errors::{ParquetError, Result};
 use crate::schema::types::ColumnDescPtr;
 use crate::util::{
-    bit_util::{self, BitReader},
+    bit_util::{self, BitReader, FromBytes},
     memory::{ByteBuffer, ByteBufferPtr},
 };
 
@@ -188,7 +188,17 @@ impl<T: DataType> Decoder<T> for PlainDecoder<T> {
     }
 
     #[inline]
-    default fn get(&mut self, buffer: &mut [T::T]) -> Result<usize> {
+    default fn get(&mut self, _buffer: &mut [T::T]) -> Result<usize> {
+        unreachable!()
+    }
+}
+
+impl<T: SliceAsBytesDataType> Decoder<T> for PlainDecoder<T>
+where
+    T::T: SliceAsBytes,
+{
+    #[inline]
+    fn get(&mut self, buffer: &mut [T::T]) -> Result<usize> {
         assert!(self.data.is_some());
 
         let data = self.data.as_mut().unwrap();
@@ -198,8 +208,7 @@ impl<T: DataType> Decoder<T> for PlainDecoder<T> {
         if bytes_left < bytes_to_decode {
             return Err(eof_err!("Not enough bytes to decode"));
         }
-        let raw_buffer: &mut [u8] =
-            unsafe { from_raw_parts_mut(buffer.as_ptr() as *mut u8, bytes_to_decode) };
+        let raw_buffer = &mut T::T::slice_as_bytes_mut(buffer)[..bytes_to_decode];
         raw_buffer.copy_from_slice(data.range(self.start, bytes_to_decode).as_ref());
         self.start += bytes_to_decode;
         self.num_values -= num_values;
@@ -245,7 +254,7 @@ impl Decoder<BoolType> for PlainDecoder<BoolType> {
         Ok(())
     }
 
-    fn get(&mut self, buffer: &mut [bool]) -> Result<usize> {
+    default fn get(&mut self, buffer: &mut [bool]) -> Result<usize> {
         assert!(self.bit_reader.is_some());
 
         let bit_reader = self.bit_reader.as_mut().unwrap();
@@ -521,14 +530,14 @@ impl<T: DataType> DeltaBitPackDecoder<T> {
         self.min_delta = self
             .bit_reader
             .get_zigzag_vlq_int()
-            .ok_or(eof_err!("Not enough data to decode 'min_delta'"))?;
+            .ok_or_else(|| eof_err!("Not enough data to decode 'min_delta'"))?;
 
         let mut widths = vec![];
         for _ in 0..self.num_mini_blocks {
             let w = self
                 .bit_reader
                 .get_aligned::<u8>(1)
-                .ok_or(eof_err!("Not enough data to decode 'width'"))?;
+                .ok_or_else(|| eof_err!("Not enough data to decode 'width'"))?;
             widths.push(w);
         }
 
@@ -541,7 +550,10 @@ impl<T: DataType> DeltaBitPackDecoder<T> {
 
     /// Loads delta into mini block.
     #[inline]
-    fn load_deltas_in_mini_block(&mut self) -> Result<()> {
+    fn load_deltas_in_mini_block(&mut self) -> Result<()>
+    where
+        T::T: FromBytes,
+    {
         self.deltas_in_mini_block.clear();
         if self.use_batch {
             self.deltas_in_mini_block
@@ -557,7 +569,7 @@ impl<T: DataType> DeltaBitPackDecoder<T> {
                 let delta = self
                     .bit_reader
                     .get_value::<T::T>(self.delta_bit_width as usize)
-                    .ok_or(eof_err!("Not enough data to decode 'delta'"))?;
+                    .ok_or_else(|| eof_err!("Not enough data to decode 'delta'"))?;
                 self.deltas_in_mini_block.push(delta);
             }
         }
@@ -566,7 +578,10 @@ impl<T: DataType> DeltaBitPackDecoder<T> {
     }
 }
 
-impl<T: DataType> Decoder<T> for DeltaBitPackDecoder<T> {
+impl<T: DataType> Decoder<T> for DeltaBitPackDecoder<T>
+where
+    T::T: FromBytes,
+{
     // # of total values is derived from encoding
     #[inline]
     default fn set_data(&mut self, data: ByteBufferPtr, _: usize) -> Result<()> {
@@ -576,20 +591,20 @@ impl<T: DataType> Decoder<T> for DeltaBitPackDecoder<T> {
         let block_size = self
             .bit_reader
             .get_vlq_int()
-            .ok_or(eof_err!("Not enough data to decode 'block_size'"))?;
+            .ok_or_else(|| eof_err!("Not enough data to decode 'block_size'"))?;
         self.num_mini_blocks = self
             .bit_reader
             .get_vlq_int()
-            .ok_or(eof_err!("Not enough data to decode 'num_mini_blocks'"))?;
+            .ok_or_else(|| eof_err!("Not enough data to decode 'num_mini_blocks'"))?;
         self.num_values = self
             .bit_reader
             .get_vlq_int()
-            .ok_or(eof_err!("Not enough data to decode 'num_values'"))?
+            .ok_or_else(|| eof_err!("Not enough data to decode 'num_values'"))?
             as usize;
         self.first_value = self
             .bit_reader
             .get_zigzag_vlq_int()
-            .ok_or(eof_err!("Not enough data to decode 'first_value'"))?;
+            .ok_or_else(|| eof_err!("Not enough data to decode 'first_value'"))?;
 
         // Reset decoding state
         self.first_value_read = false;
@@ -925,10 +940,11 @@ impl Decoder<FixedLenByteArrayType> for DeltaByteArrayDecoder<FixedLenByteArrayT
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::{super::encoding::*, *};
 
-    use std::{mem, rc::Rc};
+    use std::rc::Rc;
 
     use crate::schema::types::{
         ColumnDescPtr, ColumnDescriptor, ColumnPath, Type as SchemaType,
@@ -1148,7 +1164,7 @@ mod tests {
     #[should_panic(expected = "RleValueEncoder only supports BoolType")]
     fn test_rle_value_encode_int32_not_supported() {
         let mut encoder = RleValueEncoder::<Int32Type>::new();
-        encoder.put(&vec![1, 2, 3, 4]).unwrap();
+        encoder.put(&[1, 2, 3, 4]).unwrap();
     }
 
     #[test]
@@ -1387,8 +1403,7 @@ mod tests {
         let expected: Vec<T::T> = data.iter().flat_map(|s| s.clone()).collect();
 
         // Decode data and compare with original
-        let mut decoder =
-            get_decoder::<T>(col_descr.clone(), encoding).expect("get decoder");
+        let mut decoder = get_decoder::<T>(col_descr, encoding).expect("get decoder");
 
         let mut result = vec![T::T::default(); expected.len()];
         decoder
@@ -1430,7 +1445,6 @@ mod tests {
             .unwrap();
         Rc::new(ColumnDescriptor::new(
             Rc::new(ty),
-            None,
             0,
             0,
             ColumnPath::new(vec![]),
@@ -1438,7 +1452,7 @@ mod tests {
     }
 
     fn usize_to_bytes(v: usize) -> [u8; 4] {
-        unsafe { mem::transmute::<u32, [u8; 4]>(v as u32) }
+        (v as u32).to_ne_bytes()
     }
 
     /// A util trait to convert slices of different types to byte arrays
@@ -1448,18 +1462,11 @@ mod tests {
 
     impl<T> ToByteArray<T> for T
     where
-        T: DataType,
+        T: SliceAsBytesDataType,
+        <T as DataType>::T: SliceAsBytes,
     {
         default fn to_byte_array(data: &[T::T]) -> Vec<u8> {
-            let mut v = vec![];
-            let type_len = std::mem::size_of::<T::T>();
-            v.extend_from_slice(unsafe {
-                std::slice::from_raw_parts(
-                    data.as_ptr() as *const u8,
-                    data.len() * type_len,
-                )
-            });
-            v
+            <T as DataType>::T::slice_as_bytes(data).to_vec()
         }
     }
 
@@ -1482,11 +1489,7 @@ mod tests {
         fn to_byte_array(data: &[Int96]) -> Vec<u8> {
             let mut v = vec![];
             for d in data {
-                unsafe {
-                    let copy =
-                        std::slice::from_raw_parts(d.data().as_ptr() as *const u8, 12);
-                    v.extend_from_slice(copy);
-                };
+                v.extend_from_slice(d.as_bytes());
             }
             v
         }

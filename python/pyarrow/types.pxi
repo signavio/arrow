@@ -21,14 +21,11 @@ import re
 import sys
 import warnings
 
-from pyarrow import compat
-from pyarrow.compat import builtin_pickle
-
 
 # These are imprecise because the type (in pandas 0.x) depends on the presence
 # of nulls
 cdef dict _pandas_type_map = {
-    _Type_NA: np.float64,  # NaNs
+    _Type_NA: np.object_,  # NaNs
     _Type_BOOL: np.bool_,
     _Type_INT8: np.int8,
     _Type_INT16: np.int16,
@@ -49,7 +46,8 @@ cdef dict _pandas_type_map = {
     _Type_FIXED_SIZE_BINARY: np.object_,
     _Type_STRING: np.object_,
     _Type_LIST: np.object_,
-    _Type_DECIMAL: np.object_,
+    _Type_MAP: np.object_,
+    _Type_DECIMAL128: np.object_,
 }
 
 cdef dict _pep3118_type_map = {
@@ -94,12 +92,13 @@ def _is_primitive(Type type):
 ctypedef CFixedWidthType* _CFixedWidthTypePtr
 
 
-cdef class DataType:
+cdef class DataType(_Weakrefable):
     """
     Base class of all Arrow data types.
 
     Each data type is an *instance* of this class.
     """
+
     def __cinit__(self):
         pass
 
@@ -114,9 +113,9 @@ cdef class DataType:
         self.type = type.get()
         self.pep3118_format = _datatype_to_pep3118(self.type)
 
-    cdef Field child(self, int i):
-        cdef int index = <int> _normalize_index(i, self.type.num_children())
-        return pyarrow_wrap_field(self.type.child(index))
+    cdef Field field(self, int i):
+        cdef int index = <int> _normalize_index(i, self.type.num_fields())
+        return pyarrow_wrap_field(self.type.field(index))
 
     @property
     def id(self):
@@ -135,7 +134,17 @@ cdef class DataType:
         """
         The number of child fields.
         """
-        return self.type.num_children()
+        import warnings
+        warnings.warn("num_children is deprecated, use num_fields",
+                      FutureWarning)
+        return self.num_fields
+
+    @property
+    def num_fields(self):
+        """
+        The number of child fields.
+        """
+        return self.type.num_fields()
 
     @property
     def num_buffers(self):
@@ -146,7 +155,7 @@ cdef class DataType:
         return self.type.layout().buffers.size()
 
     def __str__(self):
-        return frombytes(self.type.ToString())
+        return frombytes(self.type.ToString(), safe=True)
 
     def __hash__(self):
         return hash(str(self))
@@ -211,10 +220,11 @@ cdef class DataType:
         return pyarrow_wrap_data_type(result)
 
 
-cdef class DictionaryMemo:
+cdef class DictionaryMemo(_Weakrefable):
     """
     Tracking container for dictionary-encoded fields.
     """
+
     def __cinit__(self):
         self.sp_memo.reset(new CDictionaryMemo())
         self.memo = self.sp_memo.get()
@@ -365,12 +375,6 @@ cdef class StructType(DataType):
         DataType.init(self, type)
         self.struct_type = <const CStructType*> type.get()
 
-    cdef Field field(self, int i):
-        """
-        Return a child field by its index.
-        """
-        return self.child(i)
-
     cdef Field field_by_name(self, name):
         """
         Return a child field by its name rather than its index.
@@ -402,9 +406,9 @@ cdef class StructType(DataType):
 
     def __len__(self):
         """
-        Like num_children().
+        Like num_fields().
         """
-        return self.type.num_children()
+        return self.type.num_fields()
 
     def __iter__(self):
         """
@@ -420,7 +424,7 @@ cdef class StructType(DataType):
         if isinstance(i, (bytes, str)):
             return self.field_by_name(i)
         elif isinstance(i, int):
-            return self.child(i)
+            return self.field(i)
         else:
             raise TypeError('Expected integer or string index')
 
@@ -459,9 +463,9 @@ cdef class UnionType(DataType):
 
     def __len__(self):
         """
-        Like num_children().
+        Like num_fields().
         """
-        return self.type.num_children()
+        return self.type.num_fields()
 
     def __iter__(self):
         """
@@ -472,9 +476,9 @@ cdef class UnionType(DataType):
 
     def __getitem__(self, i):
         """
-        Return a child member by its index.
+        Return a child field by its index.
         """
-        return self.child(i)
+        return self.field(i)
 
     def __reduce__(self):
         return union, (list(self), self.mode, self.type_codes)
@@ -620,6 +624,33 @@ cdef class Decimal128Type(FixedSizeBinaryType):
         return self.decimal128_type.scale()
 
 
+cdef class Decimal256Type(FixedSizeBinaryType):
+    """
+    Concrete class for Decimal256 data types.
+    """
+
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
+        FixedSizeBinaryType.init(self, type)
+        self.decimal256_type = <const CDecimal256Type*> type.get()
+
+    def __reduce__(self):
+        return decimal256, (self.precision, self.scale)
+
+    @property
+    def precision(self):
+        """
+        The decimal precision, in number of decimal digits (an integer).
+        """
+        return self.decimal256_type.precision()
+
+    @property
+    def scale(self):
+        """
+        The decimal scale (an integer).
+        """
+        return self.decimal256_type.scale()
+
+
 cdef class BaseExtensionType(DataType):
     """
     Concrete base class for extension types.
@@ -693,6 +724,10 @@ cdef class ExtensionType(BaseExtensionType):
                     self.storage_type == other.storage_type)
         else:
             return NotImplemented
+
+    def __repr__(self):
+        fmt = '{0.__class__.__name__}({1})'
+        return fmt.format(self, repr(self.storage_type))
 
     def __arrow_ext_serialize__(self):
         """
@@ -881,7 +916,7 @@ cdef class KeyValueMetadata(_Metadata, Mapping):
         return str(self)
 
     def __str__(self):
-        return frombytes(self.metadata.ToString())
+        return frombytes(self.metadata.ToString(), safe=True)
 
     def __eq__(self, other):
         try:
@@ -958,7 +993,7 @@ cdef KeyValueMetadata ensure_metadata(object meta, c_bool allow_none=False):
         return KeyValueMetadata(meta)
 
 
-cdef class Field:
+cdef class Field(_Weakrefable):
     """
     A named field, with a data type, nullability, and optional metadata.
 
@@ -966,6 +1001,7 @@ cdef class Field:
     -----
     Do not use this class's constructor directly; use pyarrow.field
     """
+
     def __cinit__(self):
         pass
 
@@ -1004,7 +1040,8 @@ cdef class Field:
         return field, (self.name, self.type, self.nullable, self.metadata)
 
     def __str__(self):
-        return 'pyarrow.Field<{0}>'.format(frombytes(self.field.ToString()))
+        return 'pyarrow.Field<{0}>'.format(
+            frombytes(self.field.ToString(), safe=True))
 
     def __repr__(self):
         return self.__str__()
@@ -1145,7 +1182,7 @@ cdef class Field:
         return [pyarrow_wrap_field(f) for f in flattened]
 
 
-cdef class Schema:
+cdef class Schema(_Weakrefable):
 
     def __cinit__(self):
         pass
@@ -1250,16 +1287,8 @@ cdef class Schema:
         -------
         table: pyarrow.Table
         """
-        arrays = []
-        names = []
-        for field in self:
-            arrays.append(_empty_array(field.type))
-            names.append(field.name)
-        return Table.from_arrays(
-            arrays=arrays,
-            names=names,
-            metadata=self.metadata
-        )
+        arrays = [_empty_array(field.type) for field in self]
+        return Table.from_arrays(arrays, schema=self)
 
     def equals(self, Schema other not None, bint check_metadata=False):
         """
@@ -1502,7 +1531,7 @@ cdef class Schema:
 
         return pyarrow_wrap_schema(c_schema)
 
-    def serialize(self, DictionaryMemo dictionary_memo=None, memory_pool=None):
+    def serialize(self, memory_pool=None):
         """
         Write Schema to Buffer as encapsulated IPC message
 
@@ -1510,10 +1539,6 @@ cdef class Schema:
         ----------
         memory_pool : MemoryPool, default None
             Uses default memory pool if not specified
-        dictionary_memo : DictionaryMemo, optional
-            If schema contains dictionaries, must pass a
-            DictionaryMemo to be able to deserialize RecordBatch
-            objects
 
         Returns
         -------
@@ -1522,17 +1547,10 @@ cdef class Schema:
         cdef:
             shared_ptr[CBuffer] buffer
             CMemoryPool* pool = maybe_unbox_memory_pool(memory_pool)
-            CDictionaryMemo temp_memo
-            CDictionaryMemo* arg_dict_memo
-
-        if dictionary_memo is not None:
-            arg_dict_memo = dictionary_memo.memo
-        else:
-            arg_dict_memo = &temp_memo
 
         with nogil:
             buffer = GetResultValue(SerializeSchema(deref(self.schema),
-                                                    arg_dict_memo, pool))
+                                                    pool))
         return pyarrow_wrap_buffer(buffer)
 
     def remove_metadata(self):
@@ -1585,7 +1603,7 @@ cdef class Schema:
                 )
             )
 
-        return frombytes(result)
+        return frombytes(result, safe=True)
 
     def _export_to_c(self, uintptr_t out_ptr):
         """
@@ -1613,6 +1631,45 @@ cdef class Schema:
 
     def __repr__(self):
         return self.__str__()
+
+
+def unify_schemas(list schemas):
+    """
+    Unify schemas by merging fields by name.
+
+    The resulting schema will contain the union of fields from all schemas.
+    Fields with the same name will be merged. Note that two fields with
+    different types will fail merging.
+
+    - The unified field will inherit the metadata from the schema where
+        that field is first defined.
+    - The first N fields in the schema will be ordered the same as the
+        N fields in the first schema.
+
+    The resulting schema will inherit its metadata from the first input
+    schema.
+
+    Parameters
+    ----------
+    schemas : list of Schema
+        Schemas to merge into a single one.
+
+    Returns
+    -------
+    Schema
+
+    Raises
+    ------
+    ArrowInvalid :
+        If any input schema contains fields with duplicate names.
+        If Fields of the same name are not mergeable.
+    """
+    cdef:
+        Schema schema
+        vector[shared_ptr[CSchema]] c_schemas
+    for schema in schemas:
+        c_schemas.push_back(pyarrow_unwrap_schema(schema))
+    return pyarrow_wrap_schema(GetResultValue(UnifySchemas(c_schemas)))
 
 
 cdef dict _type_cache = {}
@@ -1660,6 +1717,9 @@ def field(name, type, bint nullable=True, metadata=None):
 
     metadata = ensure_metadata(metadata, allow_none=True)
     c_meta = pyarrow_unwrap_metadata(metadata)
+
+    if _type.type.id() == _Type_NA and not nullable:
+        raise ValueError("A null type field may not be non-nullable")
 
     result.sp_field.reset(
         new CField(tobytes(name), _type.sp_type, nullable, c_meta)
@@ -1770,9 +1830,6 @@ cdef timeunit_to_string(TimeUnit unit):
         return 'ns'
 
 
-_FIXED_OFFSET_RE = re.compile(r'([+-])(0[0-9]|1[0-9]|2[0-3]):([0-5][0-9])$')
-
-
 def tzinfo_to_string(tz):
     """
     Converts a time zone object into a string indicating the name of a time
@@ -1791,32 +1848,7 @@ def tzinfo_to_string(tz):
       name : str
         Time zone name
     """
-    import pytz
-    import datetime
-
-    def fixed_offset_to_string(offset):
-        seconds = int(offset.utcoffset(None).total_seconds())
-        sign = '+' if seconds >= 0 else '-'
-        minutes, seconds = divmod(abs(seconds), 60)
-        hours, minutes = divmod(minutes, 60)
-        if seconds > 0:
-            raise ValueError('Offset must represent whole number of minutes')
-        return '{}{:02d}:{:02d}'.format(sign, hours, minutes)
-
-    if tz is pytz.utc:
-        return tz.zone  # ARROW-4055
-    elif isinstance(tz, pytz.tzinfo.BaseTzInfo):
-        return tz.zone
-    elif isinstance(tz, pytz._FixedOffset):
-        return fixed_offset_to_string(tz)
-    elif isinstance(tz, datetime.tzinfo):
-        if isinstance(tz, datetime.timezone):
-            return fixed_offset_to_string(tz)
-        else:
-            raise ValueError('Unable to convert timezone `{}` to string'
-                             .format(tz))
-    else:
-        raise TypeError('Must be an instance of `datetime.tzinfo`')
+    return frombytes(GetResultValue(TzinfoToString(<PyObject*>tz)))
 
 
 def string_to_tzinfo(name):
@@ -1838,14 +1870,8 @@ def string_to_tzinfo(name):
       tz : datetime.tzinfo
         Time zone object
     """
-    import pytz
-    m = _FIXED_OFFSET_RE.match(name)
-    if m:
-        sign = 1 if m.group(1) == '+' else -1
-        hours, minutes = map(int, m.group(2, 3))
-        return pytz.FixedOffset(sign * (hours * 60 + minutes))
-    else:
-        return pytz.timezone(name)
+    cdef PyObject* tz = GetResultValue(StringToTzinfo(name.encode('utf-8')))
+    return PyObject_to_object(tz)
 
 
 def timestamp(unit, tz=None):
@@ -2094,6 +2120,26 @@ cpdef DataType decimal128(int precision, int scale=0):
     return pyarrow_wrap_data_type(decimal_type)
 
 
+cpdef DataType decimal256(int precision, int scale=0):
+    """
+    Create decimal type with precision and scale and 256bit width.
+
+    Parameters
+    ----------
+    precision : int
+    scale : int
+
+    Returns
+    -------
+    decimal_type : Decimal256Type
+    """
+    cdef shared_ptr[CDataType] decimal_type
+    if precision < 1 or precision > 76:
+        raise ValueError("precision should be between 1 and 76")
+    decimal_type.reset(new CDecimal256Type(precision, scale))
+    return pyarrow_wrap_data_type(decimal_type)
+
+
 def string():
     """
     Create UTF8 variable-length string type.
@@ -2318,7 +2364,7 @@ def struct(fields):
         vector[shared_ptr[CField]] c_fields
         cdef shared_ptr[CDataType] struct_type
 
-    if isinstance(fields, compat.Mapping):
+    if isinstance(fields, Mapping):
         fields = fields.items()
 
     for item in fields:
@@ -2383,11 +2429,9 @@ def union(children_fields, mode, type_codes=None):
         c_type_codes = range(c_fields.size())
 
     if mode == UnionMode_SPARSE:
-        union_type.reset(new CUnionType(c_fields, c_type_codes,
-                                        _UnionMode_SPARSE))
+        union_type = CMakeSparseUnionType(c_fields, c_type_codes)
     else:
-        union_type.reset(new CUnionType(c_fields, c_type_codes,
-                                        _UnionMode_DENSE))
+        union_type = CMakeDenseUnionType(c_fields, c_type_codes)
 
     return pyarrow_wrap_data_type(union_type)
 
@@ -2467,7 +2511,7 @@ def type_for_alias(name):
     return alias()
 
 
-cdef DataType ensure_type(object ty, c_bool allow_none=False):
+cpdef DataType ensure_type(object ty, bint allow_none=False):
     if allow_none and ty is None:
         return None
     elif isinstance(ty, DataType):
@@ -2515,7 +2559,7 @@ def schema(fields, metadata=None):
         Field py_field
         vector[shared_ptr[CField]] c_fields
 
-    if isinstance(fields, compat.Mapping):
+    if isinstance(fields, Mapping):
         fields = fields.items()
 
     for item in fields:
@@ -2561,7 +2605,7 @@ def is_float_value(object obj):
     return IsPyFloat(obj)
 
 
-cdef class _ExtensionRegistryNanny:
+cdef class _ExtensionRegistryNanny(_Weakrefable):
     # Keep the registry alive until we have unregistered PyExtensionType
     cdef:
         shared_ptr[CExtensionTypeRegistry] registry

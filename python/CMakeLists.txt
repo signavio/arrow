@@ -97,6 +97,11 @@ include(BuildUtils)
 # Cython generated code emits way to many warnings at CHECKIN and EVERYTHING
 set(BUILD_WARNING_LEVEL "PRODUCTION")
 
+# This must be synchronized with the definition in
+# cpp/cmake_modules/DefineOptions.cmake.
+set(ARROW_ARMV8_ARCH
+    "armv8-a"
+    CACHE STRING "Arm64 arch and extensions: armv8-a, armv8-a or armv8-a+crc+crypto")
 include(SetupCxxFlags)
 
 # Add common flags
@@ -174,6 +179,7 @@ else()
   set(BUILD_OUTPUT_ROOT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${BUILD_SUBDIR_NAME}")
 endif()
 
+message(STATUS "Generator: ${CMAKE_GENERATOR}")
 message(STATUS "Build output directory: ${BUILD_OUTPUT_ROOT_DIRECTORY}")
 
 # where to put generated archives (.a files)
@@ -225,16 +231,20 @@ function(bundle_arrow_lib library_path)
 
   get_filename_component(LIBRARY_DIR ${${library_path}} DIRECTORY)
   get_filename_component(LIBRARY_NAME ${${library_path}} NAME_WE)
-  configure_file(
-    ${${library_path}}
-    ${BUILD_OUTPUT_ROOT_DIRECTORY}/${LIBRARY_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX} COPYONLY)
 
-  if(APPLE)
+  # Only copy the shared library with ABI version on Linux and macOS
+
+  if(MSVC)
+    configure_file(
+      ${${library_path}}
+      ${BUILD_OUTPUT_ROOT_DIRECTORY}/${LIBRARY_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}
+      COPYONLY)
+  elseif(APPLE)
     configure_file(
       ${LIBRARY_DIR}/${LIBRARY_NAME}.${ARG_SO_VERSION}${CMAKE_SHARED_LIBRARY_SUFFIX}
       ${BUILD_OUTPUT_ROOT_DIRECTORY}/${LIBRARY_NAME}.${ARG_SO_VERSION}${CMAKE_SHARED_LIBRARY_SUFFIX}
       COPYONLY)
-  elseif(NOT MSVC)
+  else()
     configure_file(
       ${${library_path}}.${ARG_SO_VERSION}
       ${BUILD_OUTPUT_ROOT_DIRECTORY}/${LIBRARY_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX}.${ARG_SO_VERSION}
@@ -377,9 +387,9 @@ endif()
 set(CYTHON_EXTENSIONS
     lib
     _fs
+    _compute
     _csv
-    _json
-    _compute)
+    _json)
 
 set(LINK_LIBS arrow_shared arrow_python_shared)
 

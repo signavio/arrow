@@ -20,24 +20,22 @@
 
 #include <arrow/json/reader.h>
 
-using Rcpp::CharacterVector;
-using Rcpp::List_;
-
 // [[arrow::export]]
-std::shared_ptr<arrow::json::ReadOptions> json___ReadOptions__initialize(List_ options) {
+std::shared_ptr<arrow::json::ReadOptions> json___ReadOptions__initialize(bool use_threads,
+                                                                         int block_size) {
   auto res =
       std::make_shared<arrow::json::ReadOptions>(arrow::json::ReadOptions::Defaults());
-  res->use_threads = options["use_threads"];
-  res->block_size = options["block_size"];
+  res->use_threads = use_threads;
+  res->block_size = block_size;
   return res;
 }
 
 // [[arrow::export]]
 std::shared_ptr<arrow::json::ParseOptions> json___ParseOptions__initialize(
-    List_ options) {
+    bool newlines_in_values) {
   auto res =
       std::make_shared<arrow::json::ParseOptions>(arrow::json::ParseOptions::Defaults());
-  res->newlines_in_values = options["newlines_in_values"];
+  res->newlines_in_values = newlines_in_values;
   return res;
 }
 
@@ -46,18 +44,14 @@ std::shared_ptr<arrow::json::TableReader> json___TableReader__Make(
     const std::shared_ptr<arrow::io::InputStream>& input,
     const std::shared_ptr<arrow::json::ReadOptions>& read_options,
     const std::shared_ptr<arrow::json::ParseOptions>& parse_options) {
-  std::shared_ptr<arrow::json::TableReader> table_reader;
-  STOP_IF_NOT_OK(arrow::json::TableReader::Make(
-      arrow::default_memory_pool(), input, *read_options, *parse_options, &table_reader));
-  return table_reader;
+  return ValueOrStop(arrow::json::TableReader::Make(gc_memory_pool(), input,
+                                                    *read_options, *parse_options));
 }
 
 // [[arrow::export]]
 std::shared_ptr<arrow::Table> json___TableReader__Read(
     const std::shared_ptr<arrow::json::TableReader>& table_reader) {
-  std::shared_ptr<arrow::Table> table;
-  STOP_IF_NOT_OK(table_reader->Read(&table));
-  return table;
+  return ValueOrStop(table_reader->Read());
 }
 
 #endif

@@ -39,9 +39,12 @@ set -e
 
 cd /arrow/python
 
+NCORES=$(($(grep -c ^processor /proc/cpuinfo) + 1))
+
 # PyArrow build configuration
 export PYARROW_BUILD_TYPE='release'
 export PYARROW_CMAKE_GENERATOR='Ninja'
+export PYARROW_PARALLEL=${NCORES}
 
 # ARROW-6860: Disabling ORC in wheels until Protobuf static linking issues
 # across projects is resolved
@@ -49,6 +52,7 @@ export PYARROW_WITH_ORC=0
 export PYARROW_WITH_HDFS=1
 export PYARROW_WITH_PARQUET=1
 export PYARROW_WITH_PLASMA=1
+export PYARROW_WITH_S3=1
 export PYARROW_BUNDLE_ARROW_CPP=1
 # Boost is only a compile-time dependency for wheels => no need to bundle .so's
 export PYARROW_BUNDLE_BOOST=0
@@ -66,23 +70,19 @@ PYTHON_INTERPRETER="${CPYTHON_PATH}/bin/python"
 PIP="${CPYTHON_PATH}/bin/pip"
 PATH="${PATH}:${CPYTHON_PATH}"
 
-# XXX The Docker image doesn't include Python libs, this confuses CMake
-# (https://github.com/pypa/manylinux/issues/484)
-py_libname=$(${PYTHON_INTERPRETER} -c "import sysconfig; print(sysconfig.get_config_var('LDLIBRARY'))")
-touch ${CPYTHON_PATH}/lib/${py_libname}
+# Will be "manylinux2010" or "manylinux2014"
+manylinux_kind=$(${PYTHON_INTERPRETER} -c "import os; print(os.environ['AUDITWHEEL_PLAT'].split('_')[0], end='')")
 
 echo "=== (${PYTHON_VERSION}) Install the wheel build dependencies ==="
 $PIP install -r requirements-wheel-build.txt
 
+export PYARROW_INSTALL_TESTS=1
 export PYARROW_WITH_DATASET=1
 export PYARROW_WITH_FLIGHT=1
-export PYARROW_WITH_GANDIVA=1
+export PYARROW_WITH_GANDIVA=0
 export BUILD_ARROW_DATASET=ON
 export BUILD_ARROW_FLIGHT=ON
-export BUILD_ARROW_GANDIVA=ON
-
-# ARROW-3052(wesm): ORC is being bundled until it can be added to the
-# manylinux1 image
+export BUILD_ARROW_GANDIVA=OFF
 
 echo "=== (${PYTHON_VERSION}) Building Arrow C++ libraries ==="
 ARROW_BUILD_DIR=/tmp/build-PY${PYTHON_VERSION}
@@ -90,11 +90,13 @@ mkdir -p "${ARROW_BUILD_DIR}"
 pushd "${ARROW_BUILD_DIR}"
 PATH="${CPYTHON_PATH}/bin:${PATH}" cmake \
     -DARROW_BOOST_USE_SHARED=ON \
+    -DARROW_BROTLI_USE_SHARED=OFF \
     -DARROW_BUILD_SHARED=ON \
     -DARROW_BUILD_STATIC=OFF \
     -DARROW_BUILD_TESTS=OFF \
     -DARROW_DATASET=${BUILD_ARROW_DATASET} \
     -DARROW_DEPENDENCY_SOURCE="SYSTEM" \
+    -DARROW_DEPENDENCY_USE_SHARED=OFF \
     -DARROW_FLIGHT=${BUILD_ARROW_FLIGHT} \
     -DARROW_GANDIVA_JAVA=OFF \
     -DARROW_GANDIVA_PC_CXX_FLAGS="-isystem;/opt/rh/devtoolset-8/root/usr/include/c++/8/;-isystem;/opt/rh/devtoolset-8/root/usr/include/c++/8/x86_64-redhat-linux/" \
@@ -102,11 +104,14 @@ PATH="${CPYTHON_PATH}/bin:${PATH}" cmake \
     -DARROW_HDFS=ON \
     -DARROW_JEMALLOC=ON \
     -DARROW_ORC=OFF \
+    -DARROW_PACKAGE_KIND=${manylinux_kind} \
     -DARROW_PARQUET=ON \
     -DARROW_PLASMA=ON \
     -DARROW_PYTHON=ON \
     -DARROW_RPATH_ORIGIN=ON \
+    -DARROW_S3=ON \
     -DARROW_TENSORFLOW=ON \
+    -DARROW_UTF8PROC_USE_SHARED=OFF \
     -DARROW_WITH_BROTLI=ON \
     -DARROW_WITH_BZ2=ON \
     -DARROW_WITH_LZ4=ON \
@@ -118,9 +123,9 @@ PATH="${CPYTHON_PATH}/bin:${PATH}" cmake \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_LIBDIR=lib \
     -DCMAKE_INSTALL_PREFIX=/arrow-dist \
+    -DCMAKE_UNITY_BUILD=ON \
     -DOPENSSL_USE_STATIC_LIBS=ON \
     -DORC_SOURCE=BUNDLED \
-    -DPythonInterp_FIND_VERSION=${PYTHON_VERSION} \
     -DZLIB_ROOT=/usr/local \
     -GNinja /arrow/cpp
 ninja install
@@ -151,13 +156,15 @@ $PIP install repaired_wheels/*.whl
 # Test that the modules are importable
 $PYTHON_INTERPRETER -c "
 import pyarrow
+import pyarrow.csv
 import pyarrow.dataset
 import pyarrow.flight
-import pyarrow.gandiva
 import pyarrow.fs
 import pyarrow._hdfs
+import pyarrow.json
 import pyarrow.parquet
 import pyarrow.plasma
+import pyarrow._s3fs
 "
 
 # More thorough testing happens outside of the build to prevent

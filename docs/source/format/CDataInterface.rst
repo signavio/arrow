@@ -15,6 +15,8 @@
 .. specific language governing permissions and limitations
 .. under the License.
 
+.. _c-data-interface:
+
 ==========================
 The Arrow C data interface
 ==========================
@@ -130,21 +132,23 @@ strings:
 | ``g``           | float64                  |            |
 +-----------------+--------------------------+------------+
 
-+-----------------+---------------------------------------+------------+
-| Format string   | Arrow data type                       | Notes      |
-+=================+=======================================+============+
-| ``z``           | binary                                |            |
-+-----------------+---------------------------------------+------------+
-| ``Z``           | large binary                          |            |
-+-----------------+---------------------------------------+------------+
-| ``u``           | utf-8 string                          |            |
-+-----------------+---------------------------------------+------------+
-| ``U``           | large utf-8 string                    |            |
-+-----------------+---------------------------------------+------------+
-| ``d:19,10``     | decimal128 [precision 19, scale 10]   |            |
-+-----------------+---------------------------------------+------------+
-| ``w:42``        | fixed-width binary [42 bytes]         |            |
-+-----------------+---------------------------------------+------------+
++-----------------+---------------------------------------------------+------------+
+| Format string   | Arrow data type                                   | Notes      |
++=================+===================================================+============+
+| ``z``           | binary                                            |            |
++-----------------+---------------------------------------------------+------------+
+| ``Z``           | large binary                                      |            |
++-----------------+---------------------------------------------------+------------+
+| ``u``           | utf-8 string                                      |            |
++-----------------+---------------------------------------------------+------------+
+| ``U``           | large utf-8 string                                |            |
++-----------------+---------------------------------------------------+------------+
+| ``d:19,10``     | decimal128 [precision 19, scale 10]               |            |
++-----------------+---------------------------------------------------+------------+
+| ``d:19,10,NNN`` | decimal bitwidth = NNN [precision 19, scale 10]   |            |
++-----------------+---------------------------------------------------+------------+
+| ``w:42``        | fixed-width binary [42 bytes]                     |            |
++-----------------+---------------------------------------------------+------------+
 
 Temporal types have multi-character format strings starting with ``t``:
 
@@ -533,6 +537,8 @@ Therefore, the consumer MUST not try to interfere with the producer's
 handling of these members' lifetime.  The only way the consumer influences
 data lifetime is by calling the base structure's ``release`` callback.
 
+.. _c-data-interface-released:
+
 Released structure
 ''''''''''''''''''
 
@@ -563,7 +569,7 @@ required bookkeeping information.
 
 The release callback MUST not assume that the structure will be located
 at the same memory location as when it was originally produced.  The consumer
-is free to move the structure around (see "Movability").
+is free to move the structure around (see "Moving an array").
 
 The release callback MUST walk all children structures (including the optional
 dictionary) and call their own release callbacks.
@@ -620,10 +626,16 @@ the producer.
 As usual, the release callback will be called on the destination structure
 when it is not needed anymore.
 
-It is possible to move a child array, but the parent array MUST be released
-immediately afterwards, as it won't point to a valid child array anymore.
-This satisfies the use case of keeping only a subset of child arrays, while
-releasing the others.
+Moving child arrays
+~~~~~~~~~~~~~~~~~~~
+
+It is also possible to move one or several child arrays, but the parent
+``ArrowArray`` structure MUST be released immediately afterwards, as it
+won't point to valid child arrays anymore.
+
+The main use case for this is to keep alive only a subset of child arrays
+(for example if you are only interested in certain columns of the data),
+while releasing the others.
 
 .. note::
 
@@ -674,7 +686,7 @@ release callback is trivial.
    void export_int32_type(struct ArrowSchema* schema) {
       *schema = (struct ArrowSchema) {
          // Type description
-         .format = "l",
+         .format = "i",
          .name = "",
          .metadata = NULL,
          .flags = 0,

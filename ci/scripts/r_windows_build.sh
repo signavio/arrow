@@ -23,26 +23,34 @@ set -ex
 # Make sure it is absolute and exported
 export ARROW_HOME="$(cd "${ARROW_HOME}" && pwd)"
 
-# ccache may be broken on MinGW.
-# pacman --sync --noconfirm ccache
+if [ "$RTOOLS_VERSION" = "35" ]; then
+  # Use rtools-backports if building with rtools35
+  curl https://raw.githubusercontent.com/r-windows/rtools-backports/master/pacman.conf > /etc/pacman.conf
+  # Update keys: https://www.msys2.org/news/#2020-06-29-new-packagers
+  msys2_repo_base_url=https://repo.msys2.org/msys
+  # Mirror
+  msys2_repo_base_url=https://sourceforge.net/projects/msys2/files/REPOS/MSYS2
+  curl -OSsL "${msys2_repo_base_url}/x86_64/msys2-keyring-r21.b39fb11-1-any.pkg.tar.xz"
+  pacman -U --noconfirm msys2-keyring-r21.b39fb11-1-any.pkg.tar.xz && rm msys2-keyring-r21.b39fb11-1-any.pkg.tar.xz
+  # Use sf.net instead of http://repo.msys2.org/ temporary.
+  sed -i -e "s,^Server = http://repo\.msys2\.org/msys,Server = ${msys2_repo_base_url},g" \
+    /etc/pacman.conf
+  pacman --noconfirm -Scc
+  pacman --noconfirm -Syy
+  # lib-4.9.3 is for libraries compiled with gcc 4.9 (Rtools 3.5)
+  RWINLIB_LIB_DIR="lib-4.9.3"
+else
+  # Uncomment L38-41 if you're testing a new rtools dependency that hasn't yet sync'd to CRAN
+  # curl https://raw.githubusercontent.com/r-windows/rtools-packages/master/pacman.conf > /etc/pacman.conf
+  # curl -OSsl "http://repo.msys2.org/msys/x86_64/msys2-keyring-r21.b39fb11-1-any.pkg.tar.xz"
+  # pacman -U --noconfirm msys2-keyring-r21.b39fb11-1-any.pkg.tar.xz && rm msys2-keyring-r21.b39fb11-1-any.pkg.tar.xz
+  # pacman --noconfirm -Scc
 
-wget https://raw.githubusercontent.com/r-windows/rtools-backports/master/pacman.conf
-cp -f pacman.conf /etc/pacman.conf
-
-pacman --noconfirm -Scc
-pacman --noconfirm -Syyu
-pacman --noconfirm --needed -S git base-devel binutils zip
-
-# Install core build stuff
-pacman --noconfirm --needed -S mingw-w64-{i686,x86_64}-{toolchain,crt,winpthreads,gcc,libtre,pkg-config,xz}
-
-# Force static linking
-rm -f /mingw32/lib/*.dll.a
-rm -f /mingw64/lib/*.dll.a
-export PKG_CONFIG="/${MINGW_PREFIX}/bin/pkg-config --static"
+  pacman --noconfirm -Syy
+  RWINLIB_LIB_DIR="lib"
+fi
 
 cp $ARROW_HOME/ci/scripts/PKGBUILD .
-export PKGEXT='.pkg.tar.xz' # pacman default changed to .zst in 2020, but keep the old ext for compat
 printenv
 makepkg-mingw --noconfirm --noprogressbar --skippgpcheck --nocheck --syncdeps --cleanbuild
 
@@ -51,42 +59,45 @@ DST_DIR="arrow-$VERSION"
 
 # Collect the build artifacts and make the shape of zip file that rwinlib expects
 ls
-mkdir build
-cp mingw* build
+mkdir -p build
+mv mingw* build
 cd build
 
 # This may vary by system/CI provider
-MSYS_LIB_DIR="D:/a/_temp/msys/msys64"
+MSYS_LIB_DIR="/c/rtools40"
 
 ls $MSYS_LIB_DIR/mingw64/lib/
 ls $MSYS_LIB_DIR/mingw32/lib/
 
 # Untar the two builds we made
-ls | xargs -n 1 tar -xJf
-mkdir $DST_DIR
+ls *.xz | xargs -n 1 tar -xJf
+mkdir -p $DST_DIR
 # Grab the headers from one, either one is fine
-mv mingw64/include $DST_DIR
+# (if we're building twice to combine old and new toolchains, this may already exist)
+if [ ! -d $DST_DIR/include ]; then
+  mv mingw64/include $DST_DIR
+fi
 
 # Make the rest of the directory structure
 # lib-4.9.3 is for libraries compiled with gcc 4.9 (Rtools 3.5)
-mkdir -p $DST_DIR/lib-4.9.3/x64
-mkdir -p $DST_DIR/lib-4.9.3/i386
+mkdir -p $DST_DIR/${RWINLIB_LIB_DIR}/x64
+mkdir -p $DST_DIR/${RWINLIB_LIB_DIR}/i386
 # lib is for the new gcc 8 toolchain (Rtools 4.0)
 mkdir -p $DST_DIR/lib/x64
 mkdir -p $DST_DIR/lib/i386
 
 # Move the 64-bit versions of libarrow into the expected location
-mv mingw64/lib/*.a $DST_DIR/lib-4.9.3/x64
+mv mingw64/lib/*.a $DST_DIR/${RWINLIB_LIB_DIR}/x64
 # Same for the 32-bit versions
-mv mingw32/lib/*.a $DST_DIR/lib-4.9.3/i386
+mv mingw32/lib/*.a $DST_DIR/${RWINLIB_LIB_DIR}/i386
 
-# These are from https://dl.bintray.com/rtools/backports/
-cp $MSYS_LIB_DIR/mingw64/lib/lib{thrift,snappy}.a $DST_DIR/lib-4.9.3/x64
-cp $MSYS_LIB_DIR/mingw32/lib/lib{thrift,snappy}.a $DST_DIR/lib-4.9.3/i386
+# These may be from https://dl.bintray.com/rtools/backports/
+cp $MSYS_LIB_DIR/mingw64/lib/lib{thrift,snappy}.a $DST_DIR/${RWINLIB_LIB_DIR}/x64
+cp $MSYS_LIB_DIR/mingw32/lib/lib{thrift,snappy}.a $DST_DIR/${RWINLIB_LIB_DIR}/i386
 
 # These are from https://dl.bintray.com/rtools/mingw{32,64}/
-cp $MSYS_LIB_DIR/mingw64/lib/lib{zstd,lz4,crypto}.a $DST_DIR/lib/x64
-cp $MSYS_LIB_DIR/mingw32/lib/lib{zstd,lz4,crypto}.a $DST_DIR/lib/i386
+cp $MSYS_LIB_DIR/mingw64/lib/lib{zstd,lz4,crypto,aws*}.a $DST_DIR/lib/x64
+cp $MSYS_LIB_DIR/mingw32/lib/lib{zstd,lz4,crypto,aws*}.a $DST_DIR/lib/i386
 
 # Create build artifact
 zip -r ${DST_DIR}.zip $DST_DIR

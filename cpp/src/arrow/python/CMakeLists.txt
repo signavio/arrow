@@ -30,7 +30,6 @@ set(ARROW_PYTHON_SRCS
     arrow_to_pandas.cc
     benchmark.cc
     common.cc
-    config.cc
     datetime.cc
     decimal.cc
     deserialize.cc
@@ -39,6 +38,7 @@ set(ARROW_PYTHON_SRCS
     inference.cc
     init.cc
     io.cc
+    ipc.cc
     numpy_convert.cc
     numpy_to_arrow.cc
     python_to_arrow.cc
@@ -51,6 +51,10 @@ set_source_files_properties(init.cc
                             ON
                             SKIP_UNITY_BUILD_INCLUSION
                             ON)
+
+if(ARROW_FILESYSTEM)
+  list(APPEND ARROW_PYTHON_SRCS filesystem.cc)
+endif()
 
 set(ARROW_PYTHON_DEPENDENCIES arrow_dependencies)
 

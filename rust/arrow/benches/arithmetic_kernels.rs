@@ -17,102 +17,81 @@
 
 #[macro_use]
 extern crate criterion;
-use arrow::error::ArrowError;
 use criterion::Criterion;
-use num::Zero;
 
+use rand::Rng;
 use std::sync::Arc;
 
 extern crate arrow;
 
 use arrow::array::*;
-use arrow::compute::kernels::aggregate::*;
 use arrow::compute::kernels::arithmetic::*;
 use arrow::compute::kernels::limit::*;
-use arrow::error::Result;
 
-fn create_array(size: usize) -> Float32Array {
+fn create_array(size: usize, with_nulls: bool) -> ArrayRef {
+    // use random numbers to avoid spurious compiler optimizations wrt to branching
+    let mut rng = rand::thread_rng();
     let mut builder = Float32Builder::new(size);
-    for _i in 0..size {
-        builder.append_value(1.0).unwrap();
+
+    for _ in 0..size {
+        if with_nulls && rng.gen::<f32>() > 0.5 {
+            builder.append_null().unwrap();
+        } else {
+            builder.append_value(rng.gen()).unwrap();
+        }
     }
-    builder.finish()
+    Arc::new(builder.finish())
 }
 
-fn bin_op_no_simd<F>(size: usize, op: F)
-where
-    F: Fn(f32, f32) -> Result<f32>,
-{
-    let arr_a = create_array(size);
-    let arr_b = create_array(size);
-    criterion::black_box(math_op(&arr_a, &arr_b, op).unwrap());
+fn bench_add(arr_a: &ArrayRef, arr_b: &ArrayRef) {
+    let arr_a = arr_a.as_any().downcast_ref::<Float32Array>().unwrap();
+    let arr_b = arr_b.as_any().downcast_ref::<Float32Array>().unwrap();
+    criterion::black_box(add(arr_a, arr_b).unwrap());
 }
 
-fn add_simd(size: usize) {
-    let arr_a = create_array(size);
-    let arr_b = create_array(size);
-    criterion::black_box(add(&arr_a, &arr_b).unwrap());
-}
-
-fn subtract_simd(size: usize) {
-    let arr_a = create_array(size);
-    let arr_b = create_array(size);
+fn bench_subtract(arr_a: &ArrayRef, arr_b: &ArrayRef) {
+    let arr_a = arr_a.as_any().downcast_ref::<Float32Array>().unwrap();
+    let arr_b = arr_b.as_any().downcast_ref::<Float32Array>().unwrap();
     criterion::black_box(subtract(&arr_a, &arr_b).unwrap());
 }
 
-fn multiply_simd(size: usize) {
-    let arr_a = create_array(size);
-    let arr_b = create_array(size);
+fn bench_multiply(arr_a: &ArrayRef, arr_b: &ArrayRef) {
+    let arr_a = arr_a.as_any().downcast_ref::<Float32Array>().unwrap();
+    let arr_b = arr_b.as_any().downcast_ref::<Float32Array>().unwrap();
     criterion::black_box(multiply(&arr_a, &arr_b).unwrap());
 }
 
-fn divide_simd(size: usize) {
-    let arr_a = create_array(size);
-    let arr_b = create_array(size);
+fn bench_divide(arr_a: &ArrayRef, arr_b: &ArrayRef) {
+    let arr_a = arr_a.as_any().downcast_ref::<Float32Array>().unwrap();
+    let arr_b = arr_b.as_any().downcast_ref::<Float32Array>().unwrap();
     criterion::black_box(divide(&arr_a, &arr_b).unwrap());
 }
 
-fn sum_no_simd(size: usize) {
-    let arr_a = create_array(size);
-    criterion::black_box(sum(&arr_a).unwrap());
-}
-
-fn limit_no_simd(size: usize, max: usize) {
-    let arr_a: ArrayRef = Arc::new(create_array(size));
-    criterion::black_box(limit(&arr_a, max).unwrap());
+fn bench_limit(arr_a: &ArrayRef, max: usize) {
+    criterion::black_box(limit(arr_a, max).unwrap());
 }
 
 fn add_benchmark(c: &mut Criterion) {
-    c.bench_function("add 512", |b| {
-        b.iter(|| bin_op_no_simd(512, |a, b| Ok(a + b)))
-    });
-    c.bench_function("add 512 simd", |b| b.iter(|| add_simd(512)));
+    let arr_a = create_array(512, false);
+    let arr_b = create_array(512, false);
+
+    c.bench_function("add 512", |b| b.iter(|| bench_add(&arr_a, &arr_b)));
     c.bench_function("subtract 512", |b| {
-        b.iter(|| bin_op_no_simd(512, |a, b| Ok(a - b)))
+        b.iter(|| bench_subtract(&arr_a, &arr_b))
     });
-    c.bench_function("subtract 512 simd", |b| b.iter(|| subtract_simd(512)));
     c.bench_function("multiply 512", |b| {
-        b.iter(|| bin_op_no_simd(512, |a, b| Ok(a * b)))
+        b.iter(|| bench_multiply(&arr_a, &arr_b))
     });
-    c.bench_function("multiply 512 simd", |b| b.iter(|| multiply_simd(512)));
-    c.bench_function("divide 512", |b| {
-        b.iter(|| {
-            bin_op_no_simd(512, |a, b| {
-                if b.is_zero() {
-                    Err(ArrowError::DivideByZero)
-                } else {
-                    Ok(a / b)
-                }
-            })
-        })
+    c.bench_function("divide 512", |b| b.iter(|| bench_divide(&arr_a, &arr_b)));
+    c.bench_function("limit 512, 512", |b| b.iter(|| bench_limit(&arr_a, 512)));
+
+    let arr_a_nulls = create_array(512, false);
+    let arr_b_nulls = create_array(512, false);
+    c.bench_function("add_nulls_512", |b| {
+        b.iter(|| bench_add(&arr_a_nulls, &arr_b_nulls))
     });
-    c.bench_function("divide 512 simd", |b| b.iter(|| divide_simd(512)));
-    c.bench_function("sum 512 no simd", |b| b.iter(|| sum_no_simd(512)));
-    c.bench_function("limit 512, 256 no simd", |b| {
-        b.iter(|| limit_no_simd(512, 256))
-    });
-    c.bench_function("limit 512, 512 no simd", |b| {
-        b.iter(|| limit_no_simd(512, 512))
+    c.bench_function("divide_nulls_512", |b| {
+        b.iter(|| bench_divide(&arr_a_nulls, &arr_b_nulls))
     });
 }
 

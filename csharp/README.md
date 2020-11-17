@@ -94,6 +94,7 @@ This implementation is under development and may not be suitable for use in prod
 - Time64
 - Binary (fixed-length)
 - List
+- Struct
 
 ### Type Metadata
 
@@ -119,7 +120,6 @@ This implementation is under development and may not be suitable for use in prod
     - Tensor
     - Table
 - Arrays
-    - Struct
     - Union
         - Dense
         - Sparse
@@ -170,6 +170,10 @@ Build from the Apache Arrow project root.
 	dotnet test
 
 All build artifacts are placed in the **artifacts** folder in the project root.
+
+# Coding Style
+
+This project follows the coding style specified in [Coding Style](https://github.com/dotnet/runtime/blob/master/docs/coding-guidelines/coding-style.md).
 
 # Updating FlatBuffers code
 

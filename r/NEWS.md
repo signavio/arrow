@@ -17,7 +17,114 @@
   under the License.
 -->
 
-# arrow 0.16.0.9000
+# arrow 2.0.0.9000
+
+# arrow 2.0.0
+
+## Datasets
+
+* `write_dataset()` to Feather or Parquet files with partitioning. See the end of `vignette("dataset", package = "arrow")` for discussion and examples.
+* Datasets now have `head()`, `tail()`, and take (`[`) methods. `head()` is optimized but the others  may not be performant.
+* `collect()` gains an `as_data_frame` argument, default `TRUE` but when `FALSE` allows you to evaluate the accumulated `select` and `filter` query but keep the result in Arrow, not an R `data.frame`
+* `read_csv_arrow()` supports specifying column types, both with a `Schema` and with the compact string representation for types used in the `readr` package. It also has gained a `timestamp_parsers` argument that lets you express a set of `strptime` parse strings that will be tried to convert columns designated as `Timestamp` type.
+
+## AWS S3 support
+
+* S3 support is now enabled in binary macOS and Windows (Rtools40 only, i.e. R >= 4.0) packages. To enable it on Linux, you need the additional system dependencies `libcurl` and `openssl`, as well as a sufficiently modern compiler. See `vignette("install", package = "arrow")` for details.
+* File readers and writers (`read_parquet()`, `write_feather()`, et al.), as well as `open_dataset()` and `write_dataset()`, allow you to access resources on S3 (or on file systems that emulate S3) either by providing an `s3://` URI or by providing a `FileSystem$path()`. See `vignette("fs", package = "arrow")` for examples.
+* `copy_files()` allows you to recursively copy directories of files from one file system to another, such as from S3 to your local machine.
+
+## Flight RPC
+
+[Flight](https://arrow.apache.org/blog/2019/10/13/introducing-arrow-flight/)
+is a general-purpose client-server framework for high performance
+transport of large datasets over network interfaces.
+The `arrow` R package now provides methods for connecting to Flight RPC servers
+to send and receive data. See `vignette("flight", package = "arrow")` for an overview.
+
+## Computation
+
+* Comparison (`==`, `>`, etc.) and boolean (`&`, `|`, `!`) operations, along with `is.na`, `%in%` and `match` (called `match_arrow()`), on Arrow Arrays and ChunkedArrays are now implemented in the C++ library.
+* Aggregation methods `min()`, `max()`, and `unique()` are implemented for Arrays and ChunkedArrays.
+* `dplyr` filter expressions on Arrow Tables and RecordBatches are now evaluated in the C++ library, rather than by pulling data into R and evaluating. This yields significant performance improvements.
+* `dim()` (`nrow`) for dplyr queries on Table/RecordBatch is now supported
+
+## Packaging and installation
+
+* `arrow` now depends on [`cpp11`](https://cpp11.r-lib.org/), which brings more robust UTF-8 handling and faster compilation
+* The Linux build script now succeeds on older versions of R
+* MacOS binary packages now ship with zstandard compression enabled
+
+## Bug fixes and other enhancements
+
+* Automatic conversion of Arrow `Int64` type when all values fit with an R 32-bit integer now correctly inspects all chunks in a ChunkedArray, and this conversion can be disabled (so that `Int64` always yields a `bit64::integer64` vector) by setting `options(arrow.int64_downcast = FALSE)`.
+* In addition to the data.frame column metadata preserved in round trip, added in 1.0.0, now attributes of the data.frame itself are also preserved in Arrow schema metadata.
+* File writers now respect the system umask setting
+* `ParquetFileReader` has additional methods for accessing individual columns or row groups from the file
+* Various segfaults fixed: invalid input in `ParquetFileWriter`; invalid `ArrowObject` pointer from a saved R object; converting deeply nested structs from Arrow to R
+* The `properties` and `arrow_properties` arguments to `write_parquet()` are deprecated
+
+# arrow 1.0.1
+
+## Bug fixes
+
+* Filtering a Dataset that has multiple partition keys using an `%in%` expression now faithfully returns all relevant rows
+* Datasets can now have path segments in the root directory that start with `.` or `_`; files and subdirectories starting with those prefixes are still ignored
+* `open_dataset("~/path")` now correctly expands the path
+* The `version` option to `write_parquet()` is now correctly implemented
+* An UBSAN failure in the `parquet-cpp` library has been fixed
+* For bundled Linux builds, the logic for finding `cmake` is more robust, and you can now specify a `/path/to/cmake` by setting the `CMAKE` environment variable
+
+# arrow 1.0.0
+
+## Arrow format conversion
+
+* `vignette("arrow", package = "arrow")` includes tables that explain how R types are converted to Arrow types and vice versa.
+* Support added for converting to/from more Arrow types: `uint64`, `binary`, `fixed_size_binary`, `large_binary`, `large_utf8`, `large_list`, `list` of `structs`.
+* `character` vectors that exceed 2GB are converted to Arrow `large_utf8` type
+* `POSIXlt` objects can now be converted to Arrow (`struct`)
+* R `attributes()` are preserved in Arrow metadata when converting to Arrow RecordBatch and table and are restored when converting from Arrow. This means that custom subclasses, such as `haven::labelled`, are preserved in round trip through Arrow.
+* Schema metadata is now exposed as a named list, and it can be modified by assignment like `batch$metadata$new_key <- "new value"`
+* Arrow types `int64`, `uint32`, and `uint64` now are converted to R `integer` if all values fit in bounds
+* Arrow `date32` is now converted to R `Date` with `double` underlying storage. Even though the data values themselves are integers, this provides more strict round-trip fidelity
+* When converting to R `factor`, `dictionary` ChunkedArrays that do not have identical dictionaries are properly unified
+* In the 1.0 release, the Arrow IPC metadata version is increased from V4 to V5. By default, `RecordBatch{File,Stream}Writer` will write V5, but you can specify an alternate `metadata_version`. For convenience, if you know the consumer you're writing to cannot read V5, you can set the environment variable `ARROW_PRE_1_0_METADATA_VERSION=1` to write V4 without changing any other code.
+
+## Datasets
+
+* CSV and other text-delimited datasets are now supported
+* With a custom C++ build, it is possible to read datasets directly on S3 by passing a URL like `ds <- open_dataset("s3://...")`. Note that this currently requires a special C++ library build with additional dependencies--this is not yet available in CRAN releases or in nightly packages.
+* When reading individual CSV and JSON files, compression is automatically detected from the file extension
+
+## Other enhancements
+
+* Initial support for C++ aggregation methods: `sum()` and `mean()` are implemented for `Array` and `ChunkedArray`
+* Tables and RecordBatches have additional data.frame-like methods, including `dimnames()` and `as.list()`
+* Tables and ChunkedArrays can now be moved to/from Python via `reticulate`
+
+## Bug fixes and deprecations
+
+* Non-UTF-8 strings (common on Windows) are correctly coerced to UTF-8 when passing to Arrow memory and appropriately re-localized when converting to R
+* The `coerce_timestamps` option to `write_parquet()` is now correctly implemented.
+* Creating a Dictionary array respects the `type` definition if provided by the user
+* `read_arrow` and `write_arrow` are now deprecated; use the `read/write_feather()` and `read/write_ipc_stream()` functions depending on whether you're working with the Arrow IPC file or stream format, respectively.
+* Previously deprecated `FileStats`, `read_record_batch`, and `read_table` have been removed.
+
+## Installation and packaging
+
+* For improved performance in memory allocation, macOS and Linux binaries now have `jemalloc` included, and Windows packages use `mimalloc`
+* Linux installation: some tweaks to OS detection for binaries, some updates to known installation issues in the vignette
+* The bundled libarrow is built with the same `CC` and `CXX` values that R uses
+* Failure to build the bundled libarrow yields a clear message
+* Various streamlining efforts to reduce library size and compile time
+
+# arrow 0.17.1
+
+* Updates for compatibility with `dplyr` 1.0
+* `reticulate::r_to_py()` conversion now correctly works automatically, without having to call the method yourself
+* Assorted bug fixes in the C++ library around Parquet reading
+
+# arrow 0.17.0
 
 ## Feather v2
 
@@ -67,8 +174,9 @@ See `vignette("python", package = "arrow")` for details.
 * Installation on Linux now builds C++ the library from source by default, with some compression libraries disabled. For a faster, richer build, set the environment variable `NOT_CRAN=true`. See `vignette("install", package = "arrow")` for details and more options.
 * Source installation is faster and more reliable on more Linux distributions.
 
-## Other bug fixes
+## Other bug fixes and enhancements
 
+* `unify_schemas()` to create a `Schema` containing the union of fields in multiple schemas
 * Timezones are faithfully preserved in roundtrip between R and Arrow
 * `read_feather()` and other reader functions close any file connections they open
 * Arrow R6 objects no longer have namespace collisions when the `R.oo` package is also loaded

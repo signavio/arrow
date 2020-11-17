@@ -33,12 +33,12 @@ use crate::error::{ArrowError, Result};
 /// datatypes.
 ///
 /// Record batches are a convenient unit of work for various
-/// serialization and computation functions, possibly incremental.  
+/// serialization and computation functions, possibly incremental.
 /// See also [CSV reader](crate::csv::Reader) and
 /// [JSON reader](crate::json::Reader).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RecordBatch {
-    schema: Arc<Schema>,
+    schema: SchemaRef,
     columns: Vec<Arc<Array>>,
 }
 
@@ -74,7 +74,7 @@ impl RecordBatch {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn try_new(schema: Arc<Schema>, columns: Vec<ArrayRef>) -> Result<Self> {
+    pub fn try_new(schema: SchemaRef, columns: Vec<ArrayRef>) -> Result<Self> {
         // check that there are some columns
         if columns.is_empty() {
             return Err(ArrowError::InvalidArgumentError(
@@ -84,23 +84,26 @@ impl RecordBatch {
         }
         // check that number of fields in schema match column length
         if schema.fields().len() != columns.len() {
-            return Err(ArrowError::InvalidArgumentError(
-                "number of columns must match number of fields in schema".to_string(),
-            ));
+            return Err(ArrowError::InvalidArgumentError(format!(
+                "number of columns({}) must match number of fields({}) in schema",
+                columns.len(),
+                schema.fields().len(),
+            )));
         }
         // check that all columns have the same row count, and match the schema
         let len = columns[0].data().len();
-        for i in 0..columns.len() {
-            if columns[i].len() != len {
+
+        for (i, column) in columns.iter().enumerate() {
+            if column.len() != len {
                 return Err(ArrowError::InvalidArgumentError(
                     "all columns in a record batch must have the same length".to_string(),
                 ));
             }
-            if columns[i].data_type() != schema.field(i).data_type() {
+            if column.data_type() != schema.field(i).data_type() {
                 return Err(ArrowError::InvalidArgumentError(format!(
                     "column types must match schema types, expected {:?} but found {:?} at column index {}",
                     schema.field(i).data_type(),
-                    columns[i].data_type(),
+                    column.data_type(),
                     i)));
             }
         }
@@ -108,8 +111,8 @@ impl RecordBatch {
     }
 
     /// Returns the [`Schema`](crate::datatypes::Schema) of the record batch.
-    pub fn schema(&self) -> &Arc<Schema> {
-        &self.schema
+    pub fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 
     /// Returns the number of columns in the record batch.
@@ -213,15 +216,22 @@ impl Into<StructArray> for RecordBatch {
     }
 }
 
-/// Definition of record batch reader.
-pub trait RecordBatchReader {
-    /// Returns schemas of this record batch reader.
-    /// Implementation of this trait should guarantee that all record batches returned
-    /// by this reader should have same schema as returned from this method.
-    fn schema(&mut self) -> SchemaRef;
+/// Trait for types that can read `RecordBatch`'s.
+pub trait RecordBatchReader: Iterator<Item = Result<RecordBatch>> {
+    /// Returns the schema of this `RecordBatchReader`.
+    ///
+    /// Implementation of this trait should guarantee that all `RecordBatch`'s returned by this
+    /// reader should have the same schema as returned from this method.
+    fn schema(&self) -> SchemaRef;
 
-    /// Returns next record batch.
-    fn next_batch(&mut self) -> Result<Option<RecordBatch>>;
+    /// Reads the next `RecordBatch`.
+    #[deprecated(
+        since = "2.0.0",
+        note = "This method is deprecated in favour of `next` from the trait Iterator."
+    )]
+    fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        self.next().transpose()
+    }
 }
 
 #[cfg(test)]
@@ -251,7 +261,7 @@ mod tests {
             .add_buffer(Buffer::from(offset_data.to_byte_slice()))
             .add_buffer(Buffer::from(v.to_byte_slice()))
             .build();
-        let b = BinaryArray::from(array_data);
+        let b = StringArray::from(array_data);
 
         let record_batch =
             RecordBatch::try_new(Arc::new(schema), vec![Arc::new(a), Arc::new(b)])

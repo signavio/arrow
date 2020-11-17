@@ -18,6 +18,8 @@
 #include <sstream>
 #include <utility>
 
+#include "arrow/util/config.h"
+
 #include "arrow/filesystem/filesystem.h"
 #ifdef ARROW_HDFS
 #include "arrow/filesystem/hdfs.h"
@@ -35,6 +37,7 @@
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/macros.h"
+#include "arrow/util/parallel.h"
 #include "arrow/util/uri.h"
 #include "arrow/util/windows_fixup.h"
 
@@ -137,6 +140,28 @@ Status FileSystem::DeleteFiles(const std::vector<std::string>& paths) {
   return st;
 }
 
+Result<std::shared_ptr<io::InputStream>> FileSystem::OpenInputStream(
+    const FileInfo& info) {
+  if (info.type() == FileType::NotFound) {
+    return internal::PathNotFound(info.path());
+  }
+  if (info.type() != FileType::File && info.type() != FileType::Unknown) {
+    return internal::NotAFile(info.path());
+  }
+  return OpenInputStream(info.path());
+}
+
+Result<std::shared_ptr<io::RandomAccessFile>> FileSystem::OpenInputFile(
+    const FileInfo& info) {
+  if (info.type() == FileType::NotFound) {
+    return internal::PathNotFound(info.path());
+  }
+  if (info.type() != FileType::File && info.type() != FileType::Unknown) {
+    return internal::NotAFile(info.path());
+  }
+  return OpenInputFile(info.path());
+}
+
 //////////////////////////////////////////////////////////////////////////
 // SubTreeFileSystem implementation
 
@@ -231,8 +256,19 @@ Status SubTreeFileSystem::DeleteDir(const std::string& path) {
 }
 
 Status SubTreeFileSystem::DeleteDirContents(const std::string& path) {
+  if (internal::IsEmptyPath(path)) {
+    return internal::InvalidDeleteDirContents(path);
+  }
   auto s = PrependBase(path);
   return base_fs_->DeleteDirContents(s);
+}
+
+Status SubTreeFileSystem::DeleteRootDirContents() {
+  if (base_path_.empty()) {
+    return base_fs_->DeleteRootDirContents();
+  } else {
+    return base_fs_->DeleteDirContents(base_path_);
+  }
 }
 
 Status SubTreeFileSystem::DeleteFile(const std::string& path) {
@@ -264,11 +300,29 @@ Result<std::shared_ptr<io::InputStream>> SubTreeFileSystem::OpenInputStream(
   return base_fs_->OpenInputStream(s);
 }
 
+Result<std::shared_ptr<io::InputStream>> SubTreeFileSystem::OpenInputStream(
+    const FileInfo& info) {
+  auto s = info.path();
+  RETURN_NOT_OK(PrependBaseNonEmpty(&s));
+  FileInfo new_info(info);
+  new_info.set_path(std::move(s));
+  return base_fs_->OpenInputStream(new_info);
+}
+
 Result<std::shared_ptr<io::RandomAccessFile>> SubTreeFileSystem::OpenInputFile(
     const std::string& path) {
   auto s = path;
   RETURN_NOT_OK(PrependBaseNonEmpty(&s));
   return base_fs_->OpenInputFile(s);
+}
+
+Result<std::shared_ptr<io::RandomAccessFile>> SubTreeFileSystem::OpenInputFile(
+    const FileInfo& info) {
+  auto s = info.path();
+  RETURN_NOT_OK(PrependBaseNonEmpty(&s));
+  FileInfo new_info(info);
+  new_info.set_path(std::move(s));
+  return base_fs_->OpenInputFile(new_info);
 }
 
 Result<std::shared_ptr<io::OutputStream>> SubTreeFileSystem::OpenOutputStream(
@@ -327,6 +381,11 @@ Status SlowFileSystem::DeleteDirContents(const std::string& path) {
   return base_fs_->DeleteDirContents(path);
 }
 
+Status SlowFileSystem::DeleteRootDirContents() {
+  latencies_->Sleep();
+  return base_fs_->DeleteRootDirContents();
+}
+
 Status SlowFileSystem::DeleteFile(const std::string& path) {
   latencies_->Sleep();
   return base_fs_->DeleteFile(path);
@@ -349,10 +408,24 @@ Result<std::shared_ptr<io::InputStream>> SlowFileSystem::OpenInputStream(
   return std::make_shared<io::SlowInputStream>(stream, latencies_);
 }
 
+Result<std::shared_ptr<io::InputStream>> SlowFileSystem::OpenInputStream(
+    const FileInfo& info) {
+  latencies_->Sleep();
+  ARROW_ASSIGN_OR_RAISE(auto stream, base_fs_->OpenInputStream(info));
+  return std::make_shared<io::SlowInputStream>(stream, latencies_);
+}
+
 Result<std::shared_ptr<io::RandomAccessFile>> SlowFileSystem::OpenInputFile(
     const std::string& path) {
   latencies_->Sleep();
   ARROW_ASSIGN_OR_RAISE(auto file, base_fs_->OpenInputFile(path));
+  return std::make_shared<io::SlowRandomAccessFile>(file, latencies_);
+}
+
+Result<std::shared_ptr<io::RandomAccessFile>> SlowFileSystem::OpenInputFile(
+    const FileInfo& info) {
+  latencies_->Sleep();
+  ARROW_ASSIGN_OR_RAISE(auto file, base_fs_->OpenInputFile(info));
   return std::make_shared<io::SlowRandomAccessFile>(file, latencies_);
 }
 
@@ -369,73 +442,117 @@ Result<std::shared_ptr<io::OutputStream>> SlowFileSystem::OpenAppendStream(
   return base_fs_->OpenAppendStream(path);
 }
 
+Status CopyFiles(const std::vector<FileLocator>& sources,
+                 const std::vector<FileLocator>& destinations, int64_t chunk_size,
+                 bool use_threads) {
+  if (sources.size() != destinations.size()) {
+    return Status::Invalid("Trying to copy ", sources.size(), " files into ",
+                           destinations.size(), " paths.");
+  }
+
+  return ::arrow::internal::OptionalParallelFor(
+      use_threads, static_cast<int>(sources.size()), [&](int i) {
+        if (sources[i].filesystem->Equals(destinations[i].filesystem)) {
+          return sources[i].filesystem->CopyFile(sources[i].path, destinations[i].path);
+        }
+
+        ARROW_ASSIGN_OR_RAISE(auto source,
+                              sources[i].filesystem->OpenInputStream(sources[i].path));
+
+        ARROW_ASSIGN_OR_RAISE(
+            auto destination,
+            destinations[i].filesystem->OpenOutputStream(destinations[i].path));
+        return internal::CopyStream(source, destination, chunk_size);
+      });
+}
+
+Status CopyFiles(const std::shared_ptr<FileSystem>& source_fs,
+                 const FileSelector& source_sel,
+                 const std::shared_ptr<FileSystem>& destination_fs,
+                 const std::string& destination_base_dir, int64_t chunk_size,
+                 bool use_threads) {
+  ARROW_ASSIGN_OR_RAISE(auto source_infos, source_fs->GetFileInfo(source_sel));
+  if (source_infos.empty()) {
+    return Status::OK();
+  }
+
+  std::vector<FileLocator> sources, destinations;
+  std::vector<std::string> dirs;
+
+  for (const FileInfo& source_info : source_infos) {
+    auto relative = internal::RemoveAncestor(source_sel.base_dir, source_info.path());
+    if (!relative.has_value()) {
+      return Status::Invalid("GetFileInfo() yielded path '", source_info.path(),
+                             "', which is outside base dir '", source_sel.base_dir, "'");
+    }
+
+    auto destination_path =
+        internal::ConcatAbstractPath(destination_base_dir, relative->to_string());
+
+    if (source_info.IsDirectory()) {
+      dirs.push_back(destination_path);
+    } else if (source_info.IsFile()) {
+      sources.push_back({source_fs, source_info.path()});
+      destinations.push_back({destination_fs, destination_path});
+    }
+  }
+
+  dirs = internal::MinimalCreateDirSet(std::move(dirs));
+  RETURN_NOT_OK(::arrow::internal::OptionalParallelFor(
+      use_threads, static_cast<int>(dirs.size()),
+      [&](int i) { return destination_fs->CreateDir(dirs[i]); }));
+
+  return CopyFiles(sources, destinations, chunk_size, use_threads);
+}
+
 namespace {
 
-struct FileSystemUri {
+Result<Uri> ParseFileSystemUri(const std::string& uri_string) {
   Uri uri;
-  std::string scheme;
-  std::string path;
-  bool is_local = false;
-};
-
-Result<FileSystemUri> ParseFileSystemUri(const std::string& uri_string) {
-  FileSystemUri fsuri;
-  auto status = fsuri.uri.Parse(uri_string);
+  auto status = uri.Parse(uri_string);
   if (!status.ok()) {
 #ifdef _WIN32
     // Could be a "file:..." URI with backslashes instead of regular slashes.
-    RETURN_NOT_OK(fsuri.uri.Parse(ToSlashes(uri_string)));
-    if (fsuri.uri.scheme() != "file") {
+    RETURN_NOT_OK(uri.Parse(ToSlashes(uri_string)));
+    if (uri.scheme() != "file") {
       return status;
     }
 #else
     return status;
 #endif
   }
-  fsuri.scheme = fsuri.uri.scheme();
-  fsuri.path = fsuri.uri.path();
-  if (fsuri.scheme == "file") {
-    fsuri.is_local = true;
-  }
-  return std::move(fsuri);
+  return std::move(uri);
 }
 
-Result<FileSystemUri> ParseFileSystemUriOrPath(const std::string& uri_string) {
-  if (internal::DetectAbsolutePath(uri_string)) {
-    FileSystemUri fsuri;
-    fsuri.path = uri_string;
-    fsuri.is_local = true;
-    return std::move(fsuri);
-  }
-  return ParseFileSystemUri(uri_string);
-}
-
-Result<std::shared_ptr<FileSystem>> FileSystemFromUriReal(const FileSystemUri& fsuri,
+Result<std::shared_ptr<FileSystem>> FileSystemFromUriReal(const Uri& uri,
                                                           const std::string& uri_string,
                                                           std::string* out_path) {
-  if (out_path != nullptr) {
-    *out_path = fsuri.path;
-  }
-  if (fsuri.is_local) {
-    // Normalize path separators
+  const auto scheme = uri.scheme();
+
+  if (scheme == "file") {
+    std::string path;
+    ARROW_ASSIGN_OR_RAISE(auto options, LocalFileSystemOptions::FromUri(uri, &path));
     if (out_path != nullptr) {
-      *out_path = ToSlashes(*out_path);
+      *out_path = path;
     }
-    return std::make_shared<LocalFileSystem>();
+    return std::make_shared<LocalFileSystem>(options);
   }
-  if (fsuri.scheme == "hdfs" || fsuri.scheme == "viewfs") {
+  if (scheme == "hdfs" || scheme == "viewfs") {
 #ifdef ARROW_HDFS
-    ARROW_ASSIGN_OR_RAISE(auto options, HdfsOptions::FromUri(fsuri.uri));
+    ARROW_ASSIGN_OR_RAISE(auto options, HdfsOptions::FromUri(uri));
+    if (out_path != nullptr) {
+      *out_path = uri.path();
+    }
     ARROW_ASSIGN_OR_RAISE(auto hdfs, HadoopFileSystem::Make(options));
     return hdfs;
 #else
     return Status::NotImplemented("Got HDFS URI but Arrow compiled without HDFS support");
 #endif
   }
-  if (fsuri.scheme == "s3") {
+  if (scheme == "s3") {
 #ifdef ARROW_S3
     RETURN_NOT_OK(EnsureS3Initialized());
-    ARROW_ASSIGN_OR_RAISE(auto options, S3Options::FromUri(fsuri.uri, out_path));
+    ARROW_ASSIGN_OR_RAISE(auto options, S3Options::FromUri(uri, out_path));
     ARROW_ASSIGN_OR_RAISE(auto s3fs, S3FileSystem::Make(options));
     return s3fs;
 #else
@@ -443,13 +560,12 @@ Result<std::shared_ptr<FileSystem>> FileSystemFromUriReal(const FileSystemUri& f
 #endif
   }
 
-  // Other filesystems below do not have an absolute / relative path distinction,
-  // normalize path by removing leading slash.
-  // XXX perhaps each filesystem should have a path normalization method?
-  if (out_path != nullptr) {
-    *out_path = std::string(RemoveLeadingSlash(*out_path));
-  }
-  if (fsuri.scheme == "mock") {
+  if (scheme == "mock") {
+    // MockFileSystem does not have an absolute / relative path distinction,
+    // normalize path by removing leading slash.
+    if (out_path != nullptr) {
+      *out_path = std::string(RemoveLeadingSlash(uri.path()));
+    }
     return std::make_shared<internal::MockFileSystem>(internal::CurrentTimePoint());
   }
 
@@ -466,17 +582,24 @@ Result<std::shared_ptr<FileSystem>> FileSystemFromUri(const std::string& uri_str
 
 Result<std::shared_ptr<FileSystem>> FileSystemFromUriOrPath(const std::string& uri_string,
                                                             std::string* out_path) {
-  ARROW_ASSIGN_OR_RAISE(auto fsuri, ParseFileSystemUriOrPath(uri_string));
-  auto maybe_fs = FileSystemFromUriReal(fsuri, uri_string, out_path);
-  if (maybe_fs.ok()) {
-    return maybe_fs;
+  if (internal::DetectAbsolutePath(uri_string)) {
+    // Normalize path separators
+    if (out_path != nullptr) {
+      *out_path = ToSlashes(uri_string);
+    }
+    return std::make_shared<LocalFileSystem>();
   }
-  return Status::Invalid("Expected URI or absolute local path, got '", uri_string, "'");
+  return FileSystemFromUri(uri_string, out_path);
 }
 
 Status FileSystemFromUri(const std::string& uri, std::shared_ptr<FileSystem>* out_fs,
                          std::string* out_path) {
   return FileSystemFromUri(uri, out_path).Value(out_fs);
+}
+
+Status Initialize(const FileSystemGlobalOptions& options) {
+  internal::global_options = options;
+  return Status::OK();
 }
 
 }  // namespace fs

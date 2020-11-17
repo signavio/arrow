@@ -16,7 +16,7 @@
 # under the License.
 
 
-cdef class Tensor:
+cdef class Tensor(_Weakrefable):
     """
     A n-dimensional array a.k.a Tensor.
     """
@@ -126,7 +126,10 @@ strides: {0.strides}""".format(self)
         buffer.suboffsets = NULL
 
 
-cdef class SparseCOOTensor:
+ctypedef CSparseCOOIndex* _CSparseCOOIndexPtr
+
+
+cdef class SparseCOOTensor(_Weakrefable):
     """
     A sparse COO tensor.
     """
@@ -199,7 +202,18 @@ shape: {0.shape}""".format(self)
             for x in dim_names:
                 c_dim_names.push_back(tobytes(x))
 
-        coords = np.vstack([obj.row, obj.col]).T
+        row = obj.row
+        col = obj.col
+
+        # When SciPy's coo_matrix has canonical format, its indices matrix is
+        # sorted in column-major order.  As Arrow's SparseCOOIndex is sorted
+        # in row-major order if it is canonical, we must sort indices matrix
+        # into row-major order to keep its canonicalness, here.
+        if obj.has_canonical_format:
+            order = np.lexsort((col, row))  # sort in row-major order
+            row = row[order]
+            col = col[order]
+        coords = np.vstack([row, col]).T
         coords = np.require(coords, dtype='i8', requirements='C')
 
         check_status(NdarraysToSparseCOOTensor(c_default_memory_pool(),
@@ -270,8 +284,15 @@ shape: {0.shape}""".format(self)
                                               &out_data, &out_coords))
         data = PyObject_to_object(out_data)
         coords = PyObject_to_object(out_coords)
-        result = coo_matrix((data[:, 0], (coords[:, 0], coords[:, 1])),
-                            shape=self.shape)
+        row, col = coords[:, 0], coords[:, 1]
+        result = coo_matrix((data[:, 0], (row, col)), shape=self.shape)
+
+        # As the description in from_scipy above, we sorted indices matrix
+        # in row-major order if SciPy's coo_matrix has canonical format.
+        # So, we must call sum_duplicates() to make the result coo_matrix
+        # has canonical format.
+        if self.has_canonical_format:
+            result.sum_duplicates()
         return result
 
     def to_pydata_sparse(self):
@@ -295,7 +316,8 @@ shape: {0.shape}""".format(self)
         """
 
         cdef shared_ptr[CTensor] ctensor
-        check_status(self.stp.ToTensor(&ctensor))
+        with nogil:
+            ctensor = GetResultValue(self.stp.ToTensor())
 
         return pyarrow_wrap_tensor(ctensor)
 
@@ -339,8 +361,17 @@ shape: {0.shape}""".format(self)
     def non_zero_length(self):
         return self.stp.non_zero_length()
 
+    @property
+    def has_canonical_format(self):
+        cdef:
+            _CSparseCOOIndexPtr csi
 
-cdef class SparseCSRMatrix:
+        csi = <_CSparseCOOIndexPtr>(self.stp.sparse_index().get())
+        if csi != nullptr:
+            return csi.is_canonical()
+        return True
+
+cdef class SparseCSRMatrix(_Weakrefable):
     """
     A sparse CSR matrix.
     """
@@ -479,7 +510,7 @@ shape: {0.shape}""".format(self)
         """
         cdef shared_ptr[CTensor] ctensor
         with nogil:
-            check_status(self.stp.ToTensor(&ctensor))
+            ctensor = GetResultValue(self.stp.ToTensor())
 
         return pyarrow_wrap_tensor(ctensor)
 
@@ -523,7 +554,7 @@ shape: {0.shape}""".format(self)
     def non_zero_length(self):
         return self.stp.non_zero_length()
 
-cdef class SparseCSCMatrix:
+cdef class SparseCSCMatrix(_Weakrefable):
     """
     A sparse CSC matrix.
     """
@@ -605,8 +636,9 @@ shape: {0.shape}""".format(self)
         indices = np.require(obj.indices, dtype='i8')
 
         check_status(NdarraysToSparseCSCMatrix(c_default_memory_pool(),
-                     obj.data, indptr, indices, c_shape,
-                     c_dim_names, &csparse_tensor))
+                                               obj.data, indptr, indices,
+                                               c_shape, c_dim_names,
+                                               &csparse_tensor))
         return pyarrow_wrap_sparse_csc_matrix(csparse_tensor)
 
     @staticmethod
@@ -646,7 +678,8 @@ shape: {0.shape}""".format(self)
         cdef PyObject* out_indices
 
         check_status(SparseCSCMatrixToNdarray(self.sp_sparse_tensor, self,
-                     &out_data, &out_indptr, &out_indices))
+                                              &out_data, &out_indptr,
+                                              &out_indices))
 
         data = PyObject_to_object(out_data)
         indptr = PyObject_to_object(out_indptr)
@@ -661,7 +694,7 @@ shape: {0.shape}""".format(self)
 
         cdef shared_ptr[CTensor] ctensor
         with nogil:
-            check_status(self.stp.ToTensor(&ctensor))
+            ctensor = GetResultValue(self.stp.ToTensor())
 
         return pyarrow_wrap_tensor(ctensor)
 
@@ -706,7 +739,7 @@ shape: {0.shape}""".format(self)
         return self.stp.non_zero_length()
 
 
-cdef class SparseCSFTensor:
+cdef class SparseCSFTensor(_Weakrefable):
     """
     A sparse CSF tensor.
     """
@@ -814,7 +847,7 @@ shape: {0.shape}""".format(self)
 
         cdef shared_ptr[CTensor] ctensor
         with nogil:
-            check_status(self.stp.ToTensor(&ctensor))
+            ctensor = GetResultValue(self.stp.ToTensor())
 
         return pyarrow_wrap_tensor(ctensor)
 

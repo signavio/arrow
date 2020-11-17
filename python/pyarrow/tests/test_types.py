@@ -17,11 +17,16 @@
 
 from collections import OrderedDict
 from collections.abc import Iterator
+import datetime
+import sys
 
 import pickle
 import pytest
+import pytz
 import hypothesis as h
 import hypothesis.strategies as st
+import hypothesis.extra.pytz as tzst
+import weakref
 
 import numpy as np
 import pyarrow as pa
@@ -48,6 +53,7 @@ def get_many_types():
         pa.float32(),
         pa.float64(),
         pa.decimal128(19, 4),
+        pa.decimal256(76, 38),
         pa.string(),
         pa.binary(),
         pa.binary(10),
@@ -112,9 +118,28 @@ def test_is_null():
     assert not types.is_null(pa.list_(pa.int32()))
 
 
+def test_null_field_may_not_be_non_nullable():
+    # ARROW-7273
+    with pytest.raises(ValueError):
+        pa.field('f0', pa.null(), nullable=False)
+
+
 def test_is_decimal():
-    assert types.is_decimal(pa.decimal128(19, 4))
-    assert not types.is_decimal(pa.int32())
+    decimal128 = pa.decimal128(19, 4)
+    decimal256 = pa.decimal256(76, 38)
+    int32 = pa.int32()
+
+    assert types.is_decimal(decimal128)
+    assert types.is_decimal(decimal256)
+    assert not types.is_decimal(int32)
+
+    assert types.is_decimal128(decimal128)
+    assert not types.is_decimal128(decimal256)
+    assert not types.is_decimal128(int32)
+
+    assert not types.is_decimal256(decimal128)
+    assert types.is_decimal256(decimal256)
+    assert not types.is_decimal256(int32)
 
 
 def test_is_list():
@@ -245,6 +270,130 @@ def test_is_primitive():
     assert not types.is_primitive(pa.list_(pa.int32()))
 
 
+@pytest.mark.parametrize(('tz', 'expected'), [
+    (pytz.utc, 'UTC'),
+    (pytz.timezone('Europe/Paris'), 'Europe/Paris'),
+    # StaticTzInfo.tzname returns with '-09' so we need to infer the timezone's
+    # name from the tzinfo.zone attribute
+    (pytz.timezone('Etc/GMT-9'), 'Etc/GMT-9'),
+    (pytz.FixedOffset(180), '+03:00'),
+    (datetime.timezone.utc, 'UTC' if sys.version_info >= (3, 6) else '+00:00'),
+    (datetime.timezone(datetime.timedelta(hours=1, minutes=30)), '+01:30')
+])
+def test_tzinfo_to_string(tz, expected):
+    assert pa.lib.tzinfo_to_string(tz) == expected
+
+
+def test_tzinfo_to_string_errors():
+    msg = "Not an instance of datetime.tzinfo"
+    with pytest.raises(TypeError):
+        pa.lib.tzinfo_to_string("Europe/Budapest")
+
+    if sys.version_info >= (3, 8):
+        # before 3.8 it was only possible to create timezone objects with whole
+        # number of minutes
+        tz = datetime.timezone(datetime.timedelta(hours=1, seconds=30))
+        msg = "Offset must represent whole number of minutes"
+        with pytest.raises(ValueError, match=msg):
+            pa.lib.tzinfo_to_string(tz)
+
+
+@h.given(tzst.timezones())
+def test_pytz_timezone_roundtrip(tz):
+    timezone_string = pa.lib.tzinfo_to_string(tz)
+    timezone_tzinfo = pa.lib.string_to_tzinfo(timezone_string)
+    assert timezone_tzinfo == tz
+
+
+def test_convert_custom_tzinfo_objects_to_string():
+    class CorrectTimezone1(datetime.tzinfo):
+        """
+        Conversion is using utcoffset()
+        """
+
+        def tzname(self, dt):
+            return None
+
+        def utcoffset(self, dt):
+            return datetime.timedelta(hours=-3, minutes=30)
+
+    class CorrectTimezone2(datetime.tzinfo):
+        """
+        Conversion is using tzname()
+        """
+
+        def tzname(self, dt):
+            return "+03:00"
+
+        def utcoffset(self, dt):
+            return datetime.timedelta(hours=3)
+
+    class BuggyTimezone1(datetime.tzinfo):
+        """
+        Unable to infer name or offset
+        """
+
+        def tzname(self, dt):
+            return None
+
+        def utcoffset(self, dt):
+            return None
+
+    class BuggyTimezone2(datetime.tzinfo):
+        """
+        Wrong offset type
+        """
+
+        def tzname(self, dt):
+            return None
+
+        def utcoffset(self, dt):
+            return "one hour"
+
+    class BuggyTimezone3(datetime.tzinfo):
+        """
+        Wrong timezone name type
+        """
+
+        def tzname(self, dt):
+            return 240
+
+        def utcoffset(self, dt):
+            return None
+
+    assert pa.lib.tzinfo_to_string(CorrectTimezone1()) == "-02:30"
+    assert pa.lib.tzinfo_to_string(CorrectTimezone2()) == "+03:00"
+
+    msg = (r"Object returned by tzinfo.utcoffset\(None\) is not an instance "
+           r"of datetime.timedelta")
+    for wrong in [BuggyTimezone1(), BuggyTimezone2(), BuggyTimezone3()]:
+        with pytest.raises(ValueError, match=msg):
+            pa.lib.tzinfo_to_string(wrong)
+
+
+@pytest.mark.parametrize(('string', 'expected'), [
+    ('UTC', pytz.utc),
+    ('Europe/Paris', pytz.timezone('Europe/Paris')),
+    ('+03:00', pytz.FixedOffset(180)),
+    ('+01:30', pytz.FixedOffset(90)),
+    ('-02:00', pytz.FixedOffset(-120))
+])
+def test_string_to_tzinfo(string, expected):
+    result = pa.lib.string_to_tzinfo(string)
+    assert result == expected
+
+
+@pytest.mark.parametrize('tz,name', [
+    (pytz.FixedOffset(90), '+01:30'),
+    (pytz.FixedOffset(-90), '-01:30'),
+    (pytz.utc, 'UTC'),
+    (pytz.timezone('America/New_York'), 'America/New_York')
+])
+def test_timezone_string_roundtrip(tz, name):
+    assert pa.lib.tzinfo_to_string(tz) == name
+    assert pa.lib.string_to_tzinfo(name) == tz
+
+
 def test_timestamp():
     for unit in ('s', 'ms', 'us', 'ns'):
         for tz in (None, 'UTC', 'Europe/Paris'):
@@ -338,7 +487,7 @@ def test_struct_type():
     ]
     ty = pa.struct(fields)
 
-    assert len(ty) == ty.num_children == 3
+    assert len(ty) == ty.num_fields == 3
     assert list(ty) == fields
     assert ty[0].name == 'a'
     assert ty[2].type == pa.int32()
@@ -402,8 +551,8 @@ def test_struct_duplicate_field_names():
 
 def test_union_type():
     def check_fields(ty, fields):
-        assert ty.num_children == len(fields)
-        assert [ty[i] for i in range(ty.num_children)] == fields
+        assert ty.num_fields == len(fields)
+        assert [ty[i] for i in range(ty.num_fields)] == fields
 
     fields = [pa.field('x', pa.list_(pa.int32())),
               pa.field('y', pa.binary())]
@@ -493,6 +642,18 @@ def test_types_picklable():
         assert pickle.loads(data) == ty
 
 
+def test_types_weakref():
+    for ty in get_many_types():
+        wr = weakref.ref(ty)
+        assert wr() is not None
+        # Note that ty may be a singleton and therefore outlive this loop
+
+    wr = weakref.ref(pa.int32())
+    assert wr() is not None  # singleton
+    wr = weakref.ref(pa.list_(pa.int32()))
+    assert wr() is None  # not a singleton
+
+
 def test_fields_hashable():
     in_dict = {}
     fields = [pa.field('a', pa.int32()),
@@ -505,6 +666,14 @@ def test_fields_hashable():
     assert len(in_dict) == len(fields)
     for i, field in enumerate(fields):
         assert in_dict[field] == i
+
+
+def test_fields_weakrefable():
+    field = pa.field('a', pa.int32())
+    wr = weakref.ref(field)
+    assert wr() is not None
+    del field
+    assert wr() is None
 
 
 @pytest.mark.parametrize('t,check_func', [
@@ -540,6 +709,7 @@ def test_bit_width():
                          (pa.uint32(), 32),
                          (pa.float16(), 16),
                          (pa.decimal128(19, 4), 128),
+                         (pa.decimal256(76, 38), 256),
                          (pa.binary(42), 42 * 8)]:
         assert ty.bit_width == expected
     for ty in [pa.binary(), pa.string(), pa.list_(pa.int16())]:
@@ -557,6 +727,10 @@ def test_decimal_properties():
     assert ty.byte_width == 16
     assert ty.precision == 19
     assert ty.scale == 4
+    ty = pa.decimal256(76, 38)
+    assert ty.byte_width == 32
+    assert ty.precision == 76
+    assert ty.scale == 38
 
 
 def test_decimal_overflow():
@@ -564,7 +738,13 @@ def test_decimal_overflow():
     pa.decimal128(38, 0)
     for i in (0, -1, 39):
         with pytest.raises(ValueError):
-            pa.decimal128(39, 0)
+            pa.decimal128(i, 0)
+
+    pa.decimal256(1, 0)
+    pa.decimal256(76, 0)
+    for i in (0, -1, 77):
+        with pytest.raises(ValueError):
+            pa.decimal256(i, 0)
 
 
 def test_type_equality_operators():
@@ -638,7 +818,7 @@ def test_key_value_metadata():
     assert list(md.keys()) == [k for k, _ in expected]
     assert list(md.values()) == [v for _, v in expected]
 
-    # first occurence
+    # first occurrence
     assert md['a'] == b'alpha'
     assert md['b'] == b'beta'
     assert md.get_all('a') == [b'alpha', b'Alpha', b'ALPHA']

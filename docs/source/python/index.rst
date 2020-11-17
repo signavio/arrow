@@ -36,6 +36,7 @@ files into Arrow structures.
    install
    memory
    data
+   compute
    ipc
    filesystems
    filesystems_deprecated
@@ -47,6 +48,7 @@ files into Arrow structures.
    feather
    json
    parquet
+   dataset
    cuda
    extending_types
    extending
